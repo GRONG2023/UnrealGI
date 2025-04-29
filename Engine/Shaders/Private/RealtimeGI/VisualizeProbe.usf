@@ -1,0 +1,100 @@
+#include "../Common.ush"
+#include "../DeferredShadingCommon.ush"
+#include "../GammaCorrectionCommon.ush"
+
+#include "RealtimeGICommon.ush"
+#include "ProbeVolumeCommon.ush"
+#include "VoxelLightingParameters.ush"
+
+#define VISUALIZE_IRRADIANCE_PROBE (0)
+#define VISUALIZE_RADIANCE_PROBE (1)
+
+int VisualizeMode;
+
+struct FVSToPS
+{
+	nointerpolation int3 ProbeVolumeAccessIndex : TEXCOORD0;
+    nointerpolation int3 ProbeClipmapAccessIndex : TEXCOORD1;
+    nointerpolation int3 ProbeIndex3D : TEXCOORD2;
+    float3 RayDirection : TEXCOORD3;
+}; 
+
+void VisualizeProbeVS(
+	in float4 InPosition : ATTRIBUTE0,
+	in uint InstanceId : SV_InstanceID, 
+    out FVSToPS Output,
+	out float4 OutPosition : SV_POSITION
+	)
+{
+    FVoxelCascadeInfo CascadeInfo = ResolveCascadeInfo();
+    FVolumeInfo VolumeInfo = ResolveVolumeInfo(CascadeInfo, ClipIndex);
+
+    int3 NumProbesInXYZ = VolumeInfo.Resolution / VOXEL_BLOCK_SIZE;
+    int3 ProbeIndex3D = Index1DTo3D(InstanceId, NumProbesInXYZ);
+
+    int3 ScrollingInBlock = VolumeInfo.Scrolling / VOXEL_BLOCK_SIZE;
+    int3 ProbeVolumeAccessIndex = (ProbeIndex3D + ScrollingInBlock) % NumProbesInXYZ;
+    int3 ProbeClipmapAccessIndex = ProbeVolumeAccessIndex + int3(0, 0, NumProbesInXYZ.z * ClipIndex);
+
+    float3 ProbePositionBase = CalcVoxelCenterPos(ProbeIndex3D, NumProbesInXYZ, VolumeInfo.Center, VolumeInfo.CoverRange);
+    float4 ProbePositionOffsetRaw = ProbeOffsetClipmap[ProbeClipmapAccessIndex];
+    float3 ProbePositionOffset = DecodeProbePositionOffset(ProbePositionOffsetRaw.xyz, VolumeInfo.CoverRange / float3(VolumeInfo.Resolution));
+    float3 ProbePosition = ProbePositionBase;
+    ProbePosition += ProbePositionOffset;
+
+    float ProbeSizeScale = VolumeInfo.VoxelCellSize * 0.25;
+    float3 LocalPosition = InPosition.xyz;
+    float3 WorldPosition = ProbePosition + LocalPosition * ProbeSizeScale * (ClipIndex * 0.25 + 1);
+    if(ProbePositionOffsetRaw.w == 0)
+    {
+        WorldPosition *= 0.0;
+    }
+
+    Output.ProbeVolumeAccessIndex = ProbeVolumeAccessIndex;
+    Output.ProbeClipmapAccessIndex = ProbeClipmapAccessIndex;
+    Output.ProbeIndex3D = ProbeIndex3D;
+    Output.RayDirection = normalize(LocalPosition);
+	OutPosition = mul(float4(WorldPosition.xyz, 1), View.WorldToClip);
+}
+
+void VisualizeProbePS(
+    in FVSToPS Input,
+	out float4 OutColor : SV_Target0
+)
+{
+    FVoxelCascadeInfo CascadeInfo = ResolveCascadeInfo();
+    FVolumeInfo VolumeInfo = ResolveVolumeInfo(CascadeInfo, ClipIndex);
+    
+    int3 NumProbesInXYZ = VolumeInfo.Resolution / VOXEL_BLOCK_SIZE;
+    float3 RayDirection = normalize(Input.RayDirection);
+    float3 Color = float3(0, 0, 0);
+
+    if(VisualizeMode == VISUALIZE_IRRADIANCE_PROBE)
+    {
+        int3 ReadIndexBase = Input.ProbeClipmapAccessIndex * int3(7, 1, 1);
+        FThreeBandSHVectorRGB IrradianceSH;
+        IrradianceSH.R.V0 = IrradianceProbeClipmap[ReadIndexBase + float3(0, 0, 0)];
+        IrradianceSH.R.V1 = IrradianceProbeClipmap[ReadIndexBase + float3(1, 0, 0)];
+        IrradianceSH.G.V0 = IrradianceProbeClipmap[ReadIndexBase + float3(2, 0, 0)];
+        IrradianceSH.G.V1 = IrradianceProbeClipmap[ReadIndexBase + float3(3, 0, 0)];
+        IrradianceSH.B.V0 = IrradianceProbeClipmap[ReadIndexBase + float3(4, 0, 0)];
+        IrradianceSH.B.V1 = IrradianceProbeClipmap[ReadIndexBase + float3(5, 0, 0)];
+
+        float4 temp = IrradianceProbeClipmap[ReadIndexBase + float3(6, 0, 0)];
+        IrradianceSH.R.V2 = temp.x;
+        IrradianceSH.G.V2 = temp.y;
+        IrradianceSH.B.V2 = temp.z;
+
+        FThreeBandSHVector DiffuseTransferSH = CalcDiffuseTransferSH3(RayDirection, 1);
+        Color = max(float3(0,0,0), DotSH3(IrradianceSH, DiffuseTransferSH)) / PI;
+    }
+
+    if(VisualizeMode == VISUALIZE_RADIANCE_PROBE)
+    {
+        int ProbeIdInAtlas = RadianceProbeIdClipmap[Input.ProbeClipmapAccessIndex];
+        float2 UVInAtlas = RadianceProbeAddressMapping(RayDirection, ProbeIdInAtlas, NumRadianceProbesInAtlasXY, RadianceProbeResolution);
+        Color = RadianceProbeAtlas.SampleLevel(LinearSampler, UVInAtlas, 0).rgb;
+    }
+
+	OutColor = float4(Color, 1);
+}

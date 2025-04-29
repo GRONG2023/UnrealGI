@@ -1,0 +1,152 @@
+#pragma once
+
+// https://blog.demofox.org/2020/05/25/casual-shadertoy-path-tracing-1-basic-camera-diffuse-emissive/
+uint GetSimpleRandomSeed(float2 pixelIndex, uint frameCounter)
+{
+	return uint(
+		uint(pixelIndex.x)  * uint(1973) + 
+		uint(pixelIndex.y) * uint(9277) + 
+		uint(frameCounter) * uint(26699)
+	) | uint(1);
+}
+
+uint wang_hash(inout uint seed) 
+{
+    seed = uint(seed ^ uint(61)) ^ uint(seed >> uint(16));
+    seed *= uint(9);
+    seed = seed ^ (seed >> 4);
+    seed *= uint(0x27d4eb2d);
+    seed = seed ^ (seed >> 15);
+    return seed;
+}
+ 
+float SimpleRandom(inout uint seed) 
+{
+    return float(wang_hash(seed)) / 4294967296.0;
+}
+
+// ---------------------------------------- (^^_) ---------------------------------------- //
+
+// https://d1qx31qr3h6wln.cloudfront.net/publications/ReSTIR%20GI.pdf
+struct FReservoirSample
+{
+    float3 Radiance;
+    float3 RayStart;
+    float3 RayStartNormal;
+    float3 RayEnd;
+    float3 RayEndNormal;
+};
+
+struct FReservoir
+{
+    FReservoirSample CurrentSample;
+    float WeightSum;        // w in paper
+    float NumSamples;       // M in paper
+    float EstimatorWeight;  // W in paper
+};
+
+#define TARGET_PDF_WITH_COSINE 1
+
+// get target pdf in specific position and surface normal
+float EvaluateTargetPDF(in FReservoirSample Sample, float3 EvaluatePointPosition, float3 EvaluatePointNormal)
+{
+    float CosineWeight = 1.0;
+
+    // note: 
+    // if using next event estimator (NEE) to trace both direct and indirect lighting, we should follow the advice of paper and don't use cosine weight
+    // but we only trace indirect lighting here, so we consider cosine weight to get more smooth result
+#if TARGET_PDF_WITH_COSINE
+    float3 RayDirection = normalize(Sample.RayEnd - EvaluatePointPosition); // connect the sample with evaluate point
+    CosineWeight = max(dot(RayDirection, EvaluatePointNormal), 0.1);        // clamp to prevent firefly
+#endif
+
+    return dot(Sample.Radiance, (0.33).xxx) * CosineWeight;
+}
+
+#define LengthSquare(x) (dot(x, x))
+
+void UpdateReservoir(inout FReservoir Reservoir, in FReservoirSample NewSample, float SelectionWeight, float RandomNumber)
+{
+    // accumulate weight
+    Reservoir.WeightSum += SelectionWeight;
+    Reservoir.NumSamples += 1;
+
+    // randomly accept or discard sample
+    if(RandomNumber < (SelectionWeight / Reservoir.WeightSum))
+    {
+        Reservoir.CurrentSample = NewSample;
+    }
+}
+
+void ClampSampleNumAndUpdateEstimatorWeight(inout FReservoir Reservoir, float3 EvaluatePointPosition, float3 EvaluatePointNormal, float MaxSampleNum)
+{
+    // clamp sample num
+    if(Reservoir.NumSamples > MaxSampleNum)
+    {
+        Reservoir.WeightSum *= MaxSampleNum / float(Reservoir.NumSamples);
+        Reservoir.NumSamples = MaxSampleNum;
+    }
+
+    // update estimator weight
+    float TargetPDF = EvaluateTargetPDF(Reservoir.CurrentSample, EvaluatePointPosition, EvaluatePointNormal);
+    Reservoir.EstimatorWeight = Reservoir.WeightSum / (Reservoir.NumSamples * TargetPDF);   // W = w / (M * p_hat) in paper
+}
+
+float2 DirectionToOctahedron( float3 N )
+{
+	N.xy /= dot( 1, abs(N) );
+	if( N.z <= 0 )
+	{
+		N.xy = ( 1 - abs(N.yx) ) * ( N.xy >= 0 ? float2(1,1) : float2(-1,-1) );
+	}
+	return N.xy;
+}
+
+float3 OctahedronToDirection( float2 Oct )
+{
+	float3 N = float3( Oct, 1 - dot( 1, abs(Oct) ) );
+	if( N.z < 0 )
+	{
+		N.xy = ( 1 - abs(N.yx) ) * ( N.xy >= 0 ? float2(1,1) : float2(-1,-1) );
+	}
+	return normalize(N);
+}
+
+FReservoir DecodeReservoirData(in float4 RawData[4])
+{
+    FReservoir Reservoir = (FReservoir)0;
+
+    Reservoir.WeightSum = RawData[0].x;
+    Reservoir.NumSamples = RawData[0].y;
+    Reservoir.EstimatorWeight = RawData[0].z;
+
+    Reservoir.CurrentSample.Radiance = RawData[1].xyz;
+
+    Reservoir.CurrentSample.RayStart = RawData[2].xyz;
+    Reservoir.CurrentSample.RayStartNormal = OctahedronToDirection(float2(RawData[2].w, RawData[3].w));
+    
+    Reservoir.CurrentSample.RayEnd = RawData[3].xyz;
+    Reservoir.CurrentSample.RayEndNormal = OctahedronToDirection(float2(RawData[0].w, RawData[1].w));
+
+    return Reservoir;
+}
+
+void EncodeReservoirData(in FReservoir Reservoir, out float4 RawData[4])
+{
+    float2 RayStartNormalOct = DirectionToOctahedron(Reservoir.CurrentSample.RayStartNormal);
+    float2 RayEndNormalOct = DirectionToOctahedron(Reservoir.CurrentSample.RayEndNormal);
+
+    RawData[0].x = Reservoir.WeightSum;
+    RawData[0].y = Reservoir.NumSamples;
+    RawData[0].z = Reservoir.EstimatorWeight;
+    RawData[0].w = RayEndNormalOct.x;
+
+    RawData[1].xyz = Reservoir.CurrentSample.Radiance;
+    RawData[1].w = RayEndNormalOct.y;
+
+    RawData[2].xyz = Reservoir.CurrentSample.RayStart;
+    RawData[2].w = RayStartNormalOct.x;
+
+    RawData[3].xyz = Reservoir.CurrentSample.RayEnd;
+    RawData[3].w = RayStartNormalOct.y;
+}

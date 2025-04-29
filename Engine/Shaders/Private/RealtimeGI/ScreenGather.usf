@@ -1,0 +1,1401 @@
+#include "../Common.ush"	
+#include "../ScreenPass.ush"
+#include "../PostProcessCommon.ush"				
+#include "../DeferredShadingCommon.ush"
+#include "../SceneTextureParameters.ush"
+#include "../MonteCarlo.ush"
+#include "../SSRT/SSRTRayCast.ush"
+#include "../BRDF.ush"
+
+#include "RealtimeGICommon.ush"
+#include "VoxelRayTracing.ush"
+#include "VoxelLightingParameters.ush"
+#include "ReservoirSampling.ush"
+
+// ---------------------------------------- (^^_) ---------------------------------------- //
+
+#ifndef TRACE_SPECULAR_RAY
+#define TRACE_SPECULAR_RAY 0
+#endif
+
+#define SPECULAR_USE_CLAMPED_BRDF 1
+#define SPECULAR_BRDF_BIAS (0.6f)
+
+#define FORCE_VOXEL_TRACE 0
+
+#define INDEX_CENTER (0)
+static const int2 Offsets3x3[9] = { int2(0, 0), int2(-1, 0), int2(1, 0), int2(0, -1), int2(0, 1), int2(-1, -1), int2(-1, 1), int2(1, -1), int2(1, 1) };
+static const float GaussianWeights3x3[9] = { 0.25, 0.0625, 0.125, 0.0625, 0.125, 0.125, 0.0625, 0.125, 0.0625 };
+
+uint FrameNumber;
+int2 ScreenGatherRTSize;
+
+SamplerState PointSampler;
+Texture2D<float4> NormalDepthTexture;
+Texture2D<float4> NormalDepthHistory;
+
+float GetPreExposure()
+{
+#if USE_PREEXPOSURE
+    return View.PreExposure;
+#endif
+    return 1.0f;
+}
+
+float3 ReconstructWorldPositionFromDepth(float2 UV, float RawDepth)
+{
+    float SceneDepth = ConvertFromDeviceZ(RawDepth);
+	float2 ScreenPosition = (UV - View.ScreenPositionScaleBias.wz) / View.ScreenPositionScaleBias.xy;
+	float4 HomogeneousWorldPosition = mul(float4(ScreenPosition * SceneDepth, SceneDepth, 1), View.ScreenToWorld);
+	float3 WorldPosition = HomogeneousWorldPosition.xyz / HomogeneousWorldPosition.w;
+
+	return WorldPosition;
+}
+
+float3 WorldToScreen(float3 WorldPosition)
+{
+    float4 ClipPos = mul(float4(WorldPosition, 1), View.WorldToClip);
+    ClipPos.xyz /= ClipPos.w;
+
+    float2 SceneUV = float2((ClipPos.x + 1) * 0.5, 1 - (ClipPos.y + 1) * 0.5);
+	SceneUV = ViewportUVToBufferUV(SceneUV);
+
+    return float3(SceneUV, ClipPos.z);
+}
+
+float4 SetupPixelRandom(float2 UV)
+{
+    uint2 RandomSeed1 = Rand3DPCG16(uint3(UV * 1919.114, FrameNumber)).xy;
+    uint2 RandomSeed2 = Rand3DPCG16(uint3(UV * 810.514, FrameNumber)).xy;
+    float2 E1 = Hammersley16(0, 1, RandomSeed1);
+    float2 E2 = Hammersley16(0, 1, RandomSeed2);
+    return float4(E1, E2);
+}
+
+float4 SetupDiffuseRay(float3 WorldNormal, float2 E)
+{
+    float3x3 TangentBasis = GetTangentBasis(WorldNormal);
+#if TARGET_PDF_WITH_COSINE
+    float4 TangentL = CosineSampleHemisphere(E);
+#else
+    float4 TangentL = UniformSampleHemisphere(E);
+#endif
+    float3 RayDirection = mul(TangentL.xyz, TangentBasis);
+    float SamplePDF = max(TangentL.w, 1e-3);
+    
+    return float4(RayDirection, SamplePDF);
+}
+
+float4 SetupSpecularRay(float3 WorldPosition, float3 WorldNormal, float2 E, float Roughness)
+{
+    // note : we clamp brdf to focus ray approach mirror direction, reduce niose in high roughness
+    // note2: cause we using ratio estimator (a fancy weight sum) in specular resolve pass
+    //        so we don't force integrate of PDF to be 1.0 (PDF will be normalized at resolve pass)
+#if SPECULAR_USE_CLAMPED_BRDF
+    E.x *= 1.0 - SPECULAR_BRDF_BIAS;
+#endif
+
+    float3x3 TangentBasis = GetTangentBasis(WorldNormal);
+    float3 V = normalize(View.WorldCameraOrigin - WorldPosition);
+    float3 TangentV = mul(TangentBasis, V);
+
+    float a2 = Pow4(Roughness);
+    float4 TangentH = ImportanceSampleVisibleGGX(UniformSampleDisk(E), a2, TangentV);
+    float3 H = mul(TangentH.xyz, TangentBasis);
+    
+    float SamplePDF = max(TangentH.w, 1e-3);
+	float3 RayDirection = 2 * dot(V, H) * H - V;
+    // RayDirection = reflect(V, WorldNormal); // for debug
+
+    return float4(RayDirection, SamplePDF);
+}
+
+float2 ReprojectPixel(float3 UVz)
+{
+    // note: this code in SSR is wrong, should use ScreenPositionScaleBias.wz instead of zw
+    /*
+    float2 SampleUV;
+    float Vignette;
+    ReprojectHit(View.ScreenPositionScaleBias, UVz, SampleUV, Vignette);
+    */
+
+    float2 ThisScreen = (UVz.xy - View.ScreenPositionScaleBias.wz) / View.ScreenPositionScaleBias.xy;
+	float4 ThisClip = float4( ThisScreen, UVz.z, 1 );
+	float4 PrevClip = mul( ThisClip, View.ClipToPrevClip );
+	float2 PrevScreen = PrevClip.xy / PrevClip.w;
+	float2 PrevUV = PrevScreen.xy * View.ScreenPositionScaleBias.xy + View.ScreenPositionScaleBias.wz;
+    return PrevUV;
+}
+
+struct FPixelContext
+{
+    float3 WorldPosition;
+    float3 WorldNormal;
+    float RawDepth;
+    float SceneDepth;
+    float4 RandomVector;
+    float4 RayDirection;
+    float Roughness;
+};
+
+// per pixel ray trace info shared by multiple pass
+FPixelContext ResolvePixelContext(float2 UV)
+{
+    FPixelContext PixelCtx = (FPixelContext)0;
+
+    float4 NormalDepth = NormalDepthTexture.SampleLevel(PointSampler, UV, 0);
+    PixelCtx.RawDepth = NormalDepth.w;
+    PixelCtx.SceneDepth = ConvertFromDeviceZ(PixelCtx.RawDepth);
+    PixelCtx.WorldPosition = ReconstructWorldPositionFromDepth(UV, PixelCtx.RawDepth);
+    PixelCtx.WorldNormal = NormalDepth.rgb * 2 - 1;
+    PixelCtx.RandomVector = SetupPixelRandom(UV);
+    
+#if TRACE_SPECULAR_RAY
+    PixelCtx.Roughness = max(GetGBufferData(UV, true).Roughness, 0.01);
+    PixelCtx.RayDirection = SetupSpecularRay(PixelCtx.WorldPosition, PixelCtx.WorldNormal, PixelCtx.RandomVector.xy, PixelCtx.Roughness);
+#else
+    PixelCtx.RayDirection = SetupDiffuseRay(PixelCtx.WorldNormal, PixelCtx.RandomVector.xy);
+#endif
+
+    return PixelCtx;
+}
+
+float GetPixelPositionAndNormal(float2 UV, inout float3 OutPosition, inout float3 OutNormal)
+{
+    float4 NormalDepth = NormalDepthTexture.SampleLevel(PointSampler, UV, 0);
+    OutPosition = ReconstructWorldPositionFromDepth(UV, NormalDepth.w);
+    OutNormal = NormalDepth.xyz * 2 - 1;
+    return ConvertFromDeviceZ(NormalDepth.w);
+}
+
+#define ClampNaNs(Color) (-min(-Color, 0.0))
+
+#define Luma(Color) (dot(Color, float3(0.2126, 0.7152, 0.0722)))
+
+#define max2(a) (max(a.x, a.y))
+
+// ---------------------------------------- (^^_) ---------------------------------------- //
+
+float2 InputExtentInverse;
+
+// copy from PostProcessAmbientOcclusion.usf
+void NormalDepthDownsamplePS(
+    noperspective float4 UVAndScreenPos : TEXCOORD0, float4 SvPosition : SV_POSITION, 
+    out float4 OutColor0 : SV_Target0,
+    out float4 OutColor1 : SV_Target1)
+{
+    ResolveView();
+
+	float2 UV = UVAndScreenPos.xy;
+	float2 SampleUV[4];
+	SampleUV[0] = UV + float2(-0.5f, -0.5f) * InputExtentInverse;
+	SampleUV[1] = min(UV + float2( 0.5f, -0.5f) * InputExtentInverse, View.BufferBilinearUVMinMax.zw);
+	SampleUV[2] = min(UV + float2(-0.5f,  0.5f) * InputExtentInverse, View.BufferBilinearUVMinMax.zw);
+	SampleUV[3] = min(UV + float2( 0.5f,  0.5f) * InputExtentInverse, View.BufferBilinearUVMinMax.zw);
+
+	float4 Samples[4];
+	for(uint i = 0; i < 4; ++i)
+	{
+		Samples[i].rgb = GetGBufferData(SampleUV[i], true).WorldNormal * 0.5f + 0.5f;
+		Samples[i].a = Texture2DSampleLevel(SceneTexturesStruct.SceneDepthTexture, SceneTexturesStruct_SceneDepthTextureSampler, SampleUV[i], 0).r;
+	}
+	
+	float MaxZ = max( max(Samples[0].a, Samples[1].a), max(Samples[2].a, Samples[3].a));
+
+	float4 AvgColor = 0.0001f;
+	for(uint i = 0; i < 4; ++i)
+    {
+        float DepthA = ConvertFromDeviceZ(Samples[i].a);
+        float DepthB = ConvertFromDeviceZ(MaxZ);
+        float Weight = saturate(1 - abs(DepthA - DepthB) * 0.01);
+        AvgColor += float4(Samples[i].rgb, 1) * Weight;
+    }
+    AvgColor.rgb /= AvgColor.w;
+
+	OutColor0 = float4(AvgColor.rgb, MaxZ);
+    OutColor1 = MaxZ;
+}
+
+// ---------------------------------------- (^^_) ---------------------------------------- //
+
+#ifndef THREADGROUP_SIZE_X
+#define THREADGROUP_SIZE_X 1
+#endif
+
+#ifndef THREADGROUP_SIZE_Y
+#define THREADGROUP_SIZE_Y 1
+#endif
+
+#ifndef THREADGROUP_SIZE_Z
+#define THREADGROUP_SIZE_Z 1
+#endif
+
+#define NUM_THREADS (THREADGROUP_SIZE_X * THREADGROUP_SIZE_Y)
+#define TILE_SIZE uint2(THREADGROUP_SIZE_X, THREADGROUP_SIZE_Y)
+
+float4 HZBUvFactorAndInvFactor;
+
+Texture2D HZB;
+
+Texture2D<float4> SceneColorHistory;
+RWTexture2D<float4> RWInitialSampleRadiance;
+RWTexture2D<float4> RWInitialSampleHitInfo;
+
+RWStructuredBuffer<int> RWVoxelTraceRayCounter;
+RWStructuredBuffer<int2> RWVoxelTraceRayCompactBuffer;
+
+groupshared bool SharedPixelValidMask[NUM_THREADS];
+groupshared bool SharedScreenHitMask[NUM_THREADS];
+groupshared int SharedCompactBufferWriteIndex[NUM_THREADS];
+
+[numthreads(THREADGROUP_SIZE_X, THREADGROUP_SIZE_Y, THREADGROUP_SIZE_Z)]
+void InitialSampleScreenTraceCS(uint3 ThreadId : SV_DispatchThreadID, uint3 GroupThreadId : SV_GroupThreadID, uint3 GroupId : SV_GroupID)
+{
+    ResolveView();
+
+    // 1. do some setup
+    const int GroupThreadIndex = Index2DTo1D(ThreadId.xy % TILE_SIZE, TILE_SIZE);
+    const int2 PixelCoord = clamp(ThreadId.xy, 0, ScreenGatherRTSize - 1);
+    const float2 UV = (float2(PixelCoord) + 0.5) / float2(ScreenGatherRTSize);
+
+    FPixelContext PixelCtx = ResolvePixelContext(UV);
+    const bool IsValidPixel = all(ThreadId.xy < ScreenGatherRTSize) && PixelCtx.RawDepth > 0;
+
+    // 2. trace screen ray
+    const int NumSteps = 32;
+    float3 HitUVz = float3(0, 0, 0);
+    float HitLevel = 0;
+    float3 RayOriginTranslatedWorld = PixelCtx.WorldPosition - View.WorldCameraOrigin;
+
+    bool IsHit = RayCast(
+        HZB, PointSampler,
+        RayOriginTranslatedWorld, PixelCtx.RayDirection,
+        0.05, // roughness 
+        PixelCtx.SceneDepth,
+        NumSteps,
+        PixelCtx.RandomVector.z, // SSRStepOffset
+        HZBUvFactorAndInvFactor, 
+        false, // debug print
+        HitUVz, HitLevel
+    );
+
+#if FORCE_VOXEL_TRACE
+    IsHit = false;
+#endif
+
+    float2 ReprojectRayHitUV = ReprojectPixel(HitUVz);
+    float3 RayEndPosition = ReconstructWorldPositionFromDepth(HitUVz.xy, HitUVz.z);
+    float RayDistance = length(RayEndPosition - PixelCtx.WorldPosition);
+
+    // calculate scene color sample mip level to simulate glossy reflection
+#if TRACE_SPECULAR_RAY && SPECULAR_USE_CLAMPED_BRDF
+    float3 V = normalize(View.WorldCameraOrigin - PixelCtx.WorldPosition);
+    float NdotV = saturate(dot(PixelCtx.WorldNormal, V));
+    float ConeTangent = lerp(0.0, PixelCtx.Roughness * (1.0 - SPECULAR_BRDF_BIAS), NdotV * sqrt(PixelCtx.Roughness));
+    float RayDistanceScreenSpace = length(HitUVz.xy - UV) * max2(ScreenGatherRTSize);
+    HitLevel = clamp(log2(ConeTangent * RayDistanceScreenSpace), 0, 8);
+#endif
+
+    // 3. fetch radiance
+    float3 HitRadiance = float3(0, 0, 0);
+    float3 HitNormal = float3(0, 0, 0);
+    if(IsHit)
+    {
+        HitRadiance = SceneColorHistory.SampleLevel(LinearSampler, ReprojectRayHitUV, HitLevel).rgb;
+        HitNormal = NormalDepthHistory.SampleLevel(PointSampler, ReprojectRayHitUV, 0).rgb * 2 - 1;
+
+        // discard back face hit
+        if(dot(HitNormal, PixelCtx.RayDirection) > 0)
+        {
+            IsHit = false;
+        }
+    }
+
+    if(IsValidPixel)
+    {
+        RWInitialSampleRadiance[PixelCoord] = float4(HitRadiance, IsHit);
+        RWInitialSampleHitInfo[PixelCoord] = float4(HitNormal * 0.5 + 0.5, RayDistance);
+    }
+    else
+    {
+        RWInitialSampleRadiance[PixelCoord] = float4(0, 0, 0, 0);
+        RWInitialSampleHitInfo[PixelCoord] = float4(0, 0, 0, 0);
+    }
+
+    SharedPixelValidMask[GroupThreadIndex] = IsValidPixel;
+    SharedScreenHitMask[GroupThreadIndex] = IsHit;
+
+    GroupMemoryBarrierWithGroupSync();
+
+    // 4. single head thread count missing ray for off screen voxel trace
+    if(GroupThreadIndex == 0)
+    {
+        // 4.1. count ray
+        int RayCounter = 0;
+        for(int i=0; i<NUM_THREADS; i++)
+        {
+            if(!SharedScreenHitMask[i] && SharedPixelValidMask[i])
+            {
+                RayCounter += 1;
+            }
+        }
+        
+        // 4.2. allocate space in compact buffer
+        int WriteIndex = 0;
+        InterlockedAdd(RWVoxelTraceRayCounter[0], RayCounter, WriteIndex);
+
+        // 4.3. boardcast thread write index
+        for(int i=0; i<NUM_THREADS; i++)
+        {
+            if(!SharedScreenHitMask[i] && SharedPixelValidMask[i])
+            {
+                SharedCompactBufferWriteIndex[i] = WriteIndex;
+                WriteIndex += 1;
+            }
+        }
+    }
+
+    GroupMemoryBarrierWithGroupSync();
+
+    // 5. write pixel info to buffer
+    if(!IsHit && IsValidPixel)
+    {
+        int WriteIndex = SharedCompactBufferWriteIndex[GroupThreadIndex];
+        RWVoxelTraceRayCompactBuffer[WriteIndex] = PixelCoord;
+    }
+}
+
+// ---------------------------------------- (^^_) ---------------------------------------- //
+
+int NumThreadsForVoxelTrace;
+StructuredBuffer<int> VoxelTraceRayCounter;
+RWStructuredBuffer<int> RWIndirectArgs;
+
+[numthreads(THREADGROUP_SIZE_X, THREADGROUP_SIZE_Y, THREADGROUP_SIZE_Z)]
+void BuildVoxelTraceIndirectArgsCS(uint3 ThreadId : SV_DispatchThreadID, uint3 GroupThreadId : SV_GroupThreadID, uint3 GroupId : SV_GroupID)
+{
+    RWIndirectArgs[0] = ceil(float(VoxelTraceRayCounter[0]) / float(NumThreadsForVoxelTrace));
+    RWIndirectArgs[1] = 1;
+    RWIndirectArgs[2] = 1; 
+}
+
+// ---------------------------------------- (^^_) ---------------------------------------- //
+
+StructuredBuffer<int2> VoxelTraceRayCompactBuffer;
+
+[numthreads(THREADGROUP_SIZE_X, THREADGROUP_SIZE_Y, THREADGROUP_SIZE_Z)]
+void InitialSampleVoxelTraceCS(uint3 ThreadId : SV_DispatchThreadID, uint3 GroupThreadId : SV_GroupThreadID, uint3 GroupId : SV_GroupID)
+{
+    ResolveView();
+    FVoxelCascadeInfo CascadeInfo = ResolveCascadeInfo();
+
+    int NumRays = VoxelTraceRayCounter[0];
+    if(ThreadId.x >= NumRays)
+    {
+        return;
+    }
+
+    // 1. rebuild tracing context
+    int2 PixelCoord = VoxelTraceRayCompactBuffer[ThreadId.x];
+    const float2 UV = (float2(PixelCoord) + 0.5) / float2(ScreenGatherRTSize);
+    FPixelContext PixelCtx = ResolvePixelContext(UV);
+
+    // we start from screen trace's ray end
+    float3 VoxelCellSize = GetVoxelCellSize(CascadeInfo, PixelCtx.WorldPosition);
+    float ScreenTraceRayDistance = clamp(RWInitialSampleHitInfo[PixelCoord].w, VoxelCellSize * 0.1, VoxelCellSize * 3);
+    float3 RayStart = PixelCtx.WorldPosition + PixelCtx.RayDirection * ScreenTraceRayDistance;
+
+    // prevent self intersection at graze angle
+    float NoL = saturate(dot(PixelCtx.WorldNormal, PixelCtx.RayDirection));
+    float3 NormalOffset = PixelCtx.WorldNormal * VoxelCellSize * lerp(1, 0.05, NoL);
+    RayStart += NormalOffset;
+
+    // 2. trace ray
+    FVoxelRaytracingRequest RTRequest = (FVoxelRaytracingRequest)0;
+    RTRequest.RayStart = RayStart;
+    RTRequest.RayDir = PixelCtx.RayDirection;
+    RTRequest.MinClipIndex = 0;
+    RTRequest.MaxClipIndex = CascadeInfo.NumClips - 1;
+    RTRequest.MaxStepNum = 114514;
+    RTRequest.MaxDistance = 191981000;
+
+#if USE_DISTANCE_FIELD
+    FVoxelRaytracingHitPayload Hit = DistanceFieldRaytracing(CascadeInfo, DistanceFieldClipmap, LinearSampler, RTRequest);
+#else
+    FVoxelRaytracingHitPayload Hit = VoxelRaytracing(CascadeInfo, VoxelBitOccupyClipmap, RTRequest);
+#endif
+
+    // 3. handle ray hit
+    float3 HitRadiance = float3(0, 0, 0);
+    float3 HitNormal = float3(0, 0, 0);
+    float RayDistance = 0;
+    if(Hit.IsHit)
+    {
+        HitRadiance = FetchRadianceFromVoxelScene(RTRequest, Hit);
+        RayDistance = length(Hit.Position - PixelCtx.WorldPosition);
+        HitNormal = FetchNormalFromVoxelScene(RTRequest, Hit);
+    }
+    else
+    {
+        RayDistance = 191981000;
+        HitRadiance = ReflectionStruct.SkyLightCubemap.SampleLevel(LinearSampler, PixelCtx.RayDirection, 2).rgb * View.SkyLightColor.rgb * GetPreExposure();
+        HitNormal = PixelCtx.RayDirection * -1;
+    }
+
+    RWInitialSampleRadiance[PixelCoord] = float4(HitRadiance, Hit.IsHit);
+    RWInitialSampleHitInfo[PixelCoord] = float4(HitNormal * 0.5 + 0.5, RayDistance);
+}
+
+// ---------------------------------------- (^^_) ---------------------------------------- //
+
+Texture2D<float4> InitialSampleRadiance;
+Texture2D<float4> InitialSampleHitInfo;
+
+Texture2D<float4> ReservoirDataA;
+Texture2D<float4> ReservoirDataB;
+Texture2D<float4> ReservoirDataC;
+Texture2D<float4> ReservoirDataD;
+
+RWTexture2D<float4> RWReservoirDataA;
+RWTexture2D<float4> RWReservoirDataB;
+RWTexture2D<float4> RWReservoirDataC;
+RWTexture2D<float4> RWReservoirDataD;
+
+FReservoir FetchReservoir(float2 UV)
+{
+    float4 RawData[4];
+    RawData[0] = ReservoirDataA.SampleLevel(PointSampler, UV, 0);
+    RawData[1] = ReservoirDataB.SampleLevel(PointSampler, UV, 0);
+    RawData[2] = ReservoirDataC.SampleLevel(PointSampler, UV, 0);
+    RawData[3] = ReservoirDataD.SampleLevel(PointSampler, UV, 0);
+    return DecodeReservoirData(RawData);
+}
+
+bool IsUVOutSideScreen(float2 UV)
+{
+    // note: physical texture size may different with viewport size due to UE editor
+    // so max uv boundary decided by ScreenPositionScaleBias, not const 1.0
+    float2 VirwportUV = BufferUVToViewportUV(UV);
+    return any(VirwportUV <= -0.001) || any(VirwportUV > 1.001);
+}
+
+[numthreads(THREADGROUP_SIZE_X, THREADGROUP_SIZE_Y, THREADGROUP_SIZE_Z)]
+void ReservoirTemporalReuseCS(uint3 ThreadId : SV_DispatchThreadID, uint3 GroupThreadId : SV_GroupThreadID, uint3 GroupId : SV_GroupID)
+{
+    // 1. do some setup
+    ResolveView();
+    const int2 PixelCoord = clamp(ThreadId.xy, 0, ScreenGatherRTSize - 1);
+    const float2 UV = (float2(PixelCoord) + 0.5) / float2(ScreenGatherRTSize);
+    FPixelContext PixelCtx = ResolvePixelContext(UV);
+
+    if(any(ThreadId.xy >= ScreenGatherRTSize) || PixelCtx.RawDepth <= 0)
+    {
+        RWReservoirDataA[PixelCoord] = float4(0, 0, 0, 0);
+        RWReservoirDataB[PixelCoord] = float4(0, 0, 0, 0);
+        RWReservoirDataC[PixelCoord] = float4(0, 0, 0, 0);
+        RWReservoirDataD[PixelCoord] = float4(0, 0, 0, 0);
+        return;
+    }
+
+    // 2. setup reservoir sample for current frame's new sample
+    FReservoirSample NewSample = (FReservoirSample)0;
+    NewSample.Radiance = InitialSampleRadiance.SampleLevel(PointSampler, UV, 0).rgb;
+    NewSample.RayStart = PixelCtx.WorldPosition;
+    NewSample.RayStartNormal = PixelCtx.WorldNormal;
+
+    float4 HitInfo = InitialSampleHitInfo.SampleLevel(PointSampler, UV, 0);    // hit normal (xyz) and distance (w)
+    NewSample.RayEnd = PixelCtx.WorldPosition + PixelCtx.RayDirection.xyz * HitInfo.w;
+    NewSample.RayEndNormal = HitInfo.xyz * 2 - 1;
+
+    // 3. reproject and search 3x3 to find match pixel
+    float2 ReprojectCenterUV = ReprojectPixel(float3(UV, PixelCtx.RawDepth));
+    int2 ReprojectCenterCoord = ReprojectCenterUV * ScreenGatherRTSize;
+
+    float MinDistance = 11451419.19;
+    float2 ReprojectUV = ReprojectCenterUV;
+    int ReprojectValidCount = 0;
+    for(int i=0; i<9; i++)
+    {
+        int2 NeighborPixelCoord = ReprojectCenterCoord + Offsets3x3[i];
+        float2 NeighborUV = (float2(NeighborPixelCoord) + 0.5) / float2(ScreenGatherRTSize);
+        ReprojectValidCount += IsUVOutSideScreen(NeighborUV) ? 0 : 1;
+        
+        // calculate distance between reservoir and current pixel
+        float3 NeighborPosition = ReservoirDataC.SampleLevel(PointSampler, NeighborUV, 0).xyz;  // see DecodeReservoirData()
+        float Distance = length(PixelCtx.WorldPosition - NeighborPosition);
+
+        if(Distance < MinDistance)
+        {
+            MinDistance = Distance;
+            ReprojectUV = NeighborUV;
+        }
+    }
+
+    // 4. fetch temporal reservoir
+    FReservoir TemporalReservoir = FetchReservoir(ReprojectUV);
+
+    // calculate geometry similarity to decide if we need cleanup reservoir history
+    float Distance = length(PixelCtx.WorldPosition - TemporalReservoir.CurrentSample.RayStart);
+    float NormalDot = abs(dot(PixelCtx.WorldNormal, TemporalReservoir.CurrentSample.RayStartNormal));
+    if(Distance > 50.0 || ReprojectValidCount == 0 || isnan(TemporalReservoir.WeightSum) || isnan(TemporalReservoir.EstimatorWeight))
+    {
+        TemporalReservoir = (FReservoir)0;
+    }
+
+    // 5. do temporal reuse
+    float TargetPDF = EvaluateTargetPDF(NewSample, NewSample.RayStart, NewSample.RayStartNormal);
+    float SourcePDF = PixelCtx.RayDirection.w;
+    float SelectionWeight = TargetPDF / SourcePDF;
+
+    UpdateReservoir(TemporalReservoir, NewSample, SelectionWeight, PixelCtx.RandomVector.w);
+    
+    ClampSampleNumAndUpdateEstimatorWeight(TemporalReservoir, PixelCtx.WorldPosition, PixelCtx.WorldNormal, 20);
+
+    // 6. write reservoir back to buffer
+    float4 ReservoirRawData[4];
+    EncodeReservoirData(TemporalReservoir, ReservoirRawData);
+
+    RWReservoirDataA[PixelCoord] = ReservoirRawData[0];
+    RWReservoirDataB[PixelCoord] = ReservoirRawData[1];
+    RWReservoirDataC[PixelCoord] = ReservoirRawData[2];
+    RWReservoirDataD[PixelCoord] = ReservoirRawData[3];
+}
+
+// ---------------------------------------- (^^_) ---------------------------------------- //
+
+int SpatialReuseSampleNum;
+float SpatialReuseSearchRange;
+
+[numthreads(THREADGROUP_SIZE_X, THREADGROUP_SIZE_Y, THREADGROUP_SIZE_Z)]
+void ReservoirSpatialReuseCS(uint3 ThreadId : SV_DispatchThreadID, uint3 GroupThreadId : SV_GroupThreadID, uint3 GroupId : SV_GroupID)
+{
+    // 1. fetch reservoir
+    ResolveView();
+    const float2 ScreenGatherTexelSize = 1.0 / float2(ScreenGatherRTSize);
+    const int2 PixelCoord = ThreadId.xy;
+    const float2 UV = (float2(PixelCoord) + 0.5) * ScreenGatherTexelSize;
+    uint2 RandomSeed1 = Rand3DPCG16(uint3(UV * 11451.514, FrameNumber + 1919)).xy;
+    uint2 RandomSeed2 = Rand3DPCG16(uint3(UV * 1234.567, FrameNumber + 89)).xy;
+    
+    FPixelContext PixelCtx = ResolvePixelContext(UV);
+    FReservoir Reservoir = FetchReservoir(UV);
+
+    if(any(ThreadId.xy >= ScreenGatherRTSize) || PixelCtx.RawDepth <= 0)
+    {
+        RWReservoirDataA[PixelCoord] = float4(0, 0, 0, 0);
+        RWReservoirDataB[PixelCoord] = float4(0, 0, 0, 0);
+        RWReservoirDataC[PixelCoord] = float4(0, 0, 0, 0);
+        RWReservoirDataD[PixelCoord] = float4(0, 0, 0, 0);
+        return;
+    }
+
+    // 2. calculate spatial search range
+    // use cur pixel's depth to keep range constant in world space
+    float3 WorldPositionDDXY = ReconstructWorldPositionFromDepth(UV + ScreenGatherTexelSize, PixelCtx.RawDepth);
+    float DistanceDDXY = max3(length(PixelCtx.WorldPosition - WorldPositionDDXY));
+    float UVSearchRange = clamp((SpatialReuseSearchRange / DistanceDDXY) * ScreenGatherTexelSize, 0.02, 0.2);
+
+    // 3. reuse neighbor reservoirs
+    for(int i=0; i<SpatialReuseSampleNum; i++)
+    {
+        float2 E1 = Hammersley16(i, SpatialReuseSampleNum, RandomSeed1);
+        float2 E2 = Hammersley16(i, SpatialReuseSampleNum, RandomSeed2);
+
+        // 3.1. fetch neighbor
+        float2 UVOffset = UniformSampleDisk(E1);
+        float2 NeighborUV = UV + UVOffset * UVSearchRange;
+        if(IsUVOutSideScreen(NeighborUV))
+        {
+            continue;
+        }
+
+        FReservoir NeighborReservoir = FetchReservoir(NeighborUV);
+
+        // 3.2. consider geometry similarity
+        float3 ReusedPath = NeighborReservoir.CurrentSample.RayEnd - PixelCtx.WorldPosition;
+        float3 NeighborPath = NeighborReservoir.CurrentSample.RayEnd - NeighborReservoir.CurrentSample.RayStart;
+
+        float HemisphereDot1 = dot(PixelCtx.WorldNormal, ReusedPath);
+        float HemisphereDot2 = dot(PixelCtx.WorldNormal, NeighborPath);
+        float HemisphereDot3 = dot(NeighborReservoir.CurrentSample.RayStartNormal, NeighborPath);
+        float NormalDot = dot(PixelCtx.WorldNormal, NeighborReservoir.CurrentSample.RayStartNormal);
+        if(HemisphereDot1 <= 0 || HemisphereDot2 <= 0 || HemisphereDot3 <= 0 || NormalDot < 0.8)
+        {
+            continue;
+        }
+
+        // 3.3. calculate jacobian to scale solid angle (measurement density)
+        float NeighborPathCosine = dot(normalize(-NeighborPath), NeighborReservoir.CurrentSample.RayEndNormal);
+        float ReusedPathCosine = dot(normalize(-ReusedPath), NeighborReservoir.CurrentSample.RayEndNormal);
+        float Jacobian = (NeighborPathCosine * LengthSquare(ReusedPath)) / (ReusedPathCosine * LengthSquare(NeighborPath));
+
+        if(NeighborPathCosine <= 0 || ReusedPathCosine <= 0)
+        {
+            continue;
+        }
+
+        // 3.4. see other reservoir as one sample, calculate merge weight
+        // evaluate neighbor sample's target pdf with current pixel's position and normal
+        float TargetPDF = EvaluateTargetPDF(NeighborReservoir.CurrentSample, PixelCtx.WorldPosition, PixelCtx.WorldNormal);
+        TargetPDF /= clamp(Jacobian, 0.1, 10);  // clamp to prevent firefly
+        float MergeWeight = TargetPDF * NeighborReservoir.EstimatorWeight * NeighborReservoir.NumSamples;  // p_hat * W * M in paper
+
+        // 3.5. merge reservoir
+        // note: UpdateReservoir() will add 1 to NumSamples, but we dont need it, just record origin value here
+        int NumSamplesOld = Reservoir.NumSamples;
+        UpdateReservoir(Reservoir, NeighborReservoir.CurrentSample, MergeWeight, E2.x);
+        
+        // accumulate sample num, we repeatedly check neighbor sample N times
+        Reservoir.NumSamples = NumSamplesOld + NeighborReservoir.NumSamples;
+        
+        ClampSampleNumAndUpdateEstimatorWeight(Reservoir, PixelCtx.WorldPosition, PixelCtx.WorldNormal, 1024);
+    }
+
+    // 4. write reservoir back to buffer
+    float4 ReservoirRawData[4];
+    EncodeReservoirData(Reservoir, ReservoirRawData);
+
+    RWReservoirDataA[PixelCoord] = ReservoirRawData[0];
+    RWReservoirDataB[PixelCoord] = ReservoirRawData[1];
+    RWReservoirDataC[PixelCoord] = ReservoirRawData[2];
+    RWReservoirDataD[PixelCoord] = ReservoirRawData[3];
+}
+
+// ---------------------------------------- (^^_) ---------------------------------------- //
+
+#ifndef INDIRECT_SHADOW_ENABLE
+#define INDIRECT_SHADOW_ENABLE 0
+#endif
+
+Texture2D MiniDepthTexture;
+Texture2D IrradianceFallbackTexture;
+
+// http://blog.hakugyokurou.net/?p=1630
+float Vignette(float2 UV) 
+{
+    UV = BufferUVToViewportUV(UV);
+    UV = (UV * 2 - 1) * 1.5;
+    UV = UV * 0.5 + 0.5;
+    float dist = length(UV - 0.5);
+    dist = clamp(dist * 1.7 - 0.65, 0.0, 1.0);
+    dist = smoothstep(0.0, 1.0, dist);
+    return (1.0 - dist);
+}
+
+// same as contact shadow in DeferredLightingCommon.ush
+float4 SSRayCastShortRange(in FPixelContext PixelCtx, float2 UV, float3 RayDir, float MaxDistance, int NumSteps)
+{
+    float StepOffset = PixelCtx.RandomVector.z;
+    MaxDistance = min(MaxDistance, PixelCtx.SceneDepth);
+
+    float3 RayOriginTranslatedWorld = PixelCtx.WorldPosition - View.WorldCameraOrigin;
+    float4 RayStartClip	= mul( float4( RayOriginTranslatedWorld, 1 ), View.TranslatedWorldToClip );
+	float4 RayDirClip = mul( float4( RayDir * MaxDistance, 0 ), View.TranslatedWorldToClip );
+	float4 RayEndClip = RayStartClip + RayDirClip;
+
+	float3 RayStartScreen = RayStartClip.xyz / RayStartClip.w;
+	float3 RayEndScreen = RayEndClip.xyz / RayEndClip.w;
+	float3 RayStepScreen = RayEndScreen - RayStartScreen;
+
+    // make ray more accurate when camera move far away from pixel
+    float MagicFactor = 0.25;
+    MagicFactor = lerp(1, MagicFactor, Vignette(UV));   // kill SSR artifact near screen edge
+    RayStepScreen *= GetStepScreenFactorToClipAtScreenEdge(RayStartScreen.xy, RayStepScreen.xy) * MagicFactor; 
+
+	float3 RayStartUVz = float3( RayStartScreen.xy * View.ScreenPositionScaleBias.xy + View.ScreenPositionScaleBias.wz, RayStartScreen.z );
+	float3 RayStepUVz = float3( RayStepScreen.xy * View.ScreenPositionScaleBias.xy, RayStepScreen.z );
+
+	float4 RayDepthClip	= RayStartClip + mul( float4( 0, 0, MaxDistance, 0 ), View.ViewToClip );
+	float3 RayDepthScreen = RayDepthClip.xyz / RayDepthClip.w;
+
+	const float Step = 1.0 / NumSteps;
+
+	// *2 to get less moire pattern in extreme cases, larger values make object appear not grounded in reflections
+	const float CompareTolerance = abs( RayDepthScreen.z - RayStartScreen.z ) * Step * 2;
+
+	float SampleTime = StepOffset * Step + Step;
+	float FirstHitTime = -1.0;
+
+	UNROLL
+	for( int i = 0; i < NumSteps; i++ )
+	{
+		float3 SampleUVz = RayStartUVz + RayStepUVz * SampleTime;
+		// float SampleDepth = SceneTexturesStruct.SceneDepthTexture.SampleLevel( SceneTexturesStruct_SceneDepthTextureSampler, SampleUVz.xy, 0 ).r;
+        float SampleDepth = MiniDepthTexture.SampleLevel(PointSampler, SampleUVz.xy, 0).r;  // half res depth tex
+
+		float DepthDiff = SampleUVz.z - SampleDepth;
+		bool Hit = abs( DepthDiff + CompareTolerance ) < CompareTolerance;
+
+		FirstHitTime = (Hit && FirstHitTime < 0.0) ? SampleTime : FirstHitTime;
+		SampleTime += Step;
+	}
+
+    float3 OutHitUVz = RayStartUVz + RayStepUVz * FirstHitTime;
+    bool IsHit = (FirstHitTime > 0) && all(0 < OutHitUVz.xy) && all(OutHitUVz.xy < 1);
+    return float4(OutHitUVz, IsHit);
+}
+
+void ReservoirEvaluateIrradiancePS(
+    noperspective float4 UVAndScreenPos : TEXCOORD0, float4 SvPosition : SV_POSITION,
+    out float4 OutColor0 : SV_Target0,
+    out float4 OutColor1 : SV_Target1
+    )
+{
+    // 1. fetch reservoir
+    ResolveView();
+    const float2 UV = UVAndScreenPos.xy;
+
+    FPixelContext PixelCtx = ResolvePixelContext(UV);
+    FReservoir Reservoir = FetchReservoir(UV);
+
+    if(IsUVOutSideScreen(UV) || PixelCtx.RawDepth <= 0)
+    {
+        OutColor0 = float4(0, 0, 0, 0);
+        return;
+    }
+
+    // 2. do RIS estimate
+    float3 Radiance = Reservoir.CurrentSample.Radiance * Reservoir.EstimatorWeight;
+    float3 RayDir = normalize(Reservoir.CurrentSample.RayEnd - PixelCtx.WorldPosition);
+    float CosTheta = max(dot(RayDir, PixelCtx.WorldNormal), 0.0);   // clamp to prevent black hole pixel, see EvaluateTargetPDF()
+
+    float3 Irradiance = Radiance * CosTheta / PI;
+    OutColor0 = float4(Irradiance, 1);
+
+    // 3. test visibility for spatial reservoir sample
+#if INDIRECT_SHADOW_ENABLE
+    float4 SSRHit = SSRayCastShortRange(
+        PixelCtx, UV, RayDir, 
+        200.0, // max ray distance
+        32 // num steps
+    );
+    float3 HitUVz = SSRHit.xyz;
+    bool IsHit = SSRHit.w > 0;
+
+    // if spatial reservoir's sample are invisible for current pixel, we fallback to temporal reservoir
+    float3 TestRayEndPosition = ReconstructWorldPositionFromDepth(HitUVz.xy, HitUVz.z);
+    float TestRayDistance = length(TestRayEndPosition - PixelCtx.WorldPosition);
+    float ReservoirRayDistance = length(Reservoir.CurrentSample.RayEnd - PixelCtx.WorldPosition);
+    float ReservoirConfidence = IsHit ? saturate(TestRayDistance / ReservoirRayDistance) : 1;
+
+    // lerp irradiance based on confidence
+    float3 IrradianceFallback = IrradianceFallbackTexture.SampleLevel(LinearSampler, UV, 0).rgb;
+    OutColor0 = float4(lerp(IrradianceFallback, Irradiance, ReservoirConfidence), 1);
+
+    // output confidence as indirect shadow
+    OutColor1 = ReservoirConfidence;
+#else
+    OutColor1 = 1;
+#endif  // INDIRECT_SHADOW_ENABLE
+}
+
+// ---------------------------------------- (^^_) ---------------------------------------- //
+
+float TemporalFilterWeight;
+float HistoryColorBoundScale;
+
+Texture2D DiffuseIndirectTexture;
+Texture2D DiffuseIndirectHistory;
+Texture2D IndirectShadowTexture;
+Texture2D IndirectShadowHistory;
+
+// see: Engine/Shaders/Private/TemporalAA/TAAStandalone.usf
+float3 ClampHistory(in float4 ColorSamples[9], float3 CurrentColor, float3 HistoryColor, float ColorBoundScale)
+{
+    CurrentColor = RGBToYCoCg(CurrentColor);
+    HistoryColor = RGBToYCoCg(HistoryColor);
+
+    // 1. calculate history color bounding box
+    float3 NeighborMin = 114514;
+    float3 NeighborMax = -114514;
+    for(int i=0; i<9; i++)
+    {
+        float3 ColorYCoCg = RGBToYCoCg(ColorSamples[i].rgb);
+        NeighborMin = min(NeighborMin, ColorYCoCg);
+        NeighborMax = max(NeighborMax, ColorYCoCg);
+    }
+    
+    // extend the color bounding box to avoid file flies, but may cause temporal lag
+    float3 NeighborCenter = (NeighborMax + NeighborMin) * 0.5;
+    NeighborMin += (NeighborMin - NeighborCenter) * ColorBoundScale;
+    NeighborMax += (NeighborMax - NeighborCenter) * ColorBoundScale;
+
+    // 2. find intersection from history color to current color bounding box
+    float3 RayOrigin = HistoryColor;
+	float3 RayDir = CurrentColor - HistoryColor;
+	RayDir = abs(RayDir) < (1.0 / 65536.0) ? (1.0 / 65536.0) : RayDir;
+	float3 InvRayDir = rcp(RayDir);
+
+	float3 MinIntersect = (NeighborMin - RayOrigin) * InvRayDir;
+	float3 MaxIntersect = (NeighborMax - RayOrigin) * InvRayDir;
+	float3 EnterIntersect = min(MinIntersect, MaxIntersect);
+
+    // 3. clamp history color to boundary of current color bounding box
+	float ClipBlend = saturate(max3(EnterIntersect.x, EnterIntersect.y, EnterIntersect.z));
+	float3 ResultYCoCg = lerp(HistoryColor, CurrentColor, ClipBlend);
+    return YCoCgToRGB(ResultYCoCg);
+}
+
+void DiffuseTemporalFilterPS(
+    noperspective float4 UVAndScreenPos : TEXCOORD0, float4 SvPosition : SV_POSITION
+    , out float4 OutColor0 : SV_Target0
+    , out float4 OutColor1 : SV_Target1
+    )
+{
+    // 1. setup
+    ResolveView();
+    const float2 ScreenGatherTexelSize = 1.0 / float2(ScreenGatherRTSize);
+    const float2 UV = UVAndScreenPos.xy;
+    FPixelContext PixelCtx = ResolvePixelContext(UV);
+
+    if(IsUVOutSideScreen(UV) || PixelCtx.RawDepth <= 0)
+    {
+        OutColor0 = float4(0, 0, 0, 0);
+        return;
+    }
+
+    float4 ColorSamples[9];
+    float ShadowSamples[9];
+    for(int i=0; i<9; i++)
+    {
+        float2 NeighborUV = UV + Offsets3x3[i] * ScreenGatherTexelSize;
+        ColorSamples[i] = DiffuseIndirectTexture.SampleLevel(PointSampler, NeighborUV, 0);
+        ShadowSamples[i] = IndirectShadowTexture.SampleLevel(PointSampler, NeighborUV, 0).r;
+    }
+    float4 CurrentColor = ColorSamples[0];
+
+    // 2. fetch history
+    float2 ReprojectUV = ReprojectPixel(float3(UV, PixelCtx.RawDepth));
+    float4 HistoryColor = DiffuseIndirectHistory.SampleLevel(LinearSampler, ReprojectUV, 0);
+    HistoryColor = ClampNaNs(HistoryColor);
+
+    // 3. reject history if geometry change
+    float4 HistoryNormalDepth = NormalDepthHistory.SampleLevel(PointSampler, ReprojectUV, 0);
+    float3 HistoryNormal = HistoryNormalDepth.xyz * 2 - 1;
+    float HistorySceneDepth = ConvertFromDeviceZ(HistoryNormalDepth.w);
+
+    float HistoryWeight = TemporalFilterWeight;
+    float AOHistoryWeight = 0.8;
+    float ShadowHistoryWeight = 0.9;
+    if(IsUVOutSideScreen(ReprojectUV) || dot(HistoryNormal, PixelCtx.WorldNormal) < 0.5 || abs(PixelCtx.SceneDepth - HistorySceneDepth) > 50)
+    {
+        HistoryWeight = 0;
+        AOHistoryWeight = 0;
+        ShadowHistoryWeight = 0;
+    }
+
+    // 4. clamp history
+    HistoryColor.rgb = ClampHistory(ColorSamples, CurrentColor.rgb, HistoryColor.rgb, HistoryColorBoundScale);
+    OutColor0.rgb = lerp(CurrentColor.rgb, HistoryColor.rgb, HistoryWeight);
+
+    // 5. output filter guidance ssao
+    float AOSum = 0;
+    for(int i=0; i<9; i++)
+    {
+        AOSum += ColorSamples[i].a;
+    }
+    OutColor0.a = lerp(AOSum / 9.0, HistoryColor.a, AOHistoryWeight);
+
+    // 6. output indirect shadow
+    float ShadowHistory = IndirectShadowHistory.SampleLevel(LinearSampler, ReprojectUV, 0).r;
+    float ShadowSum = 0;
+    for(int i=0; i<9; i++)
+    {
+        ShadowSum += ShadowSamples[i];
+    }
+    OutColor1 = lerp(ShadowSum / 9.0, ShadowHistory, ShadowHistoryWeight);
+}
+
+// ---------------------------------------- (^^_) ---------------------------------------- //
+
+#define ATROUS_SAFE_RANGE (4.0)
+
+int2 RTSize;
+float FilterRadius;
+float SSAOGuidanceWeight;
+
+void DiffuseSpatialFilterPS(
+    noperspective float4 UVAndScreenPos : TEXCOORD0, float4 SvPosition : SV_POSITION
+    , out float4 OutColor0 : SV_Target0
+#if INDIRECT_SHADOW_ENABLE
+    , out float4 OutColor1 : SV_Target1
+#endif
+    )
+{
+    // 1. setup
+    ResolveView();
+    const float2 TexelSize = 1.0 / float2(RTSize);
+    const float2 UV = UVAndScreenPos.xy;
+    uint2 RandomSeed = Rand3DPCG16(uint3(UV * 11451.514, FrameNumber + 1919)).xy;
+    FPixelContext PixelCtx = ResolvePixelContext(UV);
+
+    if(IsUVOutSideScreen(UV) || PixelCtx.RawDepth <= 0)
+    {
+        OutColor0 = float4(0, 0, 0, 0);
+        return;
+    }
+
+    // 2. filter current frame output
+    float4 CenterColor = DiffuseIndirectTexture.SampleLevel(LinearSampler, UV, 0);
+    float GuidanceSSAO = CenterColor.w;
+    float WeightSum = GaussianWeights3x3[0];
+    float4 ColorSum = CenterColor * GaussianWeights3x3[0];
+
+#if INDIRECT_SHADOW_ENABLE
+    float ShadowSum = IndirectShadowTexture.SampleLevel(LinearSampler, UV, 0).r * GaussianWeights3x3[0];
+#endif
+
+    for(int i=1; i<9; i++)
+    {
+        float2 E = Hammersley16(i - 1, 9 - 1, RandomSeed) * 2 - 1;
+        float2 UVJitter = (FilterRadius > ATROUS_SAFE_RANGE) ? E * 0.25 : 0;
+        float2 NeighborUV = UV + (Offsets3x3[i] + UVJitter) * FilterRadius * TexelSize;
+        if(IsUVOutSideScreen(NeighborUV))
+        {
+            continue;
+        }
+
+        float4 NeighborColor = DiffuseIndirectTexture.SampleLevel(LinearSampler, NeighborUV, 0);
+        NeighborColor = ClampNaNs(NeighborColor);
+
+        float3 NeighborPixelPosition, NeighborPixelNormal;
+        float NeighborDepth = GetPixelPositionAndNormal(NeighborUV, NeighborPixelPosition, NeighborPixelNormal);
+
+        float Weight = 1;
+        Weight *= GaussianWeights3x3[i];
+        Weight *= exp(-abs(NeighborDepth - PixelCtx.SceneDepth) * 0.01);
+        Weight *= saturate(dot(NeighborPixelNormal, PixelCtx.WorldNormal));
+        Weight *= exp(-abs(GuidanceSSAO - NeighborColor.w) * SSAOGuidanceWeight);
+
+        ColorSum += NeighborColor * Weight;
+        WeightSum += Weight;
+
+    #if INDIRECT_SHADOW_ENABLE
+        float NeighborShadow = IndirectShadowTexture.SampleLevel(LinearSampler, NeighborUV, 0).r;
+        ShadowSum += NeighborShadow * Weight;
+    #endif
+    }
+
+    float3 Color = (WeightSum > 0) ? (ColorSum.rgb / WeightSum) : 0;
+    OutColor0 = float4(Color, GuidanceSSAO);
+    // OutColor0 = (WeightSum > 0) ? (ColorSum / WeightSum) : 0;
+
+#if INDIRECT_SHADOW_ENABLE
+    OutColor1 = (WeightSum > 0) ? (ShadowSum / WeightSum) : 1;
+#endif
+}
+
+// ---------------------------------------- (^^_) ---------------------------------------- //
+
+float AOIntensity;
+float IndirectShadowSharpness;
+float IndirectShadowIntensity;
+
+void DiffuseCompositePS(noperspective float4 UVAndScreenPos : TEXCOORD0, float4 SvPosition : SV_POSITION, out float4 OutColor : SV_Target0)
+{
+    ResolveView();
+
+    float2 ScreenGatherTexelSize = rcp(float2(ScreenGatherRTSize));
+	float2 UV = UVAndScreenPos.xy;
+    uint2 RandomSeed = Rand3DPCG16(uint3(UV * 11451.514, FrameNumber + 1919)).xy;
+	FGBufferData GBuffer = GetGBufferData(UV);
+
+    float ShadowSum = 0;
+    float4 ColorSum = 0;
+    float WeightSum = 0;
+    const int SampleNum = 4;
+    const float SearchRange = 2.0;
+    for(int i=0; i<SampleNum; i++)
+    {
+        float2 UVOffset = Hammersley16(i, SampleNum, RandomSeed) * 2 - 1;
+        float2 NeighborUV = UV + UVOffset * ScreenGatherTexelSize * SearchRange;
+
+        float Shadow = IndirectShadowTexture.SampleLevel(PointSampler, NeighborUV, 0).r;
+        float4 Color = DiffuseIndirectTexture.SampleLevel(PointSampler, NeighborUV, 0);
+        float4 NormalDepth = NormalDepthTexture.SampleLevel(PointSampler, NeighborUV, 0);
+        float3 NeighborNormal = NormalDepth.xyz * 2 - 1;
+        float NeighborDepth = ConvertFromDeviceZ(NormalDepth.a);
+
+        float Weight = 1.0;
+        Weight *= exp(-abs(NeighborDepth - GBuffer.Depth));
+        Weight *= saturate(dot(NeighborNormal, GBuffer.WorldNormal));
+
+        ColorSum += Color * Weight;
+        ShadowSum += Shadow * Weight;
+        WeightSum += Weight;
+    }
+    float4 FilterColor = ColorSum / WeightSum;
+    float IndirectShadow = ShadowSum / WeightSum;
+
+    // apply diffuse lighting
+    float3 DiffuseIndirect = FilterColor.rgb;
+    DiffuseIndirect *= GBuffer.BaseColor * (1.0 - GBuffer.Metallic);    // @TODO: consider shading models
+
+    // apply SSAO (not physically based, just a trick)
+    float SSAO = FilterColor.a;
+    float Occlusion = lerp(1, SSAO, AOIntensity);
+
+    // apply indirect shadow
+    IndirectShadow = saturate(pow(IndirectShadow, IndirectShadowSharpness));
+    IndirectShadow = lerp(1, IndirectShadow, IndirectShadowIntensity);
+    Occlusion = min(Occlusion, IndirectShadow);
+
+    DiffuseIndirect *= Occlusion;
+    OutColor = float4(ClampNaNs(DiffuseIndirect), 1);
+    // OutColor = DiffuseIndirectTexture.SampleLevel(LinearSampler, UV, 0).wwww;   // debug ssao
+    // OutColor = IndirectShadow;   // debug indirect shadow
+    // OutColor.rgb = Vignette(UV);
+}
+
+// ---------------------------------------- (^^_) ---------------------------------------- //
+
+float AOWorldRange;
+float AOSharpness;
+
+float3 TransformPositionWorldToView(float3 WorldPosition)
+{
+    float3 TranslatedWorldPosition = WorldPosition - View.WorldCameraOrigin;
+    float3 ViewSpacePosition = mul(float4(TranslatedWorldPosition, 1), View.TranslatedWorldToView);
+    return ViewSpacePosition;
+}
+
+float3 TransformDirectionWorldToView(float3 WorldNormal)
+{
+    return normalize(mul(WorldNormal, (half3x3)View.TranslatedWorldToView));
+}
+
+// https://www.derschmale.com/2013/12/20/an-alternative-implementation-for-hbao-2/
+void FilterGuidanceSSAOPS(noperspective float4 UVAndScreenPos : TEXCOORD0, float4 SvPosition : SV_POSITION, out float4 OutColor : SV_Target0)
+{
+    ResolveView();
+
+    const float2 ScreenGatherTexelSize = 1.0 / float2(ScreenGatherRTSize);
+	const float2 UV = UVAndScreenPos.xy;
+    uint2 RandomSeed = Rand3DPCG16(uint3(UV * 333, FrameNumber + 444)).xy;
+
+    FPixelContext PixelCtx = ResolvePixelContext(UV);
+    float3 ViewDirection = normalize(View.WorldCameraOrigin - PixelCtx.WorldPosition);
+    float3 ViewSpacePosition = TransformPositionWorldToView(PixelCtx.WorldPosition);
+    float3 ViewSpaceNormal = TransformDirectionWorldToView(PixelCtx.WorldNormal);
+
+    float3 WorldPositionDDXY = ReconstructWorldPositionFromDepth(UV + ScreenGatherTexelSize, PixelCtx.RawDepth);
+    float DistanceDDXY = max3(length(PixelCtx.WorldPosition - WorldPositionDDXY));
+    float UVSearchRange = clamp((AOWorldRange / DistanceDDXY) * ScreenGatherTexelSize, 0.005, 0.5);
+
+    const int NumDirections = 4;
+    const int NumSteps = 4;
+    float UVSearchStep = UVSearchRange / float(NumSteps);
+
+    float2 E = Hammersley16(0, 1, RandomSeed);
+    float RandomStepOffset = E.x;
+    float RotateAngle = E.y * PI * 2;
+
+    float AOSum = 0;
+    float WeightSum = 0;
+    float3 SamplePosition, SampleNormal;
+    for(int i=0; i<NumDirections; i++)
+    {
+        float2 Direction2D = float2(cos(RotateAngle), sin(RotateAngle));
+
+        float BestOcclusion = 0;
+        for(int j=0; j<NumSteps; j++)
+        {
+            float2 SampleUV = UV + Direction2D * UVSearchStep * (float(j) + RandomStepOffset);
+            float SampleDepth = GetPixelPositionAndNormal(SampleUV, SamplePosition, SampleNormal);
+
+            // calculate occlusion for current sample
+            float3 ViewSpaceSample = ScreenToViewPos(SampleUV, SampleDepth);
+            float3 PixelToSample = ViewSpaceSample - ViewSpacePosition;
+            float Distance = length(PixelToSample);
+            float Occlusion = dot(ViewSpaceNormal, PixelToSample) / Distance;
+
+            // calculate max horizontal occlusion
+            float Delta = max(Occlusion - BestOcclusion, 0);
+            BestOcclusion = max(BestOcclusion, Occlusion);
+
+            // lerp occlusion based on distance
+            float FallOffWeight = saturate(1 - (Distance * Distance) / (AOWorldRange * AOWorldRange));
+            float AO = Delta * FallOffWeight;
+
+            AOSum += AO;
+            WeightSum += FallOffWeight;
+        }
+        
+        RotateAngle += 2 * PI / float(NumDirections);
+    }
+    
+    float FinalOcclusion = AOSum / WeightSum;
+    FinalOcclusion = saturate(1 - FinalOcclusion);
+    FinalOcclusion = pow(FinalOcclusion, AOSharpness);
+
+    OutColor = float4(FinalOcclusion.xxxx);
+}
+
+// ---------------------------------------- (^^_) ---------------------------------------- //
+
+#define SIMPLIFY_RESOLVE_BRDF 1
+#define APPLY_BRDF_AFTER_TAA 1
+#define RADIANCE_TONEMAPPING 1
+
+float SpecularResolveSearchRange;
+
+// https://www.ea.com/frostbite/news/stochastic-screen-space-reflections
+float3 EvaluateRatioEstimatorBRDF(float3 CurPixelWorldPosition, in FGBufferData CurPixelGBufferData, float3 RayHitPosition, float RayPDF)
+{
+    // reconnect neighbor ray's hit point with current pixel 
+    float3 L = normalize(RayHitPosition - CurPixelWorldPosition);
+    float3 V = normalize(View.WorldCameraOrigin - CurPixelWorldPosition);
+    float3 H = normalize(V + L);
+    float3 N = CurPixelGBufferData.WorldNormal;
+
+    float3 NoH = clamp(1e-3, dot(N, H), 1);
+    float3 NoV = clamp(1e-3, dot(N, V), 1);
+    float3 NoL = clamp(1e-3, dot(N, L), 1);
+    float3 VoH = clamp(1e-3, dot(V, H), 1);
+
+    // calculate BRDF for reconnect ray
+	float a2 = Pow4(CurPixelGBufferData.Roughness);
+	float D = D_GGX(a2, NoH);
+	float Vis = Vis_SmithJointApprox(a2, NoV, NoL);
+	float3 F = F_Schlick(CurPixelGBufferData.SpecularColor, VoH);
+
+#if SIMPLIFY_RESOLVE_BRDF
+    float3 BRDF = D * Vis * F;
+#else
+    float3 BRDF = D;
+#endif
+
+	return (RayPDF > 0) ? (BRDF * NoL / RayPDF) : 0;
+}
+
+void SpecularResolvePS(noperspective float4 UVAndScreenPos : TEXCOORD0, float4 SvPosition : SV_POSITION, out float4 OutColor : SV_Target0)
+{
+    ResolveView();
+
+    // 1. setup
+    const float2 ScreenGatherTexelSize = 1.0 / float2(ScreenGatherRTSize);
+	const float2 UV = UVAndScreenPos.xy;
+    uint2 RandomSeed = Rand3DPCG16(uint3(UV * 11451.514, FrameNumber + 1919)).xy;
+    FGBufferData GBufferData = GetGBufferData(UV, true);
+    float3 WorldPosition = ReconstructWorldPositionFromDepth(UV, ConvertToDeviceZ(GBufferData.Depth));
+
+    // 2. query and resolve neighbor pixels
+    const int NumResolveSamples = 4;
+    float3 RadianceSum = 0;
+    float3 WeightSum = 0;
+    float RayDistanceSum = 0;
+    for(int i=0; i<NumResolveSamples; i++)
+    {
+        // 2.1. randomly pick a neighbor pixel in half resolution ray buffer
+        float2 E = Hammersley16(i, NumResolveSamples, RandomSeed);
+        // float2 UVOffset = UniformSampleDisk(E);
+        float2 UVOffset = E * 2 - 1;
+        float2 NeighborUV = UV + UVOffset * ScreenGatherTexelSize * SpecularResolveSearchRange;
+        FPixelContext NeighborPixelCtx = ResolvePixelContext(NeighborUV);
+
+        float3 HitRadiance = InitialSampleRadiance.SampleLevel(PointSampler, NeighborUV, 0).rgb;
+        float RayDistance = InitialSampleHitInfo.SampleLevel(PointSampler, NeighborUV, 0).w;
+        
+        float3 RayStartPosition = NeighborPixelCtx.WorldPosition;
+        float3 RayHitPosition = RayStartPosition + NeighborPixelCtx.RayDirection.xyz * RayDistance;
+        float RayPDF = NeighborPixelCtx.RayDirection.w;
+
+        // 2.2. calculate local BRDF for reused ray and apply ratio estimator
+        float3 Weight = EvaluateRatioEstimatorBRDF(WorldPosition, GBufferData, RayHitPosition, RayPDF);
+        Weight *= exp(length(RayStartPosition - WorldPosition) * -0.01);
+
+    #if RADIANCE_TONEMAPPING
+        HitRadiance = HitRadiance / (1.0 + Luma(HitRadiance));
+    #endif
+
+        RadianceSum += HitRadiance * Weight;
+        WeightSum += Weight;
+        RayDistanceSum += RayDistance;
+    }
+    float3 ResolveRadiance = RadianceSum / WeightSum;
+    float RayAverageDistance = RayDistanceSum / float(NumResolveSamples);
+
+#if RADIANCE_TONEMAPPING
+    ResolveRadiance = ResolveRadiance / (1.0 - Luma(ResolveRadiance));
+#endif
+    
+    // 3. evaluate full specular integral
+#if !APPLY_BRDF_AFTER_TAA
+    float3 V = normalize(View.WorldCameraOrigin - WorldPosition);
+    float NoV = saturate(dot(GBufferData.WorldNormal, V));
+    float3 PreIntegratedGF = EnvBRDF(GBufferData.SpecularColor, GBufferData.Roughness, NoV);
+    float3 SpecularIndirect = ResolveRadiance * PreIntegratedGF;
+#else
+    float3 SpecularIndirect = ResolveRadiance;
+#endif
+
+    OutColor = float4(SpecularIndirect, RayAverageDistance);
+}
+
+// ---------------------------------------- (^^_) ---------------------------------------- //
+
+int2 SceneTextureRTSize;
+
+Texture2D<float4> SpecularIndirectTexture;
+Texture2D<float4> SpecularIndirectHistory;
+
+float4 SpecularIndirectFetchHistory(float3 WorldPosition, float2 CurrentUV)
+{
+    // reproject pixel
+    float3 CurrentFrameUVz = WorldToScreen(WorldPosition);
+    float2 ReprojectUV = ReprojectPixel(CurrentFrameUVz);
+
+    // fetch history
+    float3 HistoryColor = SpecularIndirectHistory.SampleLevel(LinearSampler, ReprojectUV, 0).rgb;
+    HistoryColor = ClampNaNs(HistoryColor);
+
+    // reject history if geometry change
+    // note: both current and history are sample from half resolution buffer
+    float4 HistoryNormalDepth = NormalDepthHistory.SampleLevel(PointSampler, ReprojectUV, 0);
+    float3 HistoryNormal = HistoryNormalDepth.xyz * 2 - 1;
+    float HistorySceneDepth = ConvertFromDeviceZ(HistoryNormalDepth.w);
+
+    float4 CurrentNormalDepth = NormalDepthTexture.SampleLevel(PointSampler, CurrentUV, 0);
+    float3 CurrentNormal = CurrentNormalDepth.xyz * 2 - 1;
+    float CurrentSceneDepth = ConvertFromDeviceZ(CurrentNormalDepth.w);
+
+    float HistoryWeight = TemporalFilterWeight;
+    if(IsUVOutSideScreen(ReprojectUV)  || dot(HistoryNormal, CurrentNormal) < 0.5  || abs(HistorySceneDepth - CurrentSceneDepth) > 100)
+    {
+        HistoryWeight = 0;
+    }
+
+    return float4(HistoryColor, HistoryWeight);
+}
+
+void SpecularTemporalFilterPS(noperspective float4 UVAndScreenPos : TEXCOORD0, float4 SvPosition : SV_POSITION, out float4 OutColor : SV_Target0)
+{
+    ResolveView();
+
+    // 1. setup
+    const float2 SceneTextureTexelSize = 1.0 / float2(SceneTextureRTSize);
+	const float2 UV = UVAndScreenPos.xy;
+    FGBufferData GBufferData = GetGBufferData(UV, true);
+    float3 WorldPosition = ReconstructWorldPositionFromDepth(UV, ConvertToDeviceZ(GBufferData.Depth));
+    float LinearRoughness = sqrt(GBufferData.Roughness);
+
+    if(IsUVOutSideScreen(UV) || GBufferData.Depth <= 0)
+    {
+        OutColor = float4(0, 0, 0, 0);
+        return;
+    }
+
+    // 2. sample current frame color
+    float4 ColorSamples[9];
+    for(int i=0; i<9; i++)
+    {
+        float2 NeighborUV = UV + Offsets3x3[i] * SceneTextureTexelSize;
+        ColorSamples[i] = ClampNaNs(SpecularIndirectTexture.SampleLevel(PointSampler, NeighborUV, 0));
+    }
+    float3 CurrentColor = ColorSamples[0].rgb;
+    float CurrentRayDistance = ColorSamples[0].w;
+
+    // 3. reproject pixel using surface position
+    float4 SurfaceReprojectResult = SpecularIndirectFetchHistory(WorldPosition, UV);
+    SurfaceReprojectResult.rgb = ClampHistory(ColorSamples, CurrentColor, SurfaceReprojectResult.rgb, HistoryColorBoundScale);
+
+    // 4. reproject pixel using ray distance parallex
+    float3 ViewDirection = normalize(WorldPosition - View.WorldCameraOrigin);
+    float3 MirroredHitPoint = WorldPosition + ViewDirection * CurrentRayDistance;
+    float4 ParallexReprojectResult = SpecularIndirectFetchHistory(MirroredHitPoint, UV);
+    ParallexReprojectResult.rgb = ClampHistory(ColorSamples, CurrentColor, ParallexReprojectResult.rgb, HistoryColorBoundScale);
+    
+    // 5. mix two reprojection methods based on pixel roughness
+    float3 FilteredColorWithSurfaceReproject = lerp(CurrentColor, SurfaceReprojectResult.rgb, SurfaceReprojectResult.a);
+    float3 FilteredColorWithParallexReproject = lerp(CurrentColor, ParallexReprojectResult.rgb, ParallexReprojectResult.a);
+    float3 FilteredColor = lerp(FilteredColorWithParallexReproject, FilteredColorWithSurfaceReproject, LinearRoughness);
+
+    OutColor = float4(FilteredColor, 1);
+}
+
+// ---------------------------------------- (^^_) ---------------------------------------- //
+
+void SpecularSpatialFilterPS(noperspective float4 UVAndScreenPos : TEXCOORD0, float4 SvPosition : SV_POSITION, out float4 OutColor : SV_Target0)
+{
+    // 1. setup
+    ResolveView();
+    const float2 TexelSize = 1.0 / float2(RTSize);
+    const float2 UV = UVAndScreenPos.xy;
+    
+    uint2 RandomSeed = Rand3DPCG16(uint3(UV * 256, FrameNumber + 1024)).xy;
+    FGBufferData GBuffer = GetGBufferData(UV, true);
+
+    if(IsUVOutSideScreen(UV) || GBuffer.Depth <= 0)
+    {
+        OutColor = float4(0, 0, 0, 0);
+        return;
+    }
+
+    // 2. filter current frame output
+    int NumSamples = 8;
+    float WeightSum = 0;
+    float4 ColorSum = 0;
+    float SearchRange = TexelSize * FilterRadius * lerp(1e-3, 4, GBuffer.Roughness);
+
+    for(int i=0; i<NumSamples; i++)
+    {
+        float2 E = Hammersley16(i, NumSamples, RandomSeed);
+        float2 UVOffset = UniformSampleDisk(E);  // [-1 ~ 1]
+        float2 NeighborUV = UV + UVOffset * SearchRange;
+
+        if(IsUVOutSideScreen(NeighborUV))
+        {
+            continue;
+        }
+
+        float4 NeighborColor = SpecularIndirectTexture.SampleLevel(LinearSampler, NeighborUV, 0);
+        NeighborColor = ClampNaNs(NeighborColor);
+
+    #if RADIANCE_TONEMAPPING
+        NeighborColor = NeighborColor / (1.0 + Luma(NeighborColor));
+    #endif
+
+        FGBufferData NeighborGBuffer = GetGBufferData(NeighborUV, true);
+
+        // float Weight = 1.0;
+        float Weight = exp(-length(NeighborUV - UV) / SearchRange);
+        Weight *= exp(-abs(NeighborGBuffer.Depth - GBuffer.Depth) * 0.01);
+        Weight *= saturate(dot(NeighborGBuffer.WorldNormal, GBuffer.WorldNormal));
+
+        ColorSum += NeighborColor * Weight;
+        WeightSum += Weight;
+    }
+
+    float3 Color = (WeightSum > 0) ? (ColorSum.rgb / WeightSum) : 0;
+
+#if RADIANCE_TONEMAPPING
+    Color = Color / (1.0 - Luma(Color));
+#endif
+
+    OutColor = float4(Color, 1);
+}
+
+// ---------------------------------------- (^^_) ---------------------------------------- //
+
+void SpecularCompositePS(noperspective float4 UVAndScreenPos : TEXCOORD0, float4 SvPosition : SV_POSITION, out float4 OutColor : SV_Target0)
+{
+    ResolveView();
+
+    float2 SceneTextureTexelSize = rcp(float2(SceneTextureRTSize));
+	float2 UV = UVAndScreenPos.xy;
+    
+	FGBufferData GBufferData = GetGBufferData(UV);
+    float3 WorldPosition = ReconstructWorldPositionFromDepth(UV, ConvertToDeviceZ(GBufferData.Depth));
+    float3 Irradiance = SpecularIndirectTexture.SampleLevel(LinearSampler, UV, 0).rgb;
+
+#if APPLY_BRDF_AFTER_TAA
+    float3 V = normalize(View.WorldCameraOrigin - WorldPosition);
+    float NoV = saturate(dot(GBufferData.WorldNormal, V));
+    float3 PreIntegratedGF = EnvBRDF(GBufferData.SpecularColor, GBufferData.Roughness, NoV);
+    float3 SpecularIndirect = Irradiance * PreIntegratedGF;
+#else
+    float3 SpecularIndirect = Irradiance;
+#endif
+
+    OutColor = float4(SpecularIndirect, 1);
+}

@@ -1,0 +1,77 @@
+// Copyright Epic Games, Inc. All Rights Reserved.
+
+#include "Common.ush"
+#include "ScreenPass.ush"
+//#include "PostProcessCommon.ush"
+
+SCREEN_PASS_TEXTURE_VIEWPORT(Input)
+
+Texture2D Input_Texture;
+SamplerState Input_Sampler;
+
+/*-----------------------------------------------------------------------------
+	PostProcessTest vertex shader
+-----------------------------------------------------------------------------*/
+
+void PostProcessTestVS(
+	in float4 InPosition : ATTRIBUTE0,
+	in float2 UV : ATTRIBUTE1,
+	out noperspective float2 OutCenterUV : TEXCOORD0,
+	out noperspective float4 OutCornersUV : TEXCOORD1,
+	out float4 OutPosition : SV_POSITION
+	)
+{
+	DrawRectangle(InPosition, UV, OutPosition, OutCenterUV);
+	OutCornersUV = float4(OutCenterUV.xy - 0.5f * Input_ExtentInverse, OutCenterUV.xy + 0.5f * Input_ExtentInverse);
+}
+
+
+/*-----------------------------------------------------------------------------
+	PostProcessTest pixel shader
+-----------------------------------------------------------------------------*/
+
+float4 SampleInput(float2 UV)
+{
+	UV = clamp(UV, Input_UVViewportBilinearMin, Input_UVViewportBilinearMax);
+
+	return Texture2DSampleLevel(Input_Texture, Input_Sampler, UV, 0);
+}
+
+float4 DownsampleCommon(float2 UV)
+{
+	float4 OutColor;
+
+
+	// Output: float4(RGBA), 4 filtered samples
+	float2 UVs[4];
+
+	// Blur during downsample (4x4 kernel) to get better quality especially for HDR content.
+	UVs[0] = UV + Input_ExtentInverse * float2(-1, -1);
+	UVs[1] = UV + Input_ExtentInverse * float2( 1, -1);
+	UVs[2] = UV + Input_ExtentInverse * float2(-1,  1);
+	UVs[3] = UV + Input_ExtentInverse * float2( 1,  1);
+
+	float4 Sample[4];
+
+	UNROLL
+	for(uint i = 0; i < 4; ++i)
+	{
+		Sample[i] = SampleInput(UV);
+	}
+
+	OutColor = (Sample[0] + Sample[1] + Sample[2] + Sample[3]) * 0.25f;
+
+	// Fixed rarely occurring yellow color tint of the whole viewport (certain viewport size, need to investigate more)
+	OutColor.rgb = max(float3(0,0,0), OutColor.rgb);
+
+	return OutColor;
+}
+
+// pixel shader entry point
+//void MainPS(float4 SvPosition : SV_POSITION, out float4 OutColor : SV_Target0)
+void PostProcessTestPS(noperspective float2 TexCenter : TEXCOORD0, noperspective float4 TexCorners : TEXCOORD1, out float4 OutColor : SV_Target0)
+{
+	//const float2 UV = SvPosition.xy * Output_ExtentInverse;
+	const float2 UV = TexCorners.xy;
+	OutColor = DownsampleCommon(UV);
+}

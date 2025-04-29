@@ -1,0 +1,325 @@
+#pragma once
+
+#include "RealtimeGICommon.ush"
+
+struct FVolumeInfo
+{
+	int ClipIndex;
+	int NumClips;
+	float3 Center;
+	float3 CoverRange;
+	float3 Resolution;
+	float3 Scrolling;
+	float3 VoxelCellSize;
+};
+
+struct FVoxelRaytracingRequest
+{
+	float3 RayStart;
+	float3 RayDir;
+	int MinClipIndex;
+	int MaxClipIndex;
+	int MaxStepNum;
+	float RayDistance;
+	float MaxDistance;
+};
+
+struct FVoxelRaytracingHitPayload
+{
+	float3 Position;
+	int IsHit;
+	int3 VoxelIndex;
+	float3 VoxelPosition;
+	float VoxelCellSize;
+	int ClipIndex;
+	int3 ClipmapAccessIndex;
+};
+
+struct FVoxelCascadeInfo
+{
+	int NumClips;
+	int3 VolumeResolution;
+	float3 VolumeCenterArray[MAX_CLIP_NUM];
+	float3 VolumeCoverRangeArray[MAX_CLIP_NUM];
+	int3 VolumeScrollingArray[MAX_CLIP_NUM];
+};
+
+FVolumeInfo ResolveVolumeInfo(in FVoxelCascadeInfo CascadeInfo, int ClipId)
+{
+	FVolumeInfo VolumeInfo;
+	VolumeInfo.ClipIndex = ClipId;
+	VolumeInfo.NumClips = CascadeInfo.NumClips;
+	VolumeInfo.Resolution = CascadeInfo.VolumeResolution;
+	VolumeInfo.Center = CascadeInfo.VolumeCenterArray[ClipId];
+	VolumeInfo.CoverRange = CascadeInfo.VolumeCoverRangeArray[ClipId];
+	VolumeInfo.Scrolling = CascadeInfo.VolumeScrollingArray[ClipId];
+	VolumeInfo.VoxelCellSize = VolumeInfo.CoverRange / VolumeInfo.Resolution;
+	return VolumeInfo;
+}
+
+float3 SignNotZero3(float3 v)
+{
+    return float3(
+		(v.x >= 0.f) ? 1.f : -1.f,
+		(v.y >= 0.f) ? 1.f : -1.f,
+		(v.z >= 0.f) ? 1.f : -1.f
+	);
+}
+
+// https://sugulee.wordpress.com/2021/01/19/screen-space-reflections-implementation-and-optimization-part-2-hi-z-tracing-method/
+float MoveToNextCellDDA(in FVolumeInfo VolumeInfo, float3 SamplePoint, float3 RayDir, int MipLevel)
+{
+	float3 CellSize =  VolumeInfo.VoxelCellSize * pow(2, MipLevel);
+
+	// 1. calc move step
+	float3 RayDirSign = SignNotZero3(RayDir);
+	float3 MoveStep = saturate(RayDirSign);
+	float3 MoveOffset = RayDirSign * CellSize * 1e-4;
+
+	// 2. calc next cell's boundary
+	int3 CurrentCell = floor(SamplePoint / CellSize);
+	int3 NextCell = CurrentCell + MoveStep;
+	float3 NextCellBoundary = NextCell * CellSize + MoveOffset;
+
+	// 3. calc min distance to move SamplePoint, make it move at least 1 cell align X, Y or Z 
+	float3 DeltaPos = NextCellBoundary - SamplePoint;
+	DeltaPos /= RayDir;
+	float MoveDistance = min(DeltaPos.x, min(DeltaPos.y, DeltaPos.z));
+
+	return MoveDistance;
+}
+
+bool IsPointInsideVoxel(in FVolumeInfo VolumeInfo, int3 VoxelIndex, uint2 BitOccupy, int MipLevel)
+{
+	int3 IndexInsideBlock = VoxelIndex % VOXEL_BLOCK_SIZE;
+
+	if(MipLevel == 2)
+	{
+		return any(BitOccupy != 0);
+	}
+
+	if(MipLevel == 1)
+	{
+		int BitOffset = Index3DTo1D_2x2x2(IndexInsideBlock / 2) * 8;
+		int BitComp = BitOffset / 32;	// select .x or .y component in BitOccupy
+		int BitOffsetRound = BitOffset % 32;
+		uint Bit2x2x2 = (BitOccupy[BitComp] >> BitOffsetRound) & 0xFF;
+		return Bit2x2x2 != 0;
+	}
+
+	if(MipLevel == 0)
+	{
+		int BitIndex = Index3DTo1D_4x4x4(IndexInsideBlock);
+		return GetUint64SingleBit(BitOccupy, BitIndex);
+	}
+
+	return false;
+}
+
+int3 CalcVoxelIndexFromPosition(in FVolumeInfo VolumeInfo, float3 Position)
+{
+	int3 Result = floor(Position / VolumeInfo.VoxelCellSize) + VolumeInfo.Resolution * 0.5;
+	return Result;
+}
+
+bool IsTwoPointInDifferentBlock(in FVolumeInfo VolumeInfo, float3 PointA, float3 PointB)
+{
+	int3 VoxelIndexA = CalcVoxelIndexFromPosition(VolumeInfo, PointA);
+	int3 BlockIndexA = VoxelIndexA / VOXEL_BLOCK_SIZE;
+
+	int3 VoxelIndexB = CalcVoxelIndexFromPosition(VolumeInfo, PointB);
+	int3 BlockIndexB = VoxelIndexB / VOXEL_BLOCK_SIZE;
+
+	return any(BlockIndexA != BlockIndexB);
+}
+
+#define MIN_MIP_LEVEL (0)
+#define MAX_MIP_LEVEL (2)
+
+FVoxelRaytracingHitPayload VoxelRaytracingSingleClip(in FVolumeInfo VolumeInfo, in Texture3D<uint2> BitOccupyClipmap, inout FVoxelRaytracingRequest RTRequest)
+{
+	float3 SamplePoint = RTRequest.RayStart - VolumeInfo.Center;
+	int3 VoxelIndex = int3(0, 0, 0);
+	int MipLevel = MIN_MIP_LEVEL;
+	bool HitMask = false;
+	bool NeedReadBitOccupy = true;
+	int3 ClipmapAccessIndex = int3(0, 0, 0);
+
+	for(int i=0; i<128; i++, RTRequest.MaxStepNum--)
+	{
+		VoxelIndex = CalcVoxelIndexFromPosition(VolumeInfo, SamplePoint);
+
+		if(any(VoxelIndex < 0) || any(VoxelIndex >= VolumeInfo.Resolution) || RTRequest.MaxStepNum <= 0 || RTRequest.RayDistance > RTRequest.MaxDistance)
+		{
+			break;
+		}
+
+		int3 BlockIndex = VoxelIndex / VOXEL_BLOCK_SIZE;
+		ClipmapAccessIndex = BlockClipmapAddressMapping(BlockIndex, VolumeInfo.Resolution, VolumeInfo.Scrolling, VolumeInfo.ClipIndex);
+		uint2 BitOccupy = BitOccupyClipmap.Load(int4(ClipmapAccessIndex, 0)).xy;
+
+		// 1. check if sample point hit mip 0,1,2 voxel
+		bool IsHitMip = IsPointInsideVoxel(VolumeInfo, VoxelIndex, BitOccupy, MipLevel);
+
+		// 2. if hit mip 0 (most accurate level) we assume ray actually hit
+		if(IsHitMip && MipLevel==MIN_MIP_LEVEL)
+		{
+			HitMask = true;
+			break;
+		}
+
+		// 3. if not hit in cur mip, we can skip entire cell by DDA march 1 step
+		float MoveDistance = IsHitMip ? 0 : MoveToNextCellDDA(VolumeInfo, SamplePoint, RTRequest.RayDir, MipLevel);
+		SamplePoint += RTRequest.RayDir * MoveDistance;
+		RTRequest.RayDistance += MoveDistance;
+
+		// 4. if hit in cur mip, we stay in place, just go down to more accurate mip level
+		MipLevel += IsHitMip ? -1 : 1;
+		MipLevel = clamp(MipLevel, MIN_MIP_LEVEL, MAX_MIP_LEVEL);
+	}
+
+	FVoxelRaytracingHitPayload Payload;
+	Payload.Position = SamplePoint + VolumeInfo.Center;
+	Payload.IsHit = HitMask;
+	Payload.VoxelIndex = VoxelIndex;
+	Payload.VoxelPosition = CalcVoxelCenterPos(VoxelIndex, VolumeInfo.Resolution, VolumeInfo.Center, VolumeInfo.CoverRange);
+	Payload.VoxelCellSize = VolumeInfo.VoxelCellSize.x;
+	Payload.ClipIndex = VolumeInfo.ClipIndex;
+	Payload.ClipmapAccessIndex = ClipmapAccessIndex;
+
+	return Payload;
+}
+
+FVoxelRaytracingHitPayload VoxelRaytracing(in FVoxelCascadeInfo CascadeInfo, in Texture3D<uint2> BitOccupyClipmap, inout FVoxelRaytracingRequest RTRequest)
+{
+	for(int ClipId = RTRequest.MinClipIndex; ClipId <= RTRequest.MaxClipIndex; ClipId++)
+    {
+        FVolumeInfo VolumeInfo = ResolveVolumeInfo(CascadeInfo, ClipId);
+
+        FVoxelRaytracingHitPayload Hit = VoxelRaytracingSingleClip(VolumeInfo, BitOccupyClipmap, RTRequest);
+
+        if(Hit.IsHit)
+        {
+            return Hit;
+        }
+
+		// trace from last clip's ray start
+		RTRequest.RayStart = Hit.Position;
+    }
+
+	return (FVoxelRaytracingHitPayload)0;
+}
+
+FVoxelRaytracingHitPayload DistanceFieldRaytracingSingleClip(in FVolumeInfo VolumeInfo, in Texture3D<float> DistanceFieldClipmap, in SamplerState LinearSampler, inout FVoxelRaytracingRequest RTRequest)
+{
+	float3 VolumeMin = (VolumeInfo.CoverRange * -0.5) + VolumeInfo.VoxelCellSize;	// padding 1 texel
+	float3 VolumeMax = (VolumeInfo.CoverRange * 0.5) - VolumeInfo.VoxelCellSize;
+	float3 SamplePoint = RTRequest.RayStart - VolumeInfo.Center;
+	bool HitMask = false;
+	float Tolerance = VolumeInfo.VoxelCellSize * 0.5001;	// distance is 0 in voxel center, so half the radius
+
+	for(int i=0; i<128; i++, RTRequest.MaxStepNum--)
+	{
+		if(any(SamplePoint <= VolumeMin) || any(SamplePoint >= VolumeMax) || RTRequest.MaxStepNum <= 0 || RTRequest.RayDistance > RTRequest.MaxDistance)
+		{
+			break;
+		}
+
+		// 1. map translated position to 3d texture uv
+		float3 SamplePosition01 = (SamplePoint / VolumeInfo.CoverRange) + 0.5;
+		float3 SampleUV = frac(SamplePosition01 + VolumeInfo.Scrolling / float3(VolumeInfo.Resolution));	// frac is for x mod 1
+		SampleUV.z /= float(VolumeInfo.NumClips);
+		SampleUV.z += VolumeInfo.ClipIndex / float(VolumeInfo.NumClips);
+
+		// 2. load distance
+		float Distance = DecodeDistance(DistanceFieldClipmap.SampleLevel(LinearSampler, SampleUV, 0).r, VolumeInfo.VoxelCellSize);
+
+		// 3. check if we hit
+		if(Distance < Tolerance)
+		{
+			HitMask = true;
+			break;
+		}
+
+		// note: sqrt 3 is for conservative step scale (propagate distance may > real distance)
+		SamplePoint += RTRequest.RayDir * Distance / sqrt(3.0f);
+	}
+
+	// 4. find a voxel we actually hit by searching voxel neighbors
+	// note: hit point may outside voxel, cause hit tolerance distance usually larger than voxel center's distance
+	int3 VoxelIndex = CalcVoxelIndexFromPosition(VolumeInfo, SamplePoint);
+	float MinRayDistance = 114514;
+	int3 Offset = int3(0, 0, 0);
+	int3 NeighborOffsets[7] = { int3(0, 0, 0), int3(-1, 0, 0), int3(1, 0, 0), int3(0, -1, 0), int3(0, 1, 0), int3(0, 0, -1), int3(0, 0, 1) };
+	for(int i=0; i<7; i++)
+	{
+		int3 NeighborVoxelIndex = clamp(VoxelIndex + NeighborOffsets[i], int3(0, 0, 0), VolumeInfo.Resolution - 1);
+		int3 NeighborSampleIndex = VoxelClipmapAddressMapping(NeighborVoxelIndex, VolumeInfo.Resolution, VolumeInfo.Scrolling, VolumeInfo.ClipIndex);
+		bool HasVoxel = DecodeDistance(DistanceFieldClipmap[NeighborSampleIndex].r, VolumeInfo.VoxelCellSize) < Tolerance;
+
+		float3 VoxelPos = CalcVoxelCenterPos(NeighborVoxelIndex, VolumeInfo.Resolution, VolumeInfo.Center, VolumeInfo.CoverRange);
+		float VoxelToCamera = length(VoxelPos - RTRequest.RayStart);
+
+		// fint closest voxel as hit voxel
+		if(HasVoxel && VoxelToCamera < MinRayDistance)
+		{
+			MinRayDistance = VoxelToCamera;
+			Offset = NeighborOffsets[i];
+		}
+	}
+	VoxelIndex = clamp(VoxelIndex + Offset, int3(0, 0, 0), VolumeInfo.Resolution - 1);
+
+	// 5. pack hit result
+	int3 BlockIndex = VoxelIndex / VOXEL_BLOCK_SIZE;
+	int3 ClipmapAccessIndex = BlockClipmapAddressMapping(BlockIndex, VolumeInfo.Resolution, VolumeInfo.Scrolling, VolumeInfo.ClipIndex);
+
+	FVoxelRaytracingHitPayload Payload = (FVoxelRaytracingHitPayload)0;
+	Payload.Position = SamplePoint + VolumeInfo.Center;
+	Payload.IsHit = HitMask;
+	Payload.VoxelIndex = VoxelIndex;
+	Payload.VoxelPosition = CalcVoxelCenterPos(VoxelIndex, VolumeInfo.Resolution, VolumeInfo.Center, VolumeInfo.CoverRange);
+	Payload.VoxelCellSize = VolumeInfo.VoxelCellSize.x;
+	Payload.ClipIndex = VolumeInfo.ClipIndex;
+	Payload.ClipmapAccessIndex = ClipmapAccessIndex;
+
+	return Payload;
+}
+
+FVoxelRaytracingHitPayload DistanceFieldRaytracing(in FVoxelCascadeInfo CascadeInfo, in Texture3D<float> DistanceFieldClipmap, in SamplerState LinearSampler, inout FVoxelRaytracingRequest RTRequest)
+{
+	for(int ClipId = RTRequest.MinClipIndex; ClipId <= RTRequest.MaxClipIndex; ClipId++)
+    {
+        FVolumeInfo VolumeInfo = ResolveVolumeInfo(CascadeInfo, ClipId);
+
+        FVoxelRaytracingHitPayload Hit = DistanceFieldRaytracingSingleClip(VolumeInfo, DistanceFieldClipmap, LinearSampler, RTRequest);
+
+        if(Hit.IsHit)
+        {
+            return Hit;
+        }
+
+		// trace from last clip's ray start
+		RTRequest.RayStart = Hit.Position;
+    }
+
+	return (FVoxelRaytracingHitPayload)0;
+}
+
+float3 GetVoxelCellSize(in FVoxelCascadeInfo CascadeInfo, float3 WorldPosition)
+{
+	const float Padding = 4.0;
+	int i = 0;
+	float3 VoxelCellSize = float3(0, 0, 0);
+	for(int i=0; i<CascadeInfo.NumClips; i++)
+	{
+		VoxelCellSize = CascadeInfo.VolumeCoverRangeArray[i] / float3(CascadeInfo.VolumeResolution);
+		float3 VolumeMin = CascadeInfo.VolumeCenterArray[i] - CascadeInfo.VolumeCoverRangeArray[i] * 0.5 + VoxelCellSize * Padding;
+		float3 VolumeMax = CascadeInfo.VolumeCenterArray[i] + CascadeInfo.VolumeCoverRangeArray[i] * 0.5 - VoxelCellSize * Padding;
+		if(all(VolumeMin < WorldPosition) && all(WorldPosition < VolumeMax))
+		{
+			break;
+		}
+	}
+
+	return VoxelCellSize;
+}

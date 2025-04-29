@@ -1,0 +1,94 @@
+#pragma once
+
+#include "RealtimeGICommon.ush"
+#include "VoxelRayTracing.ush"
+#include "ProbeVolumeCommon.ush"
+
+// ---------------------------------------- (^^_) ---------------------------------------- //
+
+int ClipIndex;
+int NumClips;
+int3 VolumeResolution;
+float3 VolumeCenterArray[MAX_CLIP_NUM];
+float3 VolumeCoverRangeArray[MAX_CLIP_NUM];
+int3 VolumeScrollingArray[MAX_CLIP_NUM];
+int3 NumVoxelPagesInXYZ;
+
+SamplerState LinearSampler;
+
+Texture3D<uint2> VoxelBitOccupyClipmap;
+Texture3D<int> VoxelPageClipmap;
+Texture3D<float4> VoxelPoolBaseColor;
+Texture3D<float4> VoxelPoolNormal;
+Texture3D<float4> VoxelPoolEmissive;
+Texture3D<float3> VoxelPoolRadiance;
+Texture3D<float> DistanceFieldClipmap;
+
+FVoxelCascadeInfo ResolveCascadeInfo()
+{
+    FVoxelCascadeInfo CascadeInfo = (FVoxelCascadeInfo)0;
+    CascadeInfo.NumClips = NumClips;
+    CascadeInfo.VolumeResolution = VolumeResolution;
+    CascadeInfo.VolumeCenterArray = VolumeCenterArray;
+    CascadeInfo.VolumeCoverRangeArray = VolumeCoverRangeArray;
+    CascadeInfo.VolumeScrollingArray = VolumeScrollingArray;
+
+    return CascadeInfo;
+}
+
+// ---------------------------------------- (^^_) ---------------------------------------- //
+
+int RadianceProbeResolution;
+int2 NumRadianceProbesInAtlasXY;
+int RadianceProbeMinClipLevel;
+int IrradianceProbeMinClipLevel;
+Texture3D<float4> ProbeOffsetClipmap;
+Texture3D<float4> IrradianceProbeClipmap;
+Texture3D<int> RadianceProbeIdClipmap;
+Texture2D<float3> RadianceProbeAtlas;
+Texture2D<float> RadianceProbeDistanceAtlas;
+
+float3 FetchRadianceFromVoxelScene(in FVoxelRaytracingRequest RTRequest, in FVoxelRaytracingHitPayload Hit)
+{
+    // prevent self intersection when ray start inside block
+    float3 VoxelMinCorner = Hit.VoxelPosition - Hit.VoxelCellSize * 0.5;
+    float3 VoxelMaxCorner = Hit.VoxelPosition + Hit.VoxelCellSize * 0.5;
+    if(all(VoxelMinCorner < RTRequest.RayStart) && all(RTRequest.RayStart < VoxelMaxCorner))
+    {
+        return float3(0, 0, 0);
+    }
+
+    int VoxelPageId = VoxelPageClipmap[Hit.ClipmapAccessIndex].r;
+    if(VoxelPageId == PAGE_ID_INVALID)
+    {
+        return float3(0, 0, 0);
+    }
+
+    int3 IndexInPool = PageAddressMapping(VoxelPageId, NumVoxelPagesInXYZ, Hit.VoxelIndex);
+    float3 WorldNormal = VoxelPoolNormal[IndexInPool].rgb * 2 - 1;
+
+    // note: select front face voxel based on ray direction
+    int IsBackFace = dot(WorldNormal, -RTRequest.RayDir) < 0;
+    int3 TwoSideIndex = TwoSideAddressMapping(IndexInPool, IsBackFace);
+    float3 HitRadiance = VoxelPoolRadiance[TwoSideIndex].rgb;
+
+    return HitRadiance;
+}
+
+float3 FetchNormalFromVoxelScene(in FVoxelRaytracingRequest RTRequest, in FVoxelRaytracingHitPayload Hit)
+{
+    int VoxelPageId = VoxelPageClipmap[Hit.ClipmapAccessIndex].r;
+    if(VoxelPageId == PAGE_ID_INVALID)
+    {
+        return float3(0, 0, 0);
+    }
+
+    int3 IndexInPool = PageAddressMapping(VoxelPageId, NumVoxelPagesInXYZ, Hit.VoxelIndex);
+    float3 WorldNormal = VoxelPoolNormal[IndexInPool].rgb * 2 - 1;
+
+    // note: select front face voxel based on ray direction
+    int IsBackFace = dot(WorldNormal, -RTRequest.RayDir) < 0;
+    WorldNormal *= lerp(1, -1, IsBackFace);
+    
+    return WorldNormal;
+}

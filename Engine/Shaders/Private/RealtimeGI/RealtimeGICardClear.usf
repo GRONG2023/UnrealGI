@@ -1,0 +1,41 @@
+#include "../Common.ush"
+
+float CardAtlasResolution;
+StructuredBuffer<float4> CardClearQuadUVTransformBuffer;
+
+void MainVertexShader(
+	in float4 InPosition : ATTRIBUTE0,
+    uint InstanceId : SV_InstanceID, 
+	out float4 OutPosition : SV_POSITION
+	)
+{
+    float4 CardSizeAndOffset = CardClearQuadUVTransformBuffer[InstanceId];
+
+    float2 Scale = CardSizeAndOffset.xy / CardAtlasResolution;
+    float2 Offset = (CardSizeAndOffset.zw / CardAtlasResolution) * 2 - 1;   // map [0, 1] to [-1, 1]
+    Offset += (Scale * 0.5) * 2;  // change pivot from center to topleft, cause ndc space range [-1, 1], so we mul 2 to match the "width"
+    float2 PositionXY = InPosition.xy * Scale + Offset;
+
+    // @TODO: fetch info from RHI
+    bool IsRHITextureOriginInTopLeft = true;
+    if (IsRHITextureOriginInTopLeft)
+    {
+        PositionXY *= float2(1, -1);
+    }
+
+	float4 Position = float4(PositionXY, 0, 1.0f);
+	OutPosition = Position;
+}
+
+void MainPixelShader(
+    out float4 OutColor0 : SV_Target0,
+    out float4 OutColor1 : SV_Target1,
+    out float4 OutColor2 : SV_Target2,
+    out float4 OutColor3 : SV_Target3
+    )
+{
+	OutColor0 = float4(0, 0, 0, 0);
+    OutColor1 = float4(0, 0, 0, 0);
+    OutColor2 = float4(0, 0, 0, 0);
+    OutColor3 = float4(0, 0, 0, 0);
+}

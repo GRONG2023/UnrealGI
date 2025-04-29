@@ -1,0 +1,127 @@
+#include "RealtimeGICommon.ush"
+#include "../Common.ush"
+
+// ---------------------------------------- (^^_) ---------------------------------------- //
+
+int NumUpdateObjects;
+StructuredBuffer<FObjectInfo> ObjectInfoUploadBuffer;
+RWStructuredBuffer<FObjectInfo> RWObjectInfoBuffer;
+
+[numthreads(THREADGROUP_SIZE_X, THREADGROUP_SIZE_Y, THREADGROUP_SIZE_Z)]
+void ObjectInfoUpdateCS(uint3 ThreadId : SV_DispatchThreadID, uint3 GroupThreadId : SV_GroupThreadID, uint3 GroupId : SV_GroupID)
+{
+    int Index = ThreadId.x;
+    if(Index >= NumUpdateObjects) return;
+
+    FObjectInfo ObjectInfo = ObjectInfoUploadBuffer[Index];
+    int Id = GetObjectId(ObjectInfo);
+
+    RWObjectInfoBuffer[Id] = ObjectInfo;
+}
+
+// ---------------------------------------- (^^_) ---------------------------------------- //
+
+int NumRemovedObjects;
+StructuredBuffer<int> RemovedObjectIdBuffer;
+
+[numthreads(THREADGROUP_SIZE_X, THREADGROUP_SIZE_Y, THREADGROUP_SIZE_Z)]
+void ObjectInfoRemoveCS(uint3 ThreadId : SV_DispatchThreadID, uint3 GroupThreadId : SV_GroupThreadID, uint3 GroupId : SV_GroupID)
+{
+    int Index = ThreadId.x;
+    if(Index >= NumRemovedObjects) return;
+
+    int FreeId = RemovedObjectIdBuffer[Index];
+
+    // mark as invalid
+    FObjectInfo ObjectInfo = (FObjectInfo)0;
+    SetObjectId(ObjectInfo, OBJECT_ID_INVALID);
+    RWObjectInfoBuffer[FreeId] = ObjectInfo;
+}
+
+// ---------------------------------------- (^^_) ---------------------------------------- //
+
+StructuredBuffer<FObjectInfo> ObjectInfoBuffer;
+RWStructuredBuffer<FMiniObjectInfo> RWMiniObjectInfoBuffer;
+RWStructuredBuffer<int> RWObjectInfoCounter;
+
+groupshared bool ObjectValidMask[THREADGROUP_SIZE_X];
+groupshared int ObjectIdCompact[THREADGROUP_SIZE_X];
+
+[numthreads(THREADGROUP_SIZE_X, THREADGROUP_SIZE_Y, THREADGROUP_SIZE_Z)]
+void ObjectInfoCompactCS(uint3 ThreadId : SV_DispatchThreadID, uint3 GroupThreadId : SV_GroupThreadID, uint3 GroupId : SV_GroupID)
+{
+    int GroupThreadIndex = GroupThreadId.x;
+    int Index = ThreadId.x;
+
+    FObjectInfo ObjectInfo = ObjectInfoBuffer[Index];
+    ObjectValidMask[GroupThreadIndex] = GetObjectId(ObjectInfo) != OBJECT_ID_INVALID;
+    ObjectIdCompact[GroupThreadIndex] = OBJECT_ID_INVALID;
+
+    GroupMemoryBarrierWithGroupSync();
+
+    if(GroupThreadIndex == 0)
+    {
+        int ObjectNum = 0;
+        for(int i=0; i<THREADGROUP_SIZE_X; i++)
+        {
+            if(ObjectValidMask[i])
+            {
+                ObjectNum += 1;
+            }
+        }
+
+        int StartIndex = OBJECT_ID_INVALID;
+        InterlockedAdd(RWObjectInfoCounter[0], ObjectNum, StartIndex);
+
+        for(int i=0; i<THREADGROUP_SIZE_X; i++)
+        {
+            if(ObjectValidMask[i])
+            {
+                ObjectIdCompact[i] = StartIndex;
+                StartIndex += 1;
+            }
+        }
+    }
+
+    GroupMemoryBarrierWithGroupSync();
+
+    int WriteIndex = ObjectIdCompact[GroupThreadIndex];
+    if(ObjectValidMask[GroupThreadIndex])
+    {
+        FMiniObjectInfo MiniObjectInfo = (FMiniObjectInfo)0;
+        MiniObjectInfo.WorldBoundsMinAndObjectId = float4(ObjectInfo.WorldBoundsMin.xyz, GetObjectId(ObjectInfo));
+        MiniObjectInfo.WorldBoundsMax = ObjectInfo.WorldBoundsMax;
+
+        RWMiniObjectInfoBuffer[WriteIndex] = MiniObjectInfo;
+    }
+}
+
+// ---------------------------------------- (^^_) ---------------------------------------- //
+
+int SurfaceCacheNum;
+
+StructuredBuffer<FCardInfo> CardInfoUploadBuffer;
+RWStructuredBuffer<FCardInfo> RWCardInfoBuffer;
+
+StructuredBuffer<FSurfaceCacheInfo> SurfaceCacheInfoUploadBuffer;
+RWStructuredBuffer<FSurfaceCacheInfo> RWSurfaceCacheInfoBuffer;
+
+[numthreads(THREADGROUP_SIZE_X, THREADGROUP_SIZE_Y, THREADGROUP_SIZE_Z)]
+void SurfaceCacheInfoUpdateCS(uint3 ThreadId : SV_DispatchThreadID, uint3 GroupThreadId : SV_GroupThreadID, uint3 GroupId : SV_GroupID)
+{
+    int Index = ThreadId.x;
+    if(Index >= SurfaceCacheNum) return;
+
+    FSurfaceCacheInfo SurfaceCacheInfo = SurfaceCacheInfoUploadBuffer[Index];
+
+    int SurfaceCacheId = SurfaceCacheInfo.SurfaceCacheId;
+    RWSurfaceCacheInfoBuffer[SurfaceCacheId] = SurfaceCacheInfo;
+
+    int CardReadOffset = Index * MAX_CARDS_PER_MESH;
+    int CardWriteOffset = SurfaceCacheId * MAX_CARDS_PER_MESH;  // simple linear allocator
+
+    for(int CardIndex=0; CardIndex<MAX_CARDS_PER_MESH; CardIndex++)
+    {
+        RWCardInfoBuffer[CardWriteOffset + CardIndex] = CardInfoUploadBuffer[CardReadOffset + CardIndex];
+    }
+}

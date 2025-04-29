@@ -1,0 +1,86 @@
+#include "../Common.ush"
+#include "/Engine/Generated/Material.ush"
+#include "/Engine/Generated/VertexFactory.ush"
+
+struct FCardCaptureVSToPS
+{
+	FVertexFactoryInterpolantsVSToPS FactoryInterpolants;
+    float3 TranslatedWorldPosition : TEXCOORD6;
+	float3 LocalPosition : TEXCOORD7;
+	float3 LocalSpaceNormal : TEXCOORD8;
+    float Depth : TEXCOORD9;
+};
+
+void RealtimeGICardCaptureVS(
+    FVertexFactoryInput Input,
+	uint InstanceId : SV_InstanceID,
+    out FCardCaptureVSToPS OutParameters,
+    out float4 OutPosition : SV_POSITION
+)
+{
+    ResolvedView = ResolveView();
+
+	FVertexFactoryIntermediates VFIntermediates = GetVertexFactoryIntermediates(Input);
+
+	float4 WorldPosition = VertexFactoryGetWorldPosition(Input, VFIntermediates);
+	float3 LocalPosition = Input.Position.xyz;
+	float3x3 TangentToLocal = VertexFactoryGetTangentToLocal(Input, VFIntermediates);
+
+	FMaterialVertexParameters VertexParameters = GetMaterialVertexParameters(Input, VFIntermediates, WorldPosition.xyz, TangentToLocal);
+	const float3 WorldNormal = VertexFactoryGetWorldNormal(Input, VFIntermediates);
+
+	WorldPosition.xyz += GetMaterialWorldPositionOffset(VertexParameters);
+
+    OutParameters.FactoryInterpolants = VertexFactoryGetInterpolantsVSToPS(Input, VFIntermediates, VertexParameters);
+
+	OutParameters.TranslatedWorldPosition = WorldPosition.xyz;
+    OutParameters.LocalPosition = LocalPosition;
+	OutParameters.LocalSpaceNormal = TangentToLocal[2];
+
+    float4 OutSVPosition = mul(float4(LocalPosition, 1), CardCaptureParams.ViewProjectionMatrixs[InstanceId]);
+	OutParameters.Depth = OutSVPosition.z;
+
+    float4 ViewportInfo = CardCaptureParams.ViewportInfos[InstanceId];
+    OutSVPosition.xy = OutSVPosition.xy * ViewportInfo.xy + ViewportInfo.zw;
+	
+    OutPosition = OutSVPosition;
+	// OutPosition = mul(WorldPos, ResolvedView.TranslatedWorldToClip);	// for debug
+}
+
+void RealtimeGICardCapturePS( 
+	FCardCaptureVSToPS Inputs,
+	in float4 SvPosition : SV_Position,
+	out float4 OutBaseColor : SV_Target0,
+    out float4 OutNormal : SV_Target1,
+    out float4 OutEmissive : SV_Target2,
+    out float4 OutDepth : SV_Target3
+)
+{
+	ResolvedView = ResolveView();
+
+	FMaterialPixelParameters MaterialParameters = GetMaterialPixelParameters(Inputs.FactoryInterpolants, SvPosition);
+	FPixelMaterialInputs PixelMaterialInputs;
+    
+#if INTERPOLATE_POSITION
+	float4 ScreenPosition = SvPositionToResolvedScreenPosition(SvPosition);  
+	float3 TranslatedWorld = Inputs.TranslatedWorldPosition.xyz;
+	CalcMaterialParametersEx(MaterialParameters, PixelMaterialInputs, SvPosition, ScreenPosition, 1, TranslatedWorld, TranslatedWorld);
+#else
+	CalcMaterialParameters(MaterialParameters, PixelMaterialInputs, SvPosition, 1);
+#endif
+
+	GetMaterialCoverageAndClipping(MaterialParameters, PixelMaterialInputs);
+
+	float3 BaseColor = GetMaterialBaseColor(PixelMaterialInputs);
+	float3 Emissive = GetMaterialEmissive(PixelMaterialInputs);
+
+	float3 WorldNormal = MaterialParameters.WorldNormal;
+	float3 LocalSpaceNormal = Inputs.LocalSpaceNormal;
+	float3 EncodedNormal = LocalSpaceNormal * 0.5 + 0.5;
+
+    OutBaseColor = float4(BaseColor, 1);
+    OutNormal = float4(EncodedNormal, 1);
+    OutEmissive = float4(Emissive, 1);
+    OutDepth = float4(Inputs.Depth, 0, 0, 1);
+}
+

@@ -1,0 +1,503 @@
+#include "RealtimeGICommon.ush"
+#include "../Common.ush"
+
+// ---------------------------------------- (^^_) ---------------------------------------- //
+
+int NumObjects;
+float RejectFactor;
+float VoxelCellSize;
+float3 VolumeCenter;
+float3 VolumeCoverRange;
+
+StructuredBuffer<FMiniObjectInfo> MiniObjectInfoBuffer;
+RWStructuredBuffer<int> RWClipmapCullingResult;
+RWStructuredBuffer<int> RWClipmapObjectCounter;
+
+groupshared bool ThreadValidMask[THREADGROUP_SIZE_X];
+groupshared bool ThreadCullingResult[THREADGROUP_SIZE_X];
+groupshared int ThreadWriteIndex[THREADGROUP_SIZE_X];
+
+bool IsObjectPassCulling(int GroupThreadIndex)
+{
+    bool ValidThread = ThreadValidMask[GroupThreadIndex];
+    bool IntersectObject = ThreadCullingResult[GroupThreadIndex];
+    return ValidThread && IntersectObject;
+}
+
+[numthreads(THREADGROUP_SIZE_X, THREADGROUP_SIZE_Y, THREADGROUP_SIZE_Z)]
+void CullObjectToClipmapCS(uint3 ThreadId : SV_DispatchThreadID, uint3 GroupThreadId : SV_GroupThreadID, uint3 GroupId : SV_GroupID)
+{
+    int GroupThreadIndex = GroupThreadId.x;
+    int ObjectIndex = ThreadId.x;   // object index in compact array (MiniObjectInfoBuffer), not equal to ObjectId
+
+    // clamp the index, mark invalid thread
+    ThreadValidMask[GroupThreadIndex] = ObjectIndex < NumObjects;
+    ObjectIndex = min(ObjectIndex, NumObjects - 1);
+    
+    // 1. do culling
+    FMiniObjectInfo ObjectInfo = MiniObjectInfoBuffer[ObjectIndex];
+    bool IsObjectInsideVolume = ObjectIntersectAABB(ObjectInfo, VolumeCenter, VolumeCoverRange);
+
+    float3 WorldBoundsMin, WorldBoundsMax;
+	DecodeObjectWorldBound(ObjectInfo, WorldBoundsMin, WorldBoundsMax);
+    float ObjectBoundRadius = max3(WorldBoundsMax - WorldBoundsMin);
+    bool IsObjectTooSmall = ObjectBoundRadius < (VoxelCellSize * RejectFactor);
+
+    ThreadCullingResult[GroupThreadIndex] = IsObjectInsideVolume && !IsObjectTooSmall;
+
+    GroupMemoryBarrierWithGroupSync();
+
+    // 2. allocate space in culling result array
+    if(GroupThreadIndex == 0)
+    {
+        int VisibleObjectCounter = 0;
+        for(int i=0; i<THREADGROUP_SIZE_X; i++)
+        {
+            if(IsObjectPassCulling(i))
+            {
+                VisibleObjectCounter += 1;
+            }
+        }
+
+        int StartIndex = 0;
+        InterlockedAdd(RWClipmapObjectCounter[0], VisibleObjectCounter, StartIndex);
+
+        for(int i=0; i<THREADGROUP_SIZE_X; i++)
+        {
+            if(IsObjectPassCulling(i))
+            {
+                ThreadWriteIndex[i] = StartIndex;
+                StartIndex += 1;
+            }
+        }
+    }
+
+    GroupMemoryBarrierWithGroupSync();
+
+    // 3. write into culling result
+    int WriteIndex = ThreadWriteIndex[GroupThreadIndex];
+    if(IsObjectPassCulling(GroupThreadIndex))
+    {
+        RWClipmapCullingResult[WriteIndex] = ObjectIndex;   // store index in compact array, cause we need access memory continuously
+    }
+}
+
+// ---------------------------------------- (^^_) ---------------------------------------- //
+
+int NumUpdateChunks;
+int NumThreadsForCulling;
+StructuredBuffer<int> ClipmapObjectCounter;
+RWStructuredBuffer<int> RWIndirectArgs;
+
+[numthreads(THREADGROUP_SIZE_X, THREADGROUP_SIZE_Y, THREADGROUP_SIZE_Z)]
+void BuildUpdateChunkCullingIndirectArgsCS(uint3 ThreadId : SV_DispatchThreadID, uint3 GroupThreadId : SV_GroupThreadID, uint3 GroupId : SV_GroupID)
+{
+    RWIndirectArgs[0] = ceil(float(ClipmapObjectCounter[0]) / float(NumThreadsForCulling));
+    RWIndirectArgs[1] = NumUpdateChunks;
+    RWIndirectArgs[2] = 1; 
+}
+
+// ---------------------------------------- (^^_) ---------------------------------------- //
+
+int MaxObjectNumPerUpdateChunk;
+int3 VolumeResolution;
+int3 UpdateChunkResolution;
+
+StructuredBuffer<int> UpdateChunkList;
+StructuredBuffer<int> ClipmapCullingResult;
+RWStructuredBuffer<int> RWUpdateChunkObjectCounter;
+
+// 2D array as 1D, single row represent an update chunk, example:
+// Chunk 114 intersect objects: [ 3,  5,  7,  8,  9,  _,  _,  _]
+// Chunk 514 intersect objects: [ 1,  2,  4, 11, 14,  _,  _,  _]
+// Chunk 191 intersect objects: [19, 12, _ ,  _,  _,  _,  _,  _]
+RWStructuredBuffer<int> RWUpdateChunkCullingResult;
+
+[numthreads(THREADGROUP_SIZE_X, THREADGROUP_SIZE_Y, THREADGROUP_SIZE_Z)]
+void CullObjectToUpdateChunkCS(uint3 ThreadId : SV_DispatchThreadID, uint3 GroupThreadId : SV_GroupThreadID, uint3 GroupId : SV_GroupID)
+{
+    int GroupThreadIndex = GroupThreadId.x;
+    int ObjectIndex = ThreadId.x;   // object index in clipmap's culling result
+    int ChunkIndex = ThreadId.y;    // for each object we loop all UpdateChunks to see if intersect, so it's a O(M*N) algo
+
+    // clamp the index, mark invalid thread
+    int NumObjectsInClipmap = ClipmapObjectCounter[0];
+    ThreadValidMask[GroupThreadIndex] = ObjectIndex < NumObjectsInClipmap;
+    ObjectIndex = min(ObjectIndex, NumObjectsInClipmap - 1);
+
+    // calc update chunk's bound
+    int3 ChunkNumXYZ = VolumeResolution / UpdateChunkResolution;
+    int ChunkId_1D = UpdateChunkList[ChunkIndex];
+    float3 ChunkId_3D = Index1DTo3D(ChunkId_1D, ChunkNumXYZ);
+    float3 ChunkCenter = CalcVoxelCenterPos(ChunkId_3D, ChunkNumXYZ, VolumeCenter, VolumeCoverRange); // we see chunk as a "large" voxel
+    float3 ChunkCoverRange = VolumeCoverRange * UpdateChunkResolution / VolumeResolution;
+
+    // 1. do culling
+    int CompactObjectId = ClipmapCullingResult[ObjectIndex];    // object index in compact array, not equal to ObjectId
+    FMiniObjectInfo ObjectInfo = MiniObjectInfoBuffer[CompactObjectId];
+    ThreadCullingResult[GroupThreadIndex] = ObjectIntersectAABB(ObjectInfo, ChunkCenter, ChunkCoverRange);
+
+    GroupMemoryBarrierWithGroupSync();
+
+    // 2. allocate space in culling result array
+    if(GroupThreadIndex == 0)
+    {
+        int VisibleObjectCounter = 0;
+        for(int i=0; i<THREADGROUP_SIZE_X; i++)
+        {
+            if(IsObjectPassCulling(i))
+            {
+                VisibleObjectCounter += 1;
+            }
+        }
+
+        int StartIndex = 0;
+        InterlockedAdd(RWUpdateChunkObjectCounter[ChunkIndex], VisibleObjectCounter, StartIndex);
+
+        for(int i=0; i<THREADGROUP_SIZE_X; i++)
+        {
+            if(IsObjectPassCulling(i))
+            {
+                ThreadWriteIndex[i] = StartIndex;
+                StartIndex += 1;
+            }
+        }
+    }
+
+    GroupMemoryBarrierWithGroupSync();
+
+    // 3. write into culling result
+    int CullingResultStart = ChunkIndex * MaxObjectNumPerUpdateChunk;       // store 2d logic data to 1d buffer
+    int CullingResultEnd = CullingResultStart + MaxObjectNumPerUpdateChunk; // if out of max object limit per chunk, we discard the object 
+    int WriteIndex = ThreadWriteIndex[GroupThreadIndex];
+    WriteIndex += CullingResultStart;  
+    if(IsObjectPassCulling(GroupThreadIndex) && WriteIndex < CullingResultEnd)
+    {
+        RWUpdateChunkCullingResult[WriteIndex] = GetObjectId(ObjectInfo);
+    }
+}
+
+// ---------------------------------------- (^^_) ---------------------------------------- //
+
+int SurfaceCacheAtlasResolution;
+int ClipIndex;
+int3 VolumeScrolling;
+int3 NumVoxelPagesInXYZ;
+
+StructuredBuffer<int> UpdateChunkCullingResult;
+StructuredBuffer<int> UpdateChunkObjectCounter;
+StructuredBuffer<FObjectInfo> ObjectInfoBuffer;
+StructuredBuffer<FSurfaceCacheInfo> SurfaceCacheInfoBuffer;
+StructuredBuffer<FCardInfo> CardInfoBuffer;
+
+Texture2D SurfaceCacheAtlasBaseColor;
+Texture2D SurfaceCacheAtlasNormal;
+Texture2D SurfaceCacheAtlasEmissive;
+Texture2D SurfaceCacheAtlasDepth;
+SamplerState LinearSampler;
+
+RWTexture3D<uint2> RWVoxelBitOccupyClipmap;
+RWTexture3D<int> RWVoxelPageClipmap;
+RWStructuredBuffer<int> RWVoxelPageFreeList;
+RWStructuredBuffer<int> RWVoxelPageReleaseList;
+RWTexture3D<float3> RWVoxelPoolBaseColor;
+RWTexture3D<float3> RWVoxelPoolNormal;
+RWTexture3D<float3> RWVoxelPoolEmissive;
+RWTexture3D<float> RWDistanceFieldClipmap;
+
+#define NUM_THREADS (THREADGROUP_SIZE_X * THREADGROUP_SIZE_Y * THREADGROUP_SIZE_Z)
+groupshared bool ThreadVoxelOccupy[NUM_THREADS];
+groupshared int VoxelPageId;
+
+#ifndef USE_DISTANCE_FIELD
+#define USE_DISTANCE_FIELD 0
+#endif
+
+// https://iquilezles.org/articles/distfunctions/
+float DFBox(float3 LocalSpacePosition, float3 ObjectLocalBoundSize)
+{
+    float3 q = abs(LocalSpacePosition) - ObjectLocalBoundSize * 0.5;
+    return length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0);
+}
+
+[numthreads(THREADGROUP_SIZE_X, THREADGROUP_SIZE_Y, THREADGROUP_SIZE_Z)]
+void VoxelInjectCS(uint3 ThreadId : SV_DispatchThreadID, uint3 GroupThreadId : SV_GroupThreadID, uint3 GroupId : SV_GroupID)
+{
+    int3 ChunkNumXYZ = VolumeResolution / UpdateChunkResolution;
+    int ChunkIndex = ThreadId.x / UpdateChunkResolution.x;
+    int ChunkId_1D = UpdateChunkList[ChunkIndex];
+    int3 ChunkId_3D = Index1DTo3D(ChunkId_1D, ChunkNumXYZ);
+
+    int3 VoxelIndexInChunk = int3(ThreadId.x % UpdateChunkResolution.x, ThreadId.y, ThreadId.z);    // [0 ~ UpdateChunkResolution-1]
+    int3 VoxelIndex = ChunkId_3D * UpdateChunkResolution + VoxelIndexInChunk;                       // [0 ~ VolumeResolution]
+    float3 VoxelPosition = CalcVoxelCenterPos(VoxelIndex, VolumeResolution, VolumeCenter, VolumeCoverRange);
+    float VoxelCellSize = VolumeCoverRange / float3(VolumeResolution.xyz);
+
+    int CullingResultStart = ChunkIndex * MaxObjectNumPerUpdateChunk;  // access 2d logic data in 1d buffer
+    int NumObjectsInUpdateChunk = min(UpdateChunkObjectCounter[ChunkIndex], MaxObjectNumPerUpdateChunk);
+
+    // if hit voxel, we record hit point's info in this var
+    bool HasVoxel = false;
+    float2 UVInAtlas = (float2)0;
+    float4x4 LocalToWorldMatrix = (float4x4)0;  // for transform hit normal to world
+    float4 BilinearValidMask = (float4)0;       // valid pixel mask when doing bilinear filter in surface cache atlas
+    float MinDistance = 114514.19;              // min distance from cur voxel to object surface
+
+    // 1. loop all objects in update chunk, see if clipmap's voxel intersect with object
+    for(int i=0; i<NumObjectsInUpdateChunk; i++)
+    {
+        int ObjectId = UpdateChunkCullingResult[CullingResultStart + i];
+        FObjectInfo ObjectInfo = ObjectInfoBuffer[ObjectId];
+
+        // 1.1. transform voxel center to object's space
+        float3 LocalPosition = mul(float4(VoxelPosition, 1), ObjectInfo.WorldToLocalMatrix);
+
+        // note: ObjectInfo.WorldBoundsMax will extend when rotate object
+        // we just want get LocalBound's size in world space
+        float3 ObjectWorldScale = float3(
+            length(ObjectInfo.LocalToWorldMatrix[0].xyz),
+            length(ObjectInfo.LocalToWorldMatrix[1].xyz),
+            length(ObjectInfo.LocalToWorldMatrix[2].xyz)
+        );
+        float3 ObjectLocalBoundSize = ObjectInfo.LocalBoundsMax - ObjectInfo.LocalBoundsMin;
+        float OrthoDepthWorldSize = max3(ObjectLocalBoundSize * ObjectWorldScale); // note: must sync with projection matrix in CalcCardCaptureViewProjectionMatrix in c++
+
+        // if voxel is too far from object we reject
+        float LocalSpaceCellRadius = max3(VoxelCellSize / ObjectWorldScale) * 1.414;    // sqrt(2) for diagonal
+        float3 ToleranceBoundMin = ObjectInfo.LocalBoundsMin - LocalSpaceCellRadius.xxx;
+        float3 ToleranceBoundMax = ObjectInfo.LocalBoundsMax + LocalSpaceCellRadius.xxx;
+        if(any(LocalPosition < ToleranceBoundMin) || any(LocalPosition > ToleranceBoundMax))
+        {
+            // calculate approximate distance to boost distance field coverage
+        #if USE_DISTANCE_FIELD
+            float DistanceToObjectApprox = DFBox(LocalPosition, ObjectLocalBoundSize) * max3(ObjectWorldScale);
+            DistanceToObjectApprox = max(DistanceToObjectApprox, max3(VoxelCellSize) * 2);  // prevent distance too small to block the ray
+            MinDistance = min(MinDistance, DistanceToObjectApprox);
+        #endif
+            continue;
+        }
+
+        // 1.2. loop all cards's to do height field depth test
+        int SurfaceCacheId = GetSurfaceCacheId(ObjectInfo);
+        FSurfaceCacheInfo SurfaceCacheInfo = SurfaceCacheInfoBuffer[SurfaceCacheId];
+        int NumCards = SurfaceCacheInfo.NumMeshCards;
+        int CardResolution = SurfaceCacheInfo.MeshCardResolution;
+        int CardOffset = SurfaceCacheId * MAX_CARDS_PER_MESH;
+
+        for(int CardIndex=0; CardIndex<NumCards; CardIndex++)
+        {
+            FCardInfo CardInfo = CardInfoBuffer[CardOffset + CardIndex];
+            float4x4 LocalToCard = CardInfo.LocalToCardMatrix;
+
+            // 1.2.1. transform voxel pos to card capture's uv space (like shadowmap)
+            float3 CardUVZ = mul(float4(LocalPosition, 1), LocalToCard);
+            CardUVZ.xy = saturate(CardUVZ.xy * 0.5 + 0.5);
+
+            // 1.2.2. map card capture uv to atlas uv
+            float4 CardSizeAndOffset = CardInfo.CardUVTransform;
+            float4 UVTransform = CardSizeAndOffset / float(SurfaceCacheAtlasResolution);
+            UVInAtlas = CardUVZ.xy * UVTransform.xy + UVTransform.zw;
+
+            // 1.2.3. sample mesh card depth atlas, do "height field" intersection
+            float CardDepth = SurfaceCacheSampleDepth(SurfaceCacheAtlasDepth, LinearSampler, UVInAtlas, SurfaceCacheAtlasResolution, BilinearValidMask);
+            float VoxelDepth = CardUVZ.z;
+
+            // no pixel in this position in card, skip
+            if(CardDepth == 0)
+            {
+                continue;
+            }
+
+            // if voxel is close to depth tex's record height, we assume voxel hit the surface (seems like shadowmap)
+            float WorldDistancce = abs(CardDepth - VoxelDepth) * OrthoDepthWorldSize;
+            
+        #if USE_DISTANCE_FIELD
+            MinDistance = min(MinDistance, WorldDistancce);
+        #endif
+
+            if(WorldDistancce < VoxelCellSize * 0.707)  // tolerance radius is sqrt(2) / 2, for unit cube
+            {
+                HasVoxel = true;
+                LocalToWorldMatrix = ObjectInfo.LocalToWorldMatrix;
+                break;
+            }
+        }
+
+        if(HasVoxel) break;
+    }
+
+    // 2. restore result into temp LDS
+    int ThreadIndex = Index3DTo1D_4x4x4(GroupThreadId);
+    ThreadVoxelOccupy[ThreadIndex] = HasVoxel;
+
+    GroupMemoryBarrierWithGroupSync();
+
+    // 3. single head thread encode ThreadVoxelOccupy to uint64, write into bit occupy volume
+    uint2 BitOccupyBlock = uint2(0, 0);
+    int3 BlockIndex = VoxelIndex / VOXEL_BLOCK_SIZE;
+    int3 BlockAccessIndex = BlockClipmapAddressMapping(BlockIndex, VolumeResolution, VolumeScrolling, ClipIndex);
+    if(ThreadIndex == 0)
+    {
+        for(int i=0; i<NUM_THREADS; i++)
+        {
+            SetUint64SingleBit(BitOccupyBlock, i, ThreadVoxelOccupy[i]);
+        }
+
+        RWVoxelBitOccupyClipmap[BlockAccessIndex] = BitOccupyBlock;
+    }
+
+    // 4. single head thread allocate or release page
+    if(ThreadIndex == 0)
+    {
+        bool BlockHasVoxel = any(BitOccupyBlock > 0);
+        int PageId = RWVoxelPageClipmap[BlockAccessIndex];
+        int MaxPageNum = NumVoxelPagesInXYZ.x * NumVoxelPagesInXYZ.y * NumVoxelPagesInXYZ.z;
+        int PointerIndex = MaxPageNum;  // we use last element as allocator pointer
+
+        // 4.1. current block has voxel but not allocate voxel page, we just allocate for it
+        if(PageId == PAGE_ID_INVALID && BlockHasVoxel)
+        {
+            int FreePointer = 0;
+            InterlockedAdd(RWVoxelPageFreeList[PointerIndex], 1, FreePointer);
+
+            // check if free pointer is valid
+            if(FreePointer < MaxPageNum)
+            {
+                PageId = RWVoxelPageFreeList[FreePointer];
+                RWVoxelPageFreeList[FreePointer] = PAGE_ID_INVALID;
+            }
+        }
+        // 4.2. current block is empty but hold a voxel page, we just release it
+        else if(PageId != PAGE_ID_INVALID && !BlockHasVoxel)
+        {
+            int ReleasePointer = 0;
+            InterlockedAdd(RWVoxelPageReleaseList[PointerIndex], 1, ReleasePointer);
+            RWVoxelPageReleaseList[ReleasePointer] = PageId;
+            PageId = PAGE_ID_INVALID;
+        }
+        
+        // 4.3. anyway we get a page id, boardcast it to all voxel in same voxel block (same thread group)
+        VoxelPageId = PageId;
+        RWVoxelPageClipmap[BlockAccessIndex] = PageId;
+    }
+
+    GroupMemoryBarrierWithGroupSync();
+
+    // 5. every voxel write it's intersect result into voxel pool
+    if(VoxelPageId != PAGE_ID_INVALID && HasVoxel)
+    {
+        float3 BaseColor = SurfaceCacheSampleColor(SurfaceCacheAtlasBaseColor, LinearSampler, UVInAtlas, SurfaceCacheAtlasResolution, BilinearValidMask);
+        float3 Emissive = SurfaceCacheSampleColor(SurfaceCacheAtlasEmissive, LinearSampler, UVInAtlas, SurfaceCacheAtlasResolution, BilinearValidMask);
+        float3 LocalSpaceNormal = SurfaceCacheSampleColor(SurfaceCacheAtlasNormal, LinearSampler, UVInAtlas, SurfaceCacheAtlasResolution, BilinearValidMask) * 2 - 1;
+        float3 WorldNormal = normalize(mul(float4(LocalSpaceNormal, 0), LocalToWorldMatrix).xyz) * 0.5 + 0.5;
+
+        int3 WriteIndex = PageAddressMapping(VoxelPageId, NumVoxelPagesInXYZ, VoxelIndex);
+        RWVoxelPoolBaseColor[WriteIndex] = BaseColor;
+        RWVoxelPoolNormal[WriteIndex] = WorldNormal;
+        RWVoxelPoolEmissive[WriteIndex] = Emissive;
+    }
+
+    // 6. write to distance field
+#if USE_DISTANCE_FIELD
+    int3 VoxelWriteIndex = BlockAccessIndex * VOXEL_BLOCK_SIZE + VoxelIndex % VOXEL_BLOCK_SIZE;
+    RWDistanceFieldClipmap[VoxelWriteIndex] = HasVoxel ? 0 : EncodeDistance(MinDistance, VoxelCellSize);
+#endif
+}
+
+// ---------------------------------------- (^^_) ---------------------------------------- //
+
+int NumThreadsForPageRelease;
+
+RWStructuredBuffer<int> RWNumPagesToReleaseCounter;
+
+[numthreads(THREADGROUP_SIZE_X, THREADGROUP_SIZE_Y, THREADGROUP_SIZE_Z)]
+void BuildVoxelPageReleaseIndirectArgsCS(uint3 ThreadId : SV_DispatchThreadID, uint3 GroupThreadId : SV_GroupThreadID, uint3 GroupId : SV_GroupID)
+{
+    int MaxPageNum = NumVoxelPagesInXYZ.x * NumVoxelPagesInXYZ.y * NumVoxelPagesInXYZ.z;
+    int PointerIndex = MaxPageNum;  // we use last element as allocator pointer
+
+    int FreePointer = min(RWVoxelPageFreeList[PointerIndex], MaxPageNum); // we don't allocate page if pointer exceed limit, so we just clamp it
+    int ReleasePointer = RWVoxelPageReleaseList[PointerIndex];
+    int NumPagesToRelease = ReleasePointer;
+
+    // build args
+    RWIndirectArgs[0] = ceil(float(NumPagesToRelease) / float(NumThreadsForPageRelease));
+    RWIndirectArgs[1] = 1;
+    RWIndirectArgs[2] = 1; 
+
+    // reset pointer
+    RWVoxelPageFreeList[PointerIndex] = FreePointer - NumPagesToRelease;
+    RWVoxelPageReleaseList[PointerIndex] = 0;
+
+    // copy for next pass
+    RWNumPagesToReleaseCounter[0] = NumPagesToRelease;
+}
+
+// ---------------------------------------- (^^_) ---------------------------------------- //
+
+StructuredBuffer<int> NumPagesToReleaseCounter;
+
+[numthreads(THREADGROUP_SIZE_X, THREADGROUP_SIZE_Y, THREADGROUP_SIZE_Z)]
+void VoxelPageReleaseCS(uint3 ThreadId : SV_DispatchThreadID, uint3 GroupThreadId : SV_GroupThreadID, uint3 GroupId : SV_GroupID)
+{
+    int MaxPageNum = NumVoxelPagesInXYZ.x * NumVoxelPagesInXYZ.y * NumVoxelPagesInXYZ.z;
+    int PointerIndex = MaxPageNum;  // we use last element as allocator pointer
+
+    int ThreadIndex = ThreadId.x;
+    int NumPagesToRelease = NumPagesToReleaseCounter[0];
+
+    if(ThreadIndex >= NumPagesToRelease)
+    {
+        return;
+    } 
+
+    int FreeListOffset = RWVoxelPageFreeList[PointerIndex];
+    int WriteIndex = FreeListOffset + ThreadIndex;
+
+    int PageId = RWVoxelPageReleaseList[ThreadIndex];
+    RWVoxelPageFreeList[WriteIndex] = PageId;
+}
+
+// ---------------------------------------- (^^_) ---------------------------------------- //
+
+Texture3D<float> DistanceFieldClipmap;
+RWTexture3D<float> RWVoxelNeighborClipmap;
+
+[numthreads(THREADGROUP_SIZE_X, THREADGROUP_SIZE_Y, THREADGROUP_SIZE_Z)]
+void DistanceFieldPropagateCS(uint3 ThreadId : SV_DispatchThreadID, uint3 GroupThreadId : SV_GroupThreadID, uint3 GroupId : SV_GroupID)
+{
+    int3 ClipmapOffset = int3(0, 0, ClipIndex * VolumeResolution.z);
+    int3 ReadWriteIndex = ThreadId + ClipmapOffset;
+
+    int3 VoxelIndex = (ThreadId + VolumeScrolling) % VolumeResolution;
+    float VoxelCellSize = VolumeCoverRange.x / float(VolumeResolution.z);
+
+    // 1. clamp sample to logic boundary
+    int3 Offsets[6] = { int3(-1, 0, 0), int3(1, 0, 0), int3(0, -1, 0), int3(0, 1, 0), int3(0, 0, -1), int3(0, 0, 1) };
+    for(int i=0; i<6; i++)
+    {
+        int3 OffsetIndex = VoxelIndex + Offsets[i];
+        if(any(OffsetIndex < 0) || any(OffsetIndex >= VolumeResolution))
+        {
+            Offsets[i] = int3(0, 0, 0);
+        }
+    }
+
+    // 2. sample neighbor cell's distance
+    float Distance = DecodeDistance(DistanceFieldClipmap[ReadWriteIndex], VoxelCellSize);
+    float NeighborSamples[6]; 
+    for(int i=0; i<6; i++)
+    {
+        // clamp sample wrap physical boundary
+        int3 OffsetIndex = (ThreadId + Offsets[i]) % VolumeResolution;
+        OffsetIndex += (OffsetIndex < int3(0, 0, 0)) * VolumeResolution;
+        OffsetIndex += ClipmapOffset;
+        
+        float NeighborVal = DecodeDistance(DistanceFieldClipmap[OffsetIndex], VoxelCellSize);
+        Distance = min(Distance, NeighborVal + VoxelCellSize);
+        NeighborSamples[i] = NeighborVal;
+    }
+
+    // 3. write distance
+    RWDistanceFieldClipmap[ReadWriteIndex] = EncodeDistance(Distance, VoxelCellSize);
+}

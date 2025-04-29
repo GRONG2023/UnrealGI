@@ -1,0 +1,135 @@
+#include "../Common.ush"
+
+#include "RealtimeGICommon.ush"
+#include "VoxelRayTracing.ush"
+#include "VoxelLightingParameters.ush"
+
+int VisualizeMode;
+int VisualizeClipmapLevel;
+int VisualizeUpdateChunk;
+
+Texture2D<float> SceneDepthTexture;
+RWTexture2D<float4> RWSceneColorTexture;
+
+int NumUpdateChunks;
+float3 UpdateChunkResolution;
+StructuredBuffer<int> UpdateChunkList;
+
+StructuredBuffer<FObjectInfo> ObjectInfoBuffer;
+
+float3 ReconstructWorldPositionFromDepth(float2 UV, float Depth)
+{
+	float2 ScreenPosition = (UV - View.ScreenPositionScaleBias.wz) / View.ScreenPositionScaleBias.xy;
+	float4 HomogeneousWorldPosition = mul(float4(ScreenPosition * Depth, Depth, 1), View.ScreenToWorld);
+	float3 WorldPosition = HomogeneousWorldPosition.xyz / HomogeneousWorldPosition.w;
+
+	return WorldPosition;
+}
+
+#ifndef USE_DISTANCE_FIELD
+#define USE_DISTANCE_FIELD 0
+#endif
+
+void MainPS(noperspective float4 UVAndScreenPos : TEXCOORD0, float4 SvPosition : SV_POSITION, out float4 OutColor : SV_Target0)
+{
+    ResolveView();
+    FVoxelCascadeInfo CascadeInfo = ResolveCascadeInfo();
+
+    int2 PixelCoord = (int2)SvPosition.xy;
+    float2 UV = UVAndScreenPos.xy;
+
+    float RawDepth = SceneDepthTexture.Load(int3(PixelCoord, 0)).r;
+    float PixelDepth = ConvertFromDeviceZ(RawDepth);
+    float3 PixelWorldPosition = ReconstructWorldPositionFromDepth(UV, 11451419.19f);
+
+    float3 CameraPosition = View.WorldCameraOrigin;
+    float3 RayDir = normalize(PixelWorldPosition - CameraPosition);
+    float3 RayEnd = RayDir * 1000000;
+    float3 Color = float3(0, 0, 0);
+
+    FVoxelRaytracingRequest RTRequest = (FVoxelRaytracingRequest)0;
+    RTRequest.RayStart = CameraPosition;
+    RTRequest.RayDir = RayDir;
+    RTRequest.MinClipIndex = clamp(VisualizeClipmapLevel, 0, NumClips - 1);
+    RTRequest.MaxClipIndex = NumClips - 1;
+    RTRequest.MaxStepNum = 114514;
+    RTRequest.MaxDistance = 191981000;
+
+#if USE_DISTANCE_FIELD
+    FVoxelRaytracingHitPayload Hit = DistanceFieldRaytracing(CascadeInfo, DistanceFieldClipmap, LinearSampler, RTRequest);
+#else
+    FVoxelRaytracingHitPayload Hit = VoxelRaytracing(CascadeInfo, VoxelBitOccupyClipmap, RTRequest);
+#endif
+    
+    if(Hit.IsHit)
+    {
+        // print hit distance
+    #if 0
+        OutColor = float4(
+            length(Hit.Position - CameraPosition) / 1000.0f,
+            0, 0, 1
+        );
+        return;
+    #endif
+
+        float3 DebugColor = float3(0, 0, 0);
+        int VoxelPageId = VoxelPageClipmap.Load(uint4(Hit.ClipmapAccessIndex, 0)).r;
+
+        if(VoxelPageId != PAGE_ID_INVALID)
+        {
+            int3 IndexInPool = PageAddressMapping(VoxelPageId, NumVoxelPagesInXYZ, Hit.VoxelIndex);
+
+            if(VisualizeMode == 1)  // base color
+            {
+                DebugColor = VoxelPoolBaseColor.Load(uint4(IndexInPool, 0)).rgb;
+            }
+            if(VisualizeMode == 2)  // normal
+            {
+                DebugColor = VoxelPoolNormal.Load(uint4(IndexInPool, 0)).rgb;
+            }
+            if(VisualizeMode == 3)  // emissive
+            {
+                DebugColor = VoxelPoolEmissive.Load(uint4(IndexInPool, 0)).rgb;
+            }
+            if(VisualizeMode == 4)  // radiance
+            {
+                float3 WorldNormal = VoxelPoolNormal.Load(uint4(IndexInPool, 0)).rgb * 2 - 1;
+                int IsBackFace = dot(WorldNormal, -RayDir) < 0;
+                int3 TwoSideIndex = TwoSideAddressMapping(IndexInPool, IsBackFace);
+                DebugColor = VoxelPoolRadiance.Load(uint4(TwoSideIndex, 0)).rgb;
+            }
+        }
+        // for invalid page maybe runout of space, we just give it a warning color
+        else
+        {
+            DebugColor = float3(1, 0, 1);
+        }
+
+        Color += DebugColor;
+    }
+
+    // visualize update chunk
+    if(VisualizeUpdateChunk > 0)
+    {
+        int ClipIndex = VisualizeUpdateChunk - 1;
+        for(int i=0; i<NumUpdateChunks; i++)
+        {
+            int3 ChunkNumXYZ = VolumeResolution / UpdateChunkResolution;
+            int ChunkId_1D = UpdateChunkList[i];
+            float3 ChunkId_3D = Index1DTo3D(ChunkId_1D, ChunkNumXYZ);
+            float3 ChunkCenter = CalcVoxelCenterPos(ChunkId_3D, ChunkNumXYZ, VolumeCenterArray[ClipIndex], VolumeCoverRangeArray[ClipIndex]);
+            float3 ChunkCoverRange = VolumeCoverRangeArray[ClipIndex] * UpdateChunkResolution / VolumeResolution;
+
+            float3 BoxMin = ChunkCenter - ChunkCoverRange * 0.5;
+            float3 BoxMax = ChunkCenter + ChunkCoverRange * 0.5;
+            float2 HitChunkT = LineBoxIntersect(CameraPosition, RayEnd, BoxMin, BoxMax);
+            if(HitChunkT.x < HitChunkT.y)
+            {
+                Color += float3(0, 0.5, 0.8);
+            }
+        }
+    }
+
+   OutColor = float4(Color, 1);
+}
+

@@ -1,0 +1,349 @@
+#pragma once
+
+#define OBJECT_ID_INVALID (-114514)
+#define CARD_ORIENTATION_X (0)
+#define CARD_ORIENTATION_Y (1)
+#define CARD_ORIENTATION_Z (2)
+
+#define MAX_CARDS_PER_MESH (12)
+
+// we use uint64 to represent 4x4x4 voxel, so single block's size is 4
+#define VOXEL_BLOCK_SIZE (4)
+#define NUM_VOXEL_PER_BLOCK (VOXEL_BLOCK_SIZE * VOXEL_BLOCK_SIZE * VOXEL_BLOCK_SIZE)
+
+#define MAX_CLIP_NUM (4)
+
+// we divide volume into 8^3 region to update voxel
+// also is min scroll step when camera move
+#define UPDATE_CHUNK_NUM (8)
+
+#define PAGE_ID_INVALID (0x3FFFFFFF)
+
+#define VOXEL_FACE_FRONT (0)
+#define VOXEL_FACE_BACK (1)
+#define VOXEL_FACE_NUM (2)
+
+#define PROBE_ID_INVALID (0x3FFFFFFF)
+
+#define PROBE_STATE_DO_NOTHING (0)
+#define PROBE_STATE_NEED_ADD (1)
+#define PROBE_STATE_NEED_RELEASE (2)
+
+#define DISTANCE_FIELD_MAX_RANGE (32.0)		// map distance to R8 [0~1], 1 is for 32 voxel's distance
+
+// must sync with "struct FObjectInfo" in "Source\Runtime\Renderer\Private\RealtimeGI\RealtimeGIGPUScene.cpp"
+struct FObjectInfo
+{
+	int4 AllocationInfo;	// int4(ObjectId, SurfaceCacheId, ___, ___)
+	float4 LocalBoundsMin;
+	float4 LocalBoundsMax;
+	float4 WorldBoundsMin;
+	float4 WorldBoundsMax;
+	float4x4 LocalToWorldMatrix;
+	float4x4 WorldToLocalMatrix;
+};
+
+struct FMiniObjectInfo
+{
+	float4 WorldBoundsMinAndObjectId;
+	float4 WorldBoundsMax;
+};
+
+struct FSurfaceCacheInfo
+{
+	int SurfaceCacheId;
+	int NumMeshCards;
+	int MeshCardResolution;
+	int RefCount;
+};
+
+struct FCardInfo
+{
+	float4x4 LocalToCardMatrix;
+	float4 CardUVTransform;
+};
+
+int GetObjectId(in FObjectInfo ObjectInfo)
+{
+	return ObjectInfo.AllocationInfo.x;
+}
+
+int GetObjectId(in FMiniObjectInfo ObjectInfo)
+{
+	return ObjectInfo.WorldBoundsMinAndObjectId.w;
+}
+
+void SetObjectId(inout FObjectInfo ObjectInfo, int InObjectId)
+{
+	ObjectInfo.AllocationInfo.x = InObjectId;
+}
+
+int GetSurfaceCacheId(in FObjectInfo ObjectInfo)
+{
+	return ObjectInfo.AllocationInfo.y;
+}
+
+int Index3DTo1D(int3 Index3D, int3 Size3D)
+{
+	int Res = 0;
+	Res += Index3D.x * 1;
+	Res += Index3D.y * Size3D.x;
+	Res += Index3D.z * (Size3D.x * Size3D.y);
+	return Res;
+}
+
+int3 Index1DTo3D(int Index1D, int3 Size3D)
+{
+	int3 Res;
+
+	Res.z = Index1D / (Size3D.x * Size3D.y);
+	Index1D -= Res.z * (Size3D.x * Size3D.y);
+
+	Res.y = Index1D / Size3D.x;
+	Index1D -= Res.y * Size3D.x;
+
+	Res.x = Index1D;
+
+	return Res;
+}
+
+int Index2DTo1D(int2 Index2D, int2 Size2D)
+{
+	return Index3DTo1D(int3(Index2D, 0), int3(Size2D, 1));
+}
+
+int2 Index1DTo2D(int Index1D, int2 Size2D)
+{
+	return Index1DTo3D(Index1D, int3(Size2D, 1)).xy;
+}
+
+void SetUint32SingleBit(inout uint u32, uint bit_id, bool b)
+{
+    if(b)
+    {
+        u32 |= 1 << bit_id;
+    }
+    else
+    {
+        u32 &= ~(1 << bit_id);
+    }
+}
+
+bool GetUint32SingleBit(in uint u32, uint bit_id)
+{
+    return (u32 & (1 << bit_id)) > 0;
+}
+
+void SetUint64SingleBit(inout uint2 u64, uint bit_id, bool b)
+{
+	int comp_id = bit_id / 32;	// if 0~31 bit we set u64.x, if 32~64 bit we set u64.y
+	int bit_id_32 = bit_id % 32;
+
+	SetUint32SingleBit(u64[comp_id], bit_id_32, b);
+}
+
+bool GetUint64SingleBit(in uint2 u64, uint bit_id)
+{
+    int comp_id = bit_id / 32;
+	int bit_id_32 = bit_id % 32;
+
+	bool result = GetUint32SingleBit(u64[comp_id], bit_id_32);
+	return result;
+}
+
+// https://tekpool.wordpress.com/category/bit-count/
+int BitCount32(uint u)
+{
+    uint uCount = u - ((u >> 1) & 033333333333) - ((u >> 2) & 011111111111);
+    return ((uCount + (uCount >> 3)) & 030707070707) % 63;
+}
+
+uint Index3DTo1D_2x2x2(uint3 Index3D)
+{
+	return (Index3D.z << 2) +  (Index3D.y << 1) + (Index3D.x << 0);
+}
+
+uint3 Index1DTo3D_2x2x2(uint Index1D)
+{
+	return uint3(
+		(Index1D >> 0) & 0x01,
+		(Index1D >> 1) & 0x01,
+		(Index1D >> 2) & 0x01
+	);
+}
+
+uint Index3DTo1D_4x4x4(uint3 Index3D)
+{
+	int3 BlockId = Index3D / 2;
+	int3 InsideBolckId = Index3D % 2;
+
+	return Index3DTo1D_2x2x2(BlockId) * 8 + Index3DTo1D_2x2x2(InsideBolckId);
+}
+
+uint3 Index1DTo3D_4x4x4(uint Index1D)
+{
+	int BlockId_1D = Index1D / 8;
+	int InsideBolckId_1D = Index1D % 8;
+
+	int3 BlockId = Index1DTo3D_2x2x2(BlockId_1D);
+	int3 InsideBlockId = Index1DTo3D_2x2x2(InsideBolckId_1D);
+
+	return BlockId * 2 + InsideBlockId;
+}
+
+float Squaref(float x)
+{
+	return x * x;
+}
+
+void DecodeObjectWorldBound(in FMiniObjectInfo ObjectInfo, out float3 WorldBoundsMin, out float3 WorldBoundsMax)
+{
+	float3 WorldBoundPadding = (0.1).xxx;	// prevent zero size bound (like plane)
+	WorldBoundsMin = ObjectInfo.WorldBoundsMinAndObjectId.xyz - WorldBoundPadding;
+	WorldBoundsMax = ObjectInfo.WorldBoundsMax + WorldBoundPadding;
+}
+
+bool ObjectIntersectAABB(in FMiniObjectInfo ObjectInfo, float3 VolumeCenter, float3 VolumeCoverRange)
+{
+	float3 WorldBoundsMin, WorldBoundsMax;
+	DecodeObjectWorldBound(ObjectInfo, WorldBoundsMin, WorldBoundsMax);
+
+    float3 ClipMapAABBMin = VolumeCenter - VolumeCoverRange * 0.5;
+    float3 ClipMapAABBMax = VolumeCenter + VolumeCoverRange * 0.5;
+    
+	bool res = all(ClipMapAABBMin < WorldBoundsMax) && all(ClipMapAABBMax > WorldBoundsMin);
+	return res;
+}
+
+float3 CalcVoxelCenterPos(float3 Index, float3 VolumeResolution, float3 VolumeCenter, float3 VolumeCoverRange)
+{
+	float3 CellSize = VolumeCoverRange / VolumeResolution;
+	float3 IndexNorm = Index - VolumeResolution * 0.5;	// [-2, -1, 0, 1] if VolumeResolution is 4, Index is in [0, 1, 2, 3]
+	float3 Result = VolumeCenter
+				  + CellSize * 0.5
+				  + CellSize * IndexNorm;
+	
+	return Result;
+}
+
+float max3(float3 val)
+{
+	return max(val.x,max(val.y,val.z));
+}
+
+float MaskedBilinearFilter(float4 GatherResult, float2 UV, float AtlasResolution, float4 ValidMask)
+{
+	float2 LerpFactor = frac(UV * AtlasResolution + 0.5);
+
+	// find min value from all valid value
+	float MinValue = 114514.19;
+	for(int i=0; i<4; i++)
+	{
+		if(ValidMask[i] != 0)
+		{
+			MinValue = min(MinValue, GatherResult[i]);
+		}
+	}
+
+	// 0 is background, but may cause artifact when bilinear filter, we replace zero value using min value
+	// we assume 4 depth represent continuous "height field"
+	float4 FilterValue = float4(
+		ValidMask.x == 0 ? MinValue : GatherResult.x,
+		ValidMask.y == 0 ? MinValue : GatherResult.y,
+		ValidMask.z == 0 ? MinValue : GatherResult.z,
+		ValidMask.w == 0 ? MinValue : GatherResult.w
+	);
+
+	/*
+	w - z
+	|   |
+	x - y
+	*/
+	float XLerp0 = lerp(FilterValue.x, FilterValue.y, LerpFactor.x);
+	float XLerp1 = lerp(FilterValue.w, FilterValue.z, LerpFactor.x);
+	float YLerp = lerp(XLerp0, XLerp1, LerpFactor.y);
+
+	return YLerp;
+}
+
+float SurfaceCacheSampleDepth(in Texture2D DepthTextureAtlas, in SamplerState LinearSampler, float2 UV, float AtlasResolution, out float4 OutValidMask)
+{
+	float4 RawDepth = DepthTextureAtlas.GatherRed(LinearSampler, UV);
+
+	// depth tex represent rim detect result of mesh card, so we record and reuse it later when sample BaseColor, Normal and Emission
+	OutValidMask = (RawDepth != 0);
+
+	// hit background color, nothing in voxel
+	if(all(RawDepth == 0))
+	{
+		return 0;
+	}
+
+	float GoodDepth = MaskedBilinearFilter(RawDepth, UV, AtlasResolution, OutValidMask);
+	return GoodDepth;
+}
+
+float3 SurfaceCacheSampleColor(in Texture2D SurfaceCacheAtlas, in SamplerState LinearSampler, float2 UV, float AtlasResolution, float4 ValidMask)
+{
+	float4 GatherRed = SurfaceCacheAtlas.GatherRed(LinearSampler, UV);
+	float4 GatherGreen = SurfaceCacheAtlas.GatherGreen(LinearSampler, UV);
+	float4 GatherBlue = SurfaceCacheAtlas.GatherBlue(LinearSampler, UV);
+
+	float3 Color = float3(0, 0, 0);
+	Color.r = MaskedBilinearFilter(GatherRed, UV, AtlasResolution, ValidMask);
+	Color.g = MaskedBilinearFilter(GatherGreen, UV, AtlasResolution, ValidMask);
+	Color.b = MaskedBilinearFilter(GatherBlue, UV, AtlasResolution, ValidMask);
+
+	return Color;
+}
+
+int3 VoxelClipmapAddressMapping(int3 VoxelIndex, int3 VolumeResolution, int3 VolumeScrolling, int ClipIndex)
+{
+	int3 AccessIndex = (VoxelIndex + VolumeScrolling) % VolumeResolution;
+	AccessIndex += int3(0, 0, VolumeResolution.z * ClipIndex);
+	return AccessIndex;
+}
+
+// return index to sample clipmap
+int3 BlockClipmapAddressMapping(int3 BlockIndex, int3 VolumeResolution, int3 VolumeScrolling, int ClipIndex)
+{
+	int3 NumBlocksInXYZ = VolumeResolution / VOXEL_BLOCK_SIZE;
+
+	// if volume move, we don't move the data, just move address when access volume
+	int3 ScrollingInBlock = VolumeScrolling / VOXEL_BLOCK_SIZE;
+	int3 RoundIndex = (BlockIndex + ScrollingInBlock) % NumBlocksInXYZ;
+
+	// use 32*32*128 to represent 4 layer clipmap, single clip is 32x32x32
+	int3 AccessIndex = RoundIndex + int3(0, 0, NumBlocksInXYZ.z * ClipIndex);
+	return AccessIndex;
+}
+
+// map voxel index to voxel pool's physic address
+int3 PageAddressMapping(int PageId, int3 NumPagesInXYZ, int3 VoxelIndex)
+{
+	// note: each "page" is same size as "block", which 4x4x4
+	int3 IndexInsidePage = VoxelIndex % VOXEL_BLOCK_SIZE;
+
+	int3 PageIndex3D = Index1DTo3D(PageId, NumPagesInXYZ);
+	int3 PageOffset = PageIndex3D * VOXEL_BLOCK_SIZE;
+
+	int3 IndexInPool = PageOffset + IndexInsidePage;
+	return IndexInPool;
+}
+
+// VoxelPoolRadiance share address with other voxel pool, but double the size for two side voxel
+// we pack front-back size nearby in z axis to reduce cache miss when access
+int3 TwoSideAddressMapping(int3 IndexInPool, int IsBackFace)
+{
+	return IndexInPool * int3(1, 1, VOXEL_FACE_NUM) + int3(0, 0, IsBackFace);
+}
+
+float EncodeDistance(float Distance, float VoxelCellSize)
+{
+	return Distance / (VoxelCellSize * DISTANCE_FIELD_MAX_RANGE);
+}
+
+float DecodeDistance(float Distance, float VoxelCellSize)
+{
+	return Distance * (VoxelCellSize * DISTANCE_FIELD_MAX_RANGE);
+}
