@@ -244,6 +244,7 @@ Engine/Intermediate/
 Engine/Plugins/
 Engine/Programs/
 Engine/Saved/
-Engine/Source/
+Engine/Source/ThirdParty/
+Engine/Source/Programs/
 
 FeaturePacks/
