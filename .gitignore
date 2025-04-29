@@ -236,14 +236,11 @@ Engine/Extras/ThirdPartyNotUE/SDKs/HostLinux/**
 Templates/
 Samples/
 Engine/Binaries/
-Engine/Build/
 Engine/Content/
 Engine/DerivedDataCache/
 Engine/Extras/
-Engine/Intermediate/
 Engine/Plugins/
 Engine/Programs/
-Engine/Saved/
 Engine/Source/ThirdParty/
 
 FeaturePacks/
