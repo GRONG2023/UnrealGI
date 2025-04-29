@@ -1,0 +1,71 @@
+UE学习笔记
+
+常用快捷键
+打开命令行终端 ~
+renderDoc截帧 Alt + F12 
+运行时鼠标退出 Shift + F1
+
+
+终端命令
+	可以查看引擎源码定义了TAutoConsoleVariable(const TCHAR* Name, const T& DefaultValue, const TCHAR* Help, uint32 Flags = ECVF_Default)的地方
+	例如
+	static TAutoConsoleVariable<int32> CVarAmbientOcclusionMethod(
+	TEXT("r.AmbientOcclusion.Method"),
+	0,
+	TEXT("Select between SSAO methods \n ")
+	TEXT("0: SSAO (default)\n ")
+	TEXT("1: GTAO\n "),
+	ECVF_RenderThreadSafe | ECVF_Scalability);
+
+	也可以自定义一个TAutoConsoleVariable
+
+	大部分公共命令都在SceneView.cpp文件定义
+
+渲染相关
+	比较常用的shader资源(可以传入shader读取，获取场景color 深度 GBuffer，AO等都可以通过传入这个参数)
+	
+	BEGIN_GLOBAL_SHADER_PARAMETER_STRUCT(FSceneTextureUniformParameters, RENDERER_API)
+	// Scene Color / Depth
+	SHADER_PARAMETER_RDG_TEXTURE(Texture2D, SceneColorTexture)
+	SHADER_PARAMETER_RDG_TEXTURE(Texture2D, SceneDepthTexture)
+
+	// GBuffer
+	SHADER_PARAMETER_RDG_TEXTURE(Texture2D, GBufferATexture)
+	SHADER_PARAMETER_RDG_TEXTURE(Texture2D, GBufferBTexture)
+	SHADER_PARAMETER_RDG_TEXTURE(Texture2D, GBufferCTexture)
+	SHADER_PARAMETER_RDG_TEXTURE(Texture2D, GBufferDTexture)
+	SHADER_PARAMETER_RDG_TEXTURE(Texture2D, GBufferETexture)
+	SHADER_PARAMETER_RDG_TEXTURE(Texture2D, GBufferFTexture)
+	SHADER_PARAMETER_RDG_TEXTURE(Texture2D, GBufferVelocityTexture)
+
+	// SSAO
+	SHADER_PARAMETER_RDG_TEXTURE(Texture2D, ScreenSpaceAOTexture)
+
+	// Custom Depth / Stencil
+	SHADER_PARAMETER_RDG_TEXTURE(Texture2D, CustomDepthTexture)
+	SHADER_PARAMETER_SRV(Texture2D<uint2>, CustomStencilTexture)
+
+	// Misc
+	SHADER_PARAMETER_SAMPLER(SamplerState, PointClampSampler)
+	END_GLOBAL_SHADER_PARAMETER_STRUCT()
+
+
+	RDG渲染架构
+	光栅化Pass
+	FRDGBuilder::AddPass(
+		FRDGEventName&& Name,
+		const ParameterStructType* ParameterStruct,
+		ERDGPassFlags Flags,
+		ExecuteLambdaType&& ExecuteLambda)
+	ParameterStruct参数会在AddPass内部通过同步执行SetupPass给pass设置参数(例如FSceneTextureUniformParameters这个参数)
+	ExecuteLambda这个Lambda表达式函数正常情况下异步执行(所有pass收集完成后统一遍历excute)，打开立即模式时(可通过终端指令设置)会同步执行
+
+	compute管线Pass
+	FComputeShaderUtils::AddPass
+	内部也会调用GraphBuilder.AddPass
+
+
+	后处理相关FPostProcessSettings（位于Source/Runtime/Engine/Classes/Engine/Scene.h）
+	后处理渲染入口void FDeferredShadingSceneRenderer::Render(FRHICommandListImmediate& RHICmdList)
+
+

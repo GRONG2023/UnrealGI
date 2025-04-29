@@ -1,0 +1,8 @@
+编译工程配置位置 \Engine\Saved\UnrealBuildTool
+
+编译问题：
+
+类型1: C:\Program Files (x86)\Windows Kits\10\include\10.0.22000.0\winrt\wrl/event.h(211): error C4668: 没有将“_NOEXCEPT_TYPES_SUPPORTED”定义为预处理器宏，用“0”替换“#if/#elif”
+
+解决方案1：更换到有该宏的MSVC版本 
+解决方案2：找到对应工程编译构建模块cs文件，将bEnableUndefinedIdentifierWarnings设置为false
