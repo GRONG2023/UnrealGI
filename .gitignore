@@ -241,6 +241,10 @@ Engine/DerivedDataCache/
 Engine/Extras/
 Engine/Plugins/
 Engine/Programs/
+Engine/Build/
+Engine/Config/
+Engine/Documentation/
+
 Engine/Source/ThirdParty/
 
 FeaturePacks/
