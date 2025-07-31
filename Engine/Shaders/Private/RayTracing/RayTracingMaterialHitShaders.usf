@@ -4,43 +4,46 @@
 
 #define ENABLE_SKY_LIGHT 1      
 #define NEEDS_LIGHTMAP_COORDINATE (HQ_TEXTURE_LIGHTMAP || LQ_TEXTURE_LIGHTMAP)
-#ifdef USING_TESSELLATION
-	#undef USING_TESSELLATION
-	// Needed for VertexFactoryInterpolate
-	#define USING_TESSELLATION 1
+#ifdef NEEDS_VERTEX_FACTORY_INTERPOLATION
+	#undef NEEDS_VERTEX_FACTORY_INTERPOLATION
 #endif
-#ifndef SIMPLIFIED_MATERIAL_SHADER
-	#define SIMPLIFIED_MATERIAL_SHADER 0
-#endif
+// Needed for VertexFactoryInterpolate to interpolate attributes from vertices to hit point
+#define NEEDS_VERTEX_FACTORY_INTERPOLATION 1
 
-// #dxr_todo: UE-72537 move to common.ush
-#define clip(x)
-#define ddx(x) 0
-#define ddy(x) 0
-#define fwidth(x) 0
+// This should be good enough for ray tracing and avoids having to bind an extra buffer
+#define EYE_ADAPTATION_PREV_FRAME_EXPOSURE 1
+
+
+#if SUBSTRATE_ENABLED
+#define SUBSTRATE_INLINE_SHADING 1
+#endif
 
 #include "/Engine/Private/Common.ush"
 #include "RayTracingCommon.ush"
 #include "RayTracingHitGroupCommon.ush"
+#include "RayTracingShaderUtils.ush"
 
 #include "/Engine/Generated/Material.ush"   
 #include "/Engine/Generated/VertexFactory.ush"
 
+#include "RayTracingCalcInterpolants.ush" // must be included after VertexFactory.ush
 #include "/Engine/Private/ShadingCommon.ush"
 #include "/Engine/Private/DeferredShadingCommon.ush"
 #include "/Engine/Private/SHCommon.ush"
 #include "/Engine/Private/ReflectionEnvironmentShared.ush"
 #include "/Engine/Private/VirtualTextureCommon.ush" 
 #include "/Engine/Private/LightmapCommon.ush"
-#include "/Engine/Private/PathTracing/Material/PathTracingFresnel.ush"
-#include "/Engine/Private/PathTracing/Material/PathTracingThinGlass.ush"
+#include "/Engine/Private/Lumen/LumenHardwareRayTracingPayloadCommon.ush"
+
+#define MATERIAL_SUBSTRATE_OPAQUE_PRECOMPUTED_LIGHTING 0
+#include "/Engine/Private/Substrate/SubstrateExport.ush"
 
 /** Computes sky diffuse lighting, including precomputed shadowing. */
 void GetSkyLighting(
 	FMaterialPixelParameters MaterialParameters,
 	VTPageTableResult LightmapVTPageTableResult,
 	float3 WorldNormal,
-	float2 LightmapUV,
+	LightmapUVType LightmapUV,
 	uint LightmapDataIndex,
 	float3 SkyOcclusionUV3D,
 	uint ShadingModel,
@@ -50,6 +53,10 @@ void GetSkyLighting(
 {
 	OutDiffuseLighting = float3(0,0,0);
 	OutSubsurfaceLighting = float3(0,0,0);
+
+	// TODO:
+	// Should apply Lumen Dynamic GI + shadowed Skylight based on IsLumenTranslucencyGIEnabled() here
+	// however we are not binding the unnecessary shader parameters in hitgroups at the moment
 
 #if ENABLE_SKY_LIGHT
 
@@ -76,7 +83,7 @@ void GetSkyLighting(
 			#elif HQ_TEXTURE_LIGHTMAP
 
 				// Bent normal from precomputed texture
-				float4 WorldSkyBentNormalAndOcclusion = GetSkyBentNormalAndOcclusion(LightmapVTPageTableResult, LightmapUV * float2(1, 2), LightmapDataIndex, MaterialParameters.SvPosition.xy);
+				float4 WorldSkyBentNormalAndOcclusion = GetSkyBentNormalAndOcclusion(LightmapVTPageTableResult, ScaleLightmapUV(LightmapUV, float2(1.0f, 2.0f)), LightmapDataIndex, MaterialParameters.SvPosition.xy);
 				// Renormalize as vector was quantized and compressed
 				float3 NormalizedBentNormal = normalize(WorldSkyBentNormalAndOcclusion.xyz);
 				SkyVisibility = WorldSkyBentNormalAndOcclusion.w;
@@ -143,11 +150,13 @@ void GetPrecomputedIndirectLightingAndSkyLight(
 	OutIndirectIrradiance = 0;
 	OutDiffuseLighting = float3(0,0,0);
 	OutSubsurfaceLighting = 0;
-	float2 SkyOcclusionUV = 0;
+	LightmapUVType SkyOcclusionUV = (LightmapUVType)0;
 	uint SkyOcclusionDataIndex = 0u;
 
+	const bool bEvaluateBackface = GetShadingModelRequiresBackfaceLighting(ShadingModel);
+
 #if HQ_TEXTURE_LIGHTMAP || LQ_TEXTURE_LIGHTMAP
-		float2 LightmapUV0, LightmapUV1;
+		LightmapUVType LightmapUV0, LightmapUV1;
 		uint LightmapDataIndex;
 		GetLightMapCoordinates(Interpolants, LightmapUV0, LightmapUV1, LightmapDataIndex);
 	#if LIGHTMAP_VT_ENABLED
@@ -163,7 +172,7 @@ void GetPrecomputedIndirectLightingAndSkyLight(
 		OutDiffuseLighting = max(float3(0,0,0), DotSH3(IrradianceSH, DiffuseTransferSH)) / PI;
 
 		#if MATERIAL_SHADINGMODEL_TWOSIDED_FOLIAGE
-		if (ShadingModel == SHADINGMODELID_TWOSIDED_FOLIAGE)
+		if (bEvaluateBackface)
 		{
 			FThreeBandSHVector SubsurfaceTransferSH = CalcDiffuseTransferSH3(-DiffuseDir, 1);
 			OutSubsurfaceLighting += max(float3(0,0,0), DotSH3(IrradianceSH, SubsurfaceTransferSH)) / PI;
@@ -175,18 +184,18 @@ void GetPrecomputedIndirectLightingAndSkyLight(
 
 		SkyOcclusionUV = LightmapUV0;
 		SkyOcclusionDataIndex = LightmapDataIndex;
-		GetLightMapColorHQ(LightmapVTPageTableResult, LightmapUV0, LightmapUV1, LightmapDataIndex, DiffuseDir, MaterialParameters.SvPosition.xy, ShadingModel, OutDiffuseLighting, OutSubsurfaceLighting);
+		GetLightMapColorHQ(LightmapVTPageTableResult, LightmapUV0, LightmapUV1, LightmapDataIndex, DiffuseDir, MaterialParameters.SvPosition.xy, bEvaluateBackface, OutDiffuseLighting, OutSubsurfaceLighting);
 
 	// Low quality texture lightmaps
 	#elif LQ_TEXTURE_LIGHTMAP
 
-		OutDiffuseLighting = GetLightMapColorLQ(LightmapVTPageTableResult, LightmapUV0, LightmapUV1, LightmapDataIndex, DiffuseDir).rgb;
+		GetLightMapColorLQ(LightmapVTPageTableResult, LightmapUV0, LightmapUV1, LightmapDataIndex, DiffuseDir, bEvaluateBackface, OutDiffuseLighting, OutSubsurfaceLighting);
 
 	#endif
 
 	// Apply indirect lighting scale while we have only accumulated lightmaps
-	OutDiffuseLighting *= View.IndirectLightingColorScale;
-	OutSubsurfaceLighting *= View.IndirectLightingColorScale;
+	OutDiffuseLighting *= View.PrecomputedIndirectLightingColorScale;
+	OutSubsurfaceLighting *= View.PrecomputedIndirectLightingColorScale;
 
 	float3 SkyDiffuseLighting;
 	float3 SkySubsurfaceLighting;
@@ -197,7 +206,7 @@ void GetPrecomputedIndirectLightingAndSkyLight(
 		SkyOcclusionUV,
 		SkyOcclusionDataIndex,
 		VolumetricLightmapBrickTextureUVs,
-		ShadingModel,
+		GetShadingModelRequiresBackfaceLighting(ShadingModel),
 		bEnableSkyLightContribution,
 		SkyDiffuseLighting,
 		SkySubsurfaceLighting);
@@ -212,102 +221,328 @@ void GetPrecomputedIndirectLightingAndSkyLight(
 	#endif
 }
 
-void CalcInterpolants(in FRayCone RayCone, in FDefaultAttributes Attributes, out FVertexFactoryInterpolantsVSToPS Interpolants)
+void GetMaterialPayload( 
+	FPixelMaterialInputs PixelMaterialInputs,
+	FMaterialPixelParameters MaterialParameters,
+	FVertexFactoryInterpolantsVSToPS Interpolants,
+	bool bIsEnableSkyLightContribution,
+	inout FMaterialClosestHitPayload Payload)
+#if SUBSTRATE_ENABLED
 {
-	FVertexFactoryInterpolantsVSToDS Interpolated = (FVertexFactoryInterpolantsVSToDS)0;
+  #if MATERIAL_IS_SUBSTRATE
+	const float Dither = 0.5f;
+	float3 EmissiveLuminance = 0.0f;
+	float TotalCoverage = 1.f;
+	bool bSubstrateSubsurfaceEnable = false;
+	const float3 WorldBentNormal0 = GetWorldBentNormalZero(MaterialParameters);
 
-	float3 WorldPositions[3];
-	float2 TexCoords[3];
+	// Initialise a Substrate header with normal in registers
+	FSubstrateData SubstrateData = PixelMaterialInputs.GetFrontSubstrateData();
+	FSubstratePixelHeader SubstratePixelHeader = MaterialParameters.GetFrontSubstrateHeader();
 
-	float3 Weights = float3(
-		1 - Attributes.Barycentrics.x - Attributes.Barycentrics.y,
-		Attributes.Barycentrics.x,
-		Attributes.Barycentrics.y);
+  #if SUBSTRATE_OPTIMIZED_UNLIT	
+	// Unlit BSDF goes through the SubstrateTree to support weighting operations. Technically, layering and mixing could also be supported.
+	float3	UnlitSurfaceLuminancePostCoverage = 0.0f;
+	float	UnlitSurfaceCoverage = 0.0f;
+	float3	UnlitSurfaceTransmittancePreCoverage = 0.0f;
+	float3	UnlitSurfaceNormal = 0.0f;
+	SubstratePixelHeader.SubstrateUpdateTreeUnlit(
+		uint2(MaterialParameters.SvPosition.xy),
+		MaterialParameters.CameraVector,
+		SubstrateData,
+		UnlitSurfaceLuminancePostCoverage,
+		UnlitSurfaceCoverage,
+		UnlitSurfaceTransmittancePreCoverage,
+		UnlitSurfaceNormal);
+	EmissiveLuminance = UnlitSurfaceLuminancePostCoverage;
+	#if !SUBSTRATE_OPAQUE_MATERIAL
+	TotalCoverage = UnlitSurfaceCoverage;
+	#endif
+  #else // SUBSTRATE_OPTIMIZED_UNLIT
+	SubstratePixelHeader.IrradianceAO.MaterialAO = GetMaterialAmbientOcclusion(PixelMaterialInputs);
+	SubstratePixelHeader.SetCastContactShadow(GetPrimitiveData(MaterialParameters).Flags & PRIMITIVE_SCENE_DATA_FLAG_HAS_CAST_CONTACT_SHADOW);
+	SubstratePixelHeader.SetDynamicIndirectShadowCasterRepresentation(GetPrimitiveData(MaterialParameters).Flags & PRIMITIVE_SCENE_DATA_FLAG_HAS_CAPSULE_REPRESENTATION);
 
-	for (int i = 0; i < 3; i++)
+	FSubstrateSubsurfaceData SSSData = (FSubstrateSubsurfaceData)0;
+	FSubstrateTopLayerData TopLayerData = (FSubstrateTopLayerData)0;
+	FSubstrateOpaqueRoughRefractionData OpaqueRoughRefractionData = (FSubstrateOpaqueRoughRefractionData)0;
+	FSubstrateIntegrationSettings Settings = InitSubstrateIntegrationSettings();
+
+	// Generate the Substrate material data to write out
+	FSubstrateAddressing SubstrateAddressing = GetSubstratePixelDataByteOffset(0,0,0);
+
+	// Compute TotalCoverage for translucent material
+	#if MATERIALBLENDING_ANY_TRANSLUCENT
+	if (SubstratePixelHeader.SubstrateTree.BSDFCount > 0)
 	{
-		FVertexFactoryInput Input = LoadVertexFactoryInputForHGS(PrimitiveIndex(), i);
-	
-		FVertexFactoryIntermediates VFIntermediates = GetVertexFactoryIntermediates(Input);
-		float3x3 TangentToLocal = VertexFactoryGetTangentToLocal(Input, VFIntermediates);	
-		float4 WorldPositionExcludingWPO = VertexFactoryGetWorldPosition(Input, VFIntermediates);
-		FMaterialVertexParameters VertexParameters = GetMaterialVertexParameters(Input, VFIntermediates, WorldPositionExcludingWPO.xyz, TangentToLocal);
-
-		FVertexFactoryInterpolantsVSToDS PerVertexInterpolants = VertexFactoryGetInterpolantsVSToDS(Input, VFIntermediates, VertexParameters);
-		Interpolated = VertexFactoryInterpolate(PerVertexInterpolants, Weights[i], Interpolated, 1.0);
-
-		WorldPositions[i] = WorldPositionExcludingWPO.xyz;
-		TexCoords[i] = VertexFactoryGetTextureCoordinateDS(PerVertexInterpolants);
+		float TransmittancePreCoverage = 0.f;
+		SubstratePixelHeader.SubstrateUpdateTree(
+			SubstrateData, 
+			MaterialParameters.CameraVector, 
+			Settings, 
+			TotalCoverage, 
+			TransmittancePreCoverage);
+		TotalCoverage *= (1.f-dot(TransmittancePreCoverage, float(1.f/3.f).xxx));
 	}
+	#endif
 
-	Interpolants = VertexFactoryAssignInterpolants(Interpolated);
+	const float3 CamVector = MaterialParameters.CameraVector;
+	Payload.SubstrateData = InitialiseRWSubstrateMaterialContainer();
+	PackSubstrateOut(
+		Payload.SubstrateData,
+		Dither,
+		Settings,
+		SubstrateAddressing,
+		SubstratePixelHeader, SubstrateData, 
+		CamVector, 
+		WorldBentNormal0,
+		bSubstrateSubsurfaceEnable, 
+		EmissiveLuminance,
+		SSSData, TopLayerData, OpaqueRoughRefractionData
+	);
 
-#if (NUM_TEX_COORD_INTERPOLATORS || USE_PARTICLE_SUBUVS) && !VERTEX_FACTORY_MODIFIES_TESSELLATION
-	float2 TA = TexCoords[1] - TexCoords[0]; 
-	float2 TB = TexCoords[2] - TexCoords[0];
-    float UvArea = abs((TA.x * TB.y) - (TA.y * TB.x));
+	Payload.SubstrateData.PackedTopLayerData = SubstratePackTopLayerData(TopLayerData);
+  #endif // SUBSTRATE_OPTIMIZED_UNLIT
 
-	float3 PA = WorldPositions[1] - WorldPositions[0];
-	float3 PB = WorldPositions[2] - WorldPositions[0];
-    float3 Unnormalized = cross(PB, PA);
-	float InvWorldArea = rsqrt(dot(Unnormalized, Unnormalized));
-    float3 FaceNormal = Unnormalized * InvWorldArea;
-    
-    float RayConeCapArea = RayCone.Width * RayCone.Width * (1.0f / (2.0f * PI));
-    float3 RayDir = WorldRayDirection();
-    float RaySlope = dot(RayDir, FaceNormal);
-    const float SmallValue = 1.0 / 16777216.0;
-    GlobalRayCone_TexArea = (UvArea * InvWorldArea * RayConeCapArea) / max(RaySlope * RaySlope, SmallValue);
-    GlobalRayCone_TexArea = max(GlobalRayCone_TexArea, SmallValue);
-#endif
+	Payload.Radiance += EmissiveLuminance;
+	Payload.TranslatedWorldPos = DFFastToTranslatedWorld(MaterialParameters.AbsoluteWorldPosition, ResolvedView.PreViewTranslation);
+
+	// SUBSTRATE_TODO Payload.Ior when available (accounting for REFRACTION_USE_INDEX_OF_REFRACTION and REFRACTION_ROOT_NODE_OVERRIDES_DEFAULT)
+
+	// Opacity
+	Payload.Opacity = TotalCoverage;
+	#if MATERIALBLENDING_MASKED
+	// regular masked mode - binary decision
+	if (GetMaterialMask(PixelMaterialInputs) < 0)
+	{
+		Payload.Opacity = 0;
+	}
+	#endif // MATERIALBLENDING_MASKED
+  #endif // MATERIAL_IS_SUBSTRATE
 }
-
-float DitheredOpacityMaskToOpacity(float Mask)
+#else // SUBSTRATE_ENABLED
 {
-	// This represents the expected value of the function GetMaterialCoverageAndClipping
-	// which randomly dithers the fragment on or off to produce the effect of opacity
+	// Store the results in local variables and reuse instead of calling the functions multiple times.
+	half3 BaseColor = GetMaterialBaseColor(PixelMaterialInputs);
+	half  Metallic = GetMaterialMetallic(PixelMaterialInputs);
+	half  Specular = GetMaterialSpecular(PixelMaterialInputs);
+	half Roughness = GetMaterialRoughness(PixelMaterialInputs);
+#if MATERIALBLENDING_TRANSLUCENT && REFRACTION_USE_INDEX_OF_REFRACTION
+	#if REFRACTION_ROOT_NODE_OVERRIDES_DEFAULT
+	half IOR = GetMaterialRefractionIOR(GetMaterialRefraction(PixelMaterialInputs));
+	#else
+	half3 F0 = ComputeF0(Specular, BaseColor, Metallic);
+	half IOR = DielectricF0RGBToIor(F0);
+	#endif
+#else
+	half IOR = 0;
+#endif
 
-	// The expected value of this dithering can be computed as:
-	//    Simplify[Integrate[If[Mask + Dither - 1/2 < 0, 0, 1], {Dither, 0, 1}]]
-	// which is just:
+	/**
+	 * Set material attributes for full materials
+	 **/
+	Payload.TranslatedWorldPos = DFFastToTranslatedWorld(MaterialParameters.AbsoluteWorldPosition, ResolvedView.PreViewTranslation);
+	Payload.WorldNormal = normalize(MaterialParameters.WorldNormal);
+	Payload.Radiance = GetMaterialEmissive(PixelMaterialInputs);
+	Payload.BaseColor = BaseColor;
+	Payload.Specular = Specular;
+	Payload.Roughness = Roughness;
+	Payload.Metallic = Metallic;
+#if MATERIALBLENDING_MODULATE
+	Payload.Opacity = 0.0;
+#else
+	Payload.Opacity = GetMaterialOpacity(PixelMaterialInputs);
+#endif
 
-	return saturate(Mask + 0.5);
+#if MATERIALBLENDING_MASKED
+	// regular masked mode - binary decision
+	if (GetMaterialMask(PixelMaterialInputs) < 0)
+	{
+		Payload.Opacity = 0;
+	}
+#endif // MATERIALBLENDING_MASKED
+
+	Payload.Ior = IOR;
+	Payload.CustomData = float4(GetMaterialCustomData0(MaterialParameters), GetMaterialCustomData1(MaterialParameters), 0, 0);
+	
+#if MATERIAL_SHADINGMODEL_CLEAR_COAT
+	#if CLEAR_COAT_BOTTOM_NORMAL
+	if (Payload.ShadingModelID == SHADINGMODELID_CLEAR_COAT)
+	{
+		float2 oct2 = UnitVectorToOctahedron(Payload.WorldNormal);
+
+		#if NUM_MATERIAL_OUTPUTS_CLEARCOATBOTTOMNORMAL > 0
+			#if MATERIAL_TANGENTSPACENORMAL
+				float3 tempnormal = normalize(TransformTangentVectorToWorld( MaterialParameters.TangentToWorld, ClearCoatBottomNormal0(MaterialParameters) ));
+			#else
+				float3 tempnormal =  ClearCoatBottomNormal0(MaterialParameters);
+			#endif
+
+			float2 oct1 = UnitVectorToOctahedron(tempnormal);
+			float2 oct3 = ( (oct1 - oct2) *  0.25 ) + (128.0/255.0);
+			Payload.CustomData.a = oct3.x;
+			Payload.CustomData.z = oct3.y;
+		#else
+			Payload.CustomData.a = 128.0/255.0;
+			Payload.CustomData.z = 128.0/255.0;
+		#endif
+	}
+	#endif
+#endif
+
+#if MATERIAL_SHADINGMODEL_CLOTH
+	if (Payload.ShadingModelID == SHADINGMODELID_CLOTH)
+	{
+		Payload.CustomData = GetMaterialSubsurfaceData(PixelMaterialInputs);
+		Payload.CustomData.a = saturate(GetMaterialCustomData0(MaterialParameters));
+	}
+#endif
+
+	// Override custom data if sub-surface material
+#if MATERIAL_SHADINGMODEL_SUBSURFACE || MATERIAL_SHADINGMODEL_TWOSIDED_FOLIAGE || MATERIAL_SHADINGMODEL_SUBSURFACE_PROFILE || MATERIAL_SHADINGMODEL_EYE
+	if (Payload.ShadingModelID == SHADINGMODELID_SUBSURFACE ||
+		Payload.ShadingModelID == SHADINGMODELID_TWOSIDED_FOLIAGE ||
+		Payload.ShadingModelID == SHADINGMODELID_SUBSURFACE_PROFILE ||
+		Payload.ShadingModelID == SHADINGMODELID_EYE)
+	{
+		Payload.CustomData = GetMaterialSubsurfaceData(PixelMaterialInputs);
+	}
+#endif
+
+#if MATERIAL_SHADINGMODEL_SINGLELAYERWATER
+	if (Payload.ShadingModelID == SHADINGMODELID_SINGLELAYERWATER)
+	{
+		const float3 ScatteringCoeff = max(0.0f, DFDemote(GetSingleLayerWaterMaterialOutput0(MaterialParameters)));
+		const float3 AbsorptionCoeff = max(0.0f, DFDemote(GetSingleLayerWaterMaterialOutput1(MaterialParameters)));
+		const float PhaseG = clamp(DFDemote(GetSingleLayerWaterMaterialOutput2(MaterialParameters)), -1.0f, 1.0f);
+
+		const float3 WaterExtinction = ScatteringCoeff + AbsorptionCoeff;
+		const float3 WaterAlbedo = ScatteringCoeff / WaterExtinction;
+
+		Payload.BaseColor.xyz = WaterAlbedo;
+		Payload.CustomData.xyz = WaterExtinction;
+		Payload.CustomData.w = PhaseG;
+
+		Payload.Ior = DielectricF0ToIor(DielectricSpecularToF0(Specular));
+		Payload.BlendingMode = RAY_TRACING_BLEND_MODE_TRANSLUCENT;
+	}
+#endif
+
+#if MATERIAL_SHADINGMODEL_THIN_TRANSLUCENT
+	if (Payload.ShadingModelID == SHADINGMODELID_THIN_TRANSLUCENT)
+	{
+		Payload.CustomData.xyz = GetThinTranslucentMaterialOutput0(MaterialParameters);
+	}
+#endif
+
+#if MATERIAL_USES_ANISOTROPY
+	Payload.WorldTangent = CalculateAnisotropyTangent(MaterialParameters, PixelMaterialInputs);
+	Payload.Anisotropy = GetMaterialAnisotropy(PixelMaterialInputs);
+#else
+	Payload.WorldTangent = 0;
+	Payload.Anisotropy = 0.0f;
+#endif	
+
+	float3 DiffuseIndirectLighting = 0;
+	float3 SubsurfaceIndirectLighting;
+	float IndirectIrradiance = 0;
+	
+	float3 VolumetricLightmapBrickTextureUVs;
+		
+	#if PRECOMPUTED_IRRADIANCE_VOLUME_LIGHTING
+	VolumetricLightmapBrickTextureUVs = ComputeVolumetricLightmapBrickTextureUVs(WSHackToFloat(GetWorldPosition(MaterialParameters))); // RT_LWC_TODO
+	#endif
+
+	VTPageTableResult LightmapVTPageTableResult = (VTPageTableResult)0.0f;
+
+	// Always sample lightmaps without mip biasing, as they are likely packed in an atlas
+	// and aggressive bias can cause bleeding between charts.
+	float OldGlobalMipBias = GlobalTextureMipBias;
+	GlobalTextureMipBias = 0;
+
+	GetPrecomputedIndirectLightingAndSkyLight(
+		MaterialParameters,
+		Interpolants,
+		LightmapVTPageTableResult,
+		Payload.WorldNormal,
+		VolumetricLightmapBrickTextureUVs,
+		Payload.ShadingModelID,
+		bIsEnableSkyLightContribution,
+		DiffuseIndirectLighting,
+		SubsurfaceIndirectLighting,
+		IndirectIrradiance);
+
+	// Restore global mip bias after lightmaps are sampled.
+	GlobalTextureMipBias = OldGlobalMipBias;
+
+	Payload.DiffuseColor = BaseColor - BaseColor * Metallic;
+	Payload.SpecularColor = ComputeF0(Specular, BaseColor, Metallic);
+	
+	Payload.IndirectIrradiance += DiffuseIndirectLighting; // Contains both lightmap & skylight
 }
+#endif // SUBSTRATE_ENABLED
 
 RAY_TRACING_ENTRY_CLOSEST_HIT(MaterialCHS,
 	FPackedMaterialClosestHitPayload, PackedPayload,
-	FDefaultAttributes, Attributes)
+	FRayTracingIntersectionAttributes, Attributes)
 {
 	PackedPayload.HitT = RayTCurrent();
 
 #if USE_MATERIAL_CLOSEST_HIT_SHADER
-
-	if (PackedPayload.IsMinimalPayloadMode())
-	{
-		// Minimal payload mode only fills FMinimalPayload::HitT, skipping actual material evaluation.
-		// This mode is used when tracing shadow rays against masked geometry.
-		// Dynamic branch is used to avoid compiling an extra shader permutation.
-		return;
-	}
-
 	GlobalTextureMipBias = PackedPayload.GetMipBias();
-
-	const uint2 PixelCoord = PackedPayload.GetPixelCoord();
 
 	ResolvedView = ResolveView();
 
 	FVertexFactoryInterpolantsVSToPS Interpolants;
-	float4 SvPosition = float4(PixelCoord.xy, 0.0, 1.0);
+	const float3 TranslatedWorldPosition = TranslatedWorldRayOrigin() + RayTCurrent() * WorldRayDirection();
+	const float4 SvPosition = TranslatedWorldPositionToSvPosition(TranslatedWorldPosition);
 	
 	FRayCone PropagatedCone = PropagateRayCone(PackedPayload.GetRayCone(), 0 /* surface curvature */, RayTCurrent());
 	CalcInterpolants(PropagatedCone, Attributes, Interpolants);
 
+#if VF_SUPPORTS_RAYTRACING_PREPARE_MATERIAL_PIXEL_PARAMETERS
+	float3 GeoNormal = 0;
+	FMaterialPixelParameters MaterialParameters = GetMaterialPixelParameters(TranslatedWorldRayOrigin(), WorldRayDirection(), RayTCurrent(), PrimitiveIndex(), Attributes, HitKind(), GeoNormal);
+#else
+	float3 GeoNormal = GetGeometryNormalFromTriangleBaseAttributes(PrimitiveIndex());
 	FMaterialPixelParameters MaterialParameters = GetMaterialPixelParameters(Interpolants, SvPosition);
+#endif
+
+	bool bIsLumenPayload = PackedPayload.IsLumenPayload();
+	if (bIsLumenPayload)
+	{
+		const float3 SurfaceNormal = GeoNormal;
+		const int PrimitiveIndex = GetInstanceUserData();
+		const int PrimitiveInstanceIndex = InstanceIndex() - GetBaseInstanceIndex();
+
+		PackedPayload.SetGeometryNormal(SurfaceNormal);
+		PackedPayload.SetSceneInstanceIndex(
+			GetGPUSceneInstanceIndex(PrimitiveIndex, PrimitiveInstanceIndex)
+		);
+	}
+
+	if (PackedPayload.IsMinimalPayloadMode())
+	{
+#if MATERIALBLENDING_TRANSLUCENT
+		//For shadow ray that does not ignore translucent materials, the material will be evaluated
+		// even with minimal payload mode to query the opacity for translucent shadow.
+		if (PackedPayload.IsIgnoreTranslucentMaterials() || !PackedPayload.IsShadowRay())
+#endif
+		{
+			// Minimal payload mode only fills FMinimalPayload::HitT, skipping actual material evaluation.
+			// This mode is used when tracing shadow rays against masked geometry.
+			// Dynamic branch is used to avoid compiling an extra shader permutation.
+			return;
+		}
+	}
+
+	CurrentPayloadInputFlags = PackedPayload.GetFlags();
+
 	FPixelMaterialInputs PixelMaterialInputs;
 
 	{
 		float4 ScreenPosition = SvPositionToResolvedScreenPosition(SvPosition);
-		float3 TranslatedWorldPosition = WorldRayOrigin() + WorldRayDirection() * RayTCurrent() + ResolvedView.PreViewTranslation.xyz;
+		float3 TranslatedWorldPosition = TranslatedWorldRayOrigin() + WorldRayDirection() * RayTCurrent();
 		
 		bool bIsFrontFace = HitKind() == HIT_KIND_TRIANGLE_FRONT_FACE;
 
@@ -340,8 +575,10 @@ RAY_TRACING_ENTRY_CLOSEST_HIT(MaterialCHS,
 		uint MaterialBlendingMode = RAY_TRACING_BLEND_MODE_OPAQUE;
 	#endif
 
+	const uint PrimitiveFlags = GetPrimitiveData(MaterialParameters.PrimitiveId).Flags;
+
 	Payload.BlendingMode = MaterialBlendingMode;
-	Payload.PrimitiveLightingChannelMask = GetPrimitiveData(MaterialParameters.PrimitiveId).LightingChannelMask;
+	Payload.PrimitiveLightingChannelMask = GetPrimitive_LightingChannelMask_FromFlags(PrimitiveFlags);
 
 	Payload.HitT = RayTCurrent();
 	if (HitKind() == HIT_KIND_TRIANGLE_FRONT_FACE)
@@ -349,201 +586,64 @@ RAY_TRACING_ENTRY_CLOSEST_HIT(MaterialCHS,
 		Payload.SetFrontFace();
 	}
 
-#if MATERIAL_IS_SKY
-	if (PackedPayload.IsIgnoreSkyMaterials())
-	{
-		PackedPayload = PackRayTracingPayload(Payload, PropagatedCone);
-		return;
-	}
+#if MATERIAL_TWOSIDED
+	Payload.SetTwoSided();
 #endif
 
-	// Store the results in local variables and reuse instead of calling the functions multiple times.
-	half3 BaseColor = GetMaterialBaseColor(PixelMaterialInputs);
-#if MATERIALBLENDING_TRANSLUCENT && REFRACTION_USE_INDEX_OF_REFRACTION
-	half2 Refraction = GetMaterialRefraction(PixelMaterialInputs);
+	// Fill payload with material data
+	GetMaterialPayload(PixelMaterialInputs, MaterialParameters, Interpolants, PackedPayload.IsEnableSkyLightContribution(), Payload); 
+
+	// After we have gathered the material info, check to see if we are a holdout to see if we need to overwrite the shaded result
+#if MATERIALBLENDING_ALPHAHOLDOUT
+	const bool bIsHoldout = true;
 #else
-	half2 Refraction = 1;
+	const bool bIsHoldout = (PrimitiveFlags & PRIMITIVE_SCENE_DATA_FLAG_HOLDOUT) != 0;
 #endif
-	half  Metallic = GetMaterialMetallic(PixelMaterialInputs);
-	half  Specular = GetMaterialSpecular(PixelMaterialInputs);
-	half Roughness = GetMaterialRoughness(PixelMaterialInputs);
-
-#if !SIMPLIFIED_MATERIAL_SHADER
-
-	/**
-	 * Set material attributes for full materials
-	 **/
-	Payload.WorldPos = MaterialParameters.AbsoluteWorldPosition;
-	Payload.WorldNormal = normalize(MaterialParameters.WorldNormal);
-	Payload.Radiance = GetMaterialEmissive(PixelMaterialInputs);
-	Payload.BaseColor = BaseColor;
-	Payload.Specular = Specular;
-	Payload.Roughness = Roughness;
-	Payload.Metallic = Metallic;
-	Payload.Opacity = GetMaterialOpacity(PixelMaterialInputs);
-
-#if MATERIALBLENDING_MASKED
-#if MATERIAL_DITHER_OPACITY_MASK
-	// dithering emulates real transparency, so switch to translucent
-	Payload.Opacity = DitheredOpacityMaskToOpacity(GetMaterialMask(PixelMaterialInputs));
-	Payload.BlendingMode = RAY_TRACING_BLEND_MODE_TRANSLUCENT;
+	const bool bIsCameraRay = PackedPayload.IsCameraRay();
+	if (bIsHoldout && bIsCameraRay)
+	{
+#if SUBSTRATE_ENABLED
+		// SUBSTRATE_TODO: Need to clear the material data and set a black unlit material in this case
 #else
-	// regular masked mode - binary decision
-	if (GetMaterialMask(PixelMaterialInputs) < 0)
-	{
-		Payload.Opacity = 0;
-	}
+		Payload.ShadingModelID = SHADINGMODELID_UNLIT;
+		Payload.Radiance = 0.0;
+		Payload.BaseColor = 0.0;
+		Payload.Specular = 0.0;
 #endif
-#endif // MATERIALBLENDING_MASKED
-
-	Payload.Ior = Refraction.x == 0 ? 1.0 : Refraction.x;
-	Payload.CustomData = float4(GetMaterialCustomData0(MaterialParameters), GetMaterialCustomData1(MaterialParameters), 0, 0);
-	
-#if MATERIAL_SHADINGMODEL_CLEAR_COAT
-	#if CLEAR_COAT_BOTTOM_NORMAL
-	if (Payload.ShadingModelID == SHADINGMODELID_CLEAR_COAT)
-	{
-		float2 oct2 = UnitVectorToOctahedron(Payload.WorldNormal);
-
-		#if NUM_MATERIAL_OUTPUTS_CLEARCOATBOTTOMNORMAL > 0
-			#if MATERIAL_TANGENTSPACENORMAL
-				float3 tempnormal = normalize(TransformTangentVectorToWorld( MaterialParameters.TangentToWorld, ClearCoatBottomNormal0(MaterialParameters) ));
-			#else
-				float3 tempnormal =  ClearCoatBottomNormal0(MaterialParameters);
-			#endif
-
-			float2 oct1 = UnitVectorToOctahedron(tempnormal);
-			float2 oct3 = ( (oct1 - oct2) *  0.5 ) + (128.0/255.0);
-			Payload.CustomData.a = oct3.x;
-			Payload.CustomData.z = oct3.y;
-		#else
-			Payload.CustomData.a = 128.0/255.0;
-			Payload.CustomData.z = 128.0/255.0;
-		#endif
+		Payload.SetHoldout();
 	}
-	#endif
-#endif
-
-	// Override custom data if sub-surface material
-#if MATERIAL_SHADINGMODEL_SUBSURFACE || MATERIAL_SHADINGMODEL_TWOSIDED_FOLIAGE || MATERIAL_SHADINGMODEL_CLOTH || MATERIAL_SHADINGMODEL_CLOTH || MATERIAL_SHADINGMODEL_SUBSURFACE_PROFILE || MATERIAL_SHADINGMODEL_EYE
-	if (Payload.ShadingModelID == SHADINGMODELID_SUBSURFACE ||
-		Payload.ShadingModelID == SHADINGMODELID_TWOSIDED_FOLIAGE ||
-		Payload.ShadingModelID == SHADINGMODELID_CLOTH ||
-		Payload.ShadingModelID == SHADINGMODELID_SUBSURFACE_PROFILE |
-		Payload.ShadingModelID == SHADINGMODELID_EYE)
-	{
-		Payload.CustomData = GetMaterialSubsurfaceData(PixelMaterialInputs);
-	}
-#endif
-
-#if MATERIAL_SHADINGMODEL_CLOTH
-	if (Payload.ShadingModelID == SHADINGMODELID_CLOTH)
-	{
-		Payload.CustomData.a = saturate(GetMaterialCustomData0(MaterialParameters));
-	}
-#endif
-
-#if MATERIAL_SHADINGMODEL_THIN_TRANSLUCENT
-	if (Payload.ShadingModelID == SHADINGMODELID_THIN_TRANSLUCENT)
-	{
-		Payload.CustomData.xyz = GetThinTranslucentMaterialOutput0(MaterialParameters);
-	}
-#endif
-
-#if MATERIAL_USES_ANISOTROPY
-	Payload.WorldTangent = CalculateAnisotropyTangent(MaterialParameters, PixelMaterialInputs);
-	Payload.Anisotropy = GetMaterialAnisotropy(PixelMaterialInputs);
-#else
-	Payload.WorldTangent = 0;
-	Payload.Anisotropy = 0.0f;
-#endif	
-
-	float3 DiffuseIndirectLighting = 0;
-	float3 SubsurfaceIndirectLighting;
-	float IndirectIrradiance = 0;
-	
-	float3 VolumetricLightmapBrickTextureUVs;
-		
-	#if PRECOMPUTED_IRRADIANCE_VOLUME_LIGHTING
-		VolumetricLightmapBrickTextureUVs = ComputeVolumetricLightmapBrickTextureUVs(MaterialParameters.AbsoluteWorldPosition);
-	#endif
-
-	VTPageTableResult LightmapVTPageTableResult = (VTPageTableResult)0.0f;
-
-	// Always sample lightmaps without mip biasing, as they are likely packed in an atlas
-	// and aggressive bias can cause bleeding between charts.
-	float OldGlobalMipBias = GlobalTextureMipBias;
-	GlobalTextureMipBias = 0;
-
-	GetPrecomputedIndirectLightingAndSkyLight(
-		MaterialParameters,
-		Interpolants,
-		LightmapVTPageTableResult,
-		Payload.WorldNormal,
-		VolumetricLightmapBrickTextureUVs,
-		Payload.ShadingModelID,
-		PackedPayload.IsEnableSkyLightContribution(),
-		DiffuseIndirectLighting,
-		SubsurfaceIndirectLighting,
-		IndirectIrradiance);
-
-	// Restore global mip bias after lightmaps are sampled.
-	GlobalTextureMipBias = OldGlobalMipBias;
-
-	Payload.DiffuseColor = BaseColor - BaseColor * Metallic;
-	Payload.SpecularColor = ComputeF0(Specular, BaseColor, Metallic);
-	
-	Payload.IndirectIrradiance += DiffuseIndirectLighting; // Contains both lightmap & skylight
-
-#else
-
-	/**
-	 * Set material attributes for simplified materials
-	 **/
-	// Anything unsupported will be forced to default lit
-#if MATERIAL_SHADINGMODEL_TWOSIDED_FOLIAGE
-	if (Payload.ShadingModelID == SHADINGMODELID_TWOSIDED_FOLIAGE)
-	{
-		Payload.CustomData = GetMaterialSubsurfaceData(PixelMaterialInputs);
-	}
-	else
-#endif
-#if MATERIAL_SHADINGMODEL_THIN_TRANSLUCENT
-	if (Payload.ShadingModelID == SHADINGMODELID_THIN_TRANSLUCENT)
-	{
-		Payload.CustomData.xyz = GetThinTranslucentMaterialOutput0(MaterialParameters);
-	}
-	else
-#endif
-#if MATERIAL_SHADINGMODEL_UNLIT
-	if (Payload.ShadingModelID == SHADINGMODELID_UNLIT)
-	{
-	}
-	else
-#endif
-	{
-		Payload.ShadingModelID = SHADINGMODELID_DEFAULT_LIT;
-	}
-	Payload.WorldPos = MaterialParameters.AbsoluteWorldPosition;
-	Payload.WorldNormal = normalize(MaterialParameters.WorldNormal);
-	Payload.Radiance = GetMaterialEmissive(PixelMaterialInputs);
-	Payload.BaseColor = BaseColor;
-	Payload.Specular = 0;
-	Payload.Roughness = 1;
-	Payload.Metallic = 0;
-	Payload.Opacity = GetMaterialOpacity(PixelMaterialInputs);
-	Payload.Ior = 1;
-
-#endif
 
 	PackedPayload = PackRayTracingPayload(Payload, PropagatedCone);
+
+	// Override packed payload with custom Lumen data
+	if (bIsLumenPayload)
+	{
+		const int PrimitiveIndex = GetInstanceUserData();
+		const int PrimitiveInstanceIndex = InstanceIndex() - GetBaseInstanceIndex();
+		PackedPayload.SetSceneInstanceIndex(GetGPUSceneInstanceIndex(PrimitiveIndex, PrimitiveInstanceIndex));
+		PackedPayload.SetGeometryNormal(GeoNormal);
+	}
+
+#if MATERIAL_VIRTUALTEXTURE_FEEDBACK
+	if (bIsCameraRay)
+	{
+		// Virtual texturing feedback logic (camera rays only for now)
+		FinalizeVirtualTextureFeedback(
+			MaterialParameters.VirtualTextureFeedback,
+			MaterialParameters.SvPosition,
+			Payload.Opacity,
+			View.FrameNumber,
+			View.VTFeedbackBuffer
+		);
+	}
+#endif
 
 #endif // USE_MATERIAL_CLOSEST_HIT_SHADER
 }
 
 RAY_TRACING_ENTRY_ANY_HIT(MaterialAHS,
 	FPackedMaterialClosestHitPayload, PackedPayload,
-	FDefaultAttributes, Attributes)
+	FRayTracingIntersectionAttributes, Attributes)
 {
 #if USE_MATERIAL_ANY_HIT_SHADER
 
@@ -551,19 +651,11 @@ RAY_TRACING_ENTRY_ANY_HIT(MaterialAHS,
 	// Continue traversal by simply returning from this shader
 	// Usually this path is inactive because opaque materials don't have AHS bound
 	return;
-#elif MATERIALBLENDING_ALPHAHOLDOUT || MATERIALBLENDING_ADDITIVE
-	if (PackedPayload.IsPathTracingVisibilityRay())
-	{
-		// path tracer wants to treat these cases as fully transparent
-		// no material evaluation is required
-		IgnoreHit();
-	}
-	// otherwise accept hit
 #else
 	// All other blending modes _might_ need material evaluation - so we need
 	// to generate some code
 
-#if MATERIALBLENDING_MASKED && !MATERIAL_DITHER_OPACITY_MASK
+#if MATERIALBLENDING_MASKED
 	// NOTE: Masked mode execute always - regardless of ray flags
 	// This ensures that both material rays and shadow rays "see" the same thing
 #else
@@ -571,20 +663,14 @@ RAY_TRACING_ENTRY_ANY_HIT(MaterialAHS,
 	if (PackedPayload.IsIgnoreTranslucentMaterials())
 	{
 		// special mode used by regular RT shadows - translucent materials are skipped, everything else is treated as opaque
-#if MATERIALBLENDING_TRANSLUCENT || (MATERIALBLENDING_MASKED && MATERIAL_DITHER_OPACITY_MASK)
+#if MATERIALBLENDING_TRANSLUCENT
 		IgnoreHit();
 #endif
 		return;
 	}
-	else if (PackedPayload.IsPathTracingVisibilityRay())
-	{
-		// this case is used by the path tracer only currently
-		// We want to evaluate the material opacity and accumulate it
-		// Keep going and evaluate the material
-	}
 	else
 	{
-		// non-opaque blending mode but no special behavior was requested
+		// non-opaque blending mode, treat as opaque for now
 		return;
 	}
 #endif  // !MATERIALBLENDING_MASKED
@@ -593,21 +679,28 @@ RAY_TRACING_ENTRY_ANY_HIT(MaterialAHS,
 
 	GlobalTextureMipBias = PackedPayload.GetMipBias();
 
-	const uint2 PixelCoord = PackedPayload.GetPixelCoord();
-
 	ResolvedView = ResolveView();
 
 	FVertexFactoryInterpolantsVSToPS Interpolants;
-	float4 SvPosition = float4(PixelCoord.xy, 0.0, 1.0);
+	const float3 TranslatedWorldPosition = TranslatedWorldRayOrigin() + RayTCurrent() * WorldRayDirection();
+	const float4 SvPosition = TranslatedWorldPositionToSvPosition(TranslatedWorldPosition);
 
 	CalcInterpolants(PackedPayload.GetRayCone(), Attributes, Interpolants);
 
+#if VF_SUPPORTS_RAYTRACING_PREPARE_MATERIAL_PIXEL_PARAMETERS
+	float3 GeoNormal = 0;
+	FMaterialPixelParameters MaterialParameters = GetMaterialPixelParameters(TranslatedWorldRayOrigin(), WorldRayDirection(), RayTCurrent(), PrimitiveIndex(), Attributes, HitKind(), GeoNormal);
+#else
 	FMaterialPixelParameters MaterialParameters = GetMaterialPixelParameters(Interpolants, SvPosition);
+#endif
+
+	CurrentPayloadInputFlags = PackedPayload.GetFlags();
+
 	FPixelMaterialInputs PixelMaterialInputs;
 
 	{
 		float4 ScreenPosition = SvPositionToResolvedScreenPosition(SvPosition);
-		float3 TranslatedWorldPosition = WorldRayOrigin() + WorldRayDirection() * RayTCurrent() + ResolvedView.PreViewTranslation.xyz;
+		float3 TranslatedWorldPosition = TranslatedWorldRayOrigin() + WorldRayDirection() * RayTCurrent();
 		
 		bool bIsFrontFace = HitKind() == HIT_KIND_TRIANGLE_FRONT_FACE;
 
@@ -623,113 +716,12 @@ RAY_TRACING_ENTRY_ANY_HIT(MaterialAHS,
 
 	// Now extract the relevant info from PixelMaterialInputs according to the blending mode
 
-#if MATERIALBLENDING_MASKED && !MATERIAL_DITHER_OPACITY_MASK
+#if MATERIALBLENDING_MASKED
 	// Regardless of payload flags -- we always apply this 
 	if (GetMaterialMask(PixelMaterialInputs) < 0)
 	{
 		IgnoreHit();
 	}
-#else
-	// If we got this far -- we have a blending mode that can produce partial opacity _and_ we want to
-	// know how much it contributes to the throughput along this ray. These cases are currently only
-	// exercised by the path tracer.
-#if MATERIALBLENDING_MODULATE
-	// this material is the only one to lead to colored opacity
-	float3 Transparency = GetMaterialEmissive(PixelMaterialInputs);
-#elif MATERIALBLENDING_ALPHACOMPOSITE
-	float Opacity = GetMaterialOpacity(PixelMaterialInputs);
-	float Transparency = 1 - Opacity;
-#elif MATERIAL_SHADINGMODEL_THIN_TRANSLUCENT
-	// Assume Payload.ShadingModelID == SHADINGMODELID_THIN_TRANSLUCENT
-	float3 Transmission = GetThinTranslucentMaterialOutput0(MaterialParameters);
-	float Opacity = GetMaterialOpacity(PixelMaterialInputs);
-#if REFRACTION_USE_INDEX_OF_REFRACTION && !SIMPLIFIED_MATERIAL_SHADER
-	float Ior = GetMaterialRefraction(PixelMaterialInputs).x;
-	Ior = Ior == 0 ? 1.0 : Ior;
-#else
-	float Ior = 1.0;
-#endif
-	float3 Transparency = 1 - Opacity;
-	float3 V = WorldRayDirection();
-	float3 N = normalize(MaterialParameters.WorldNormal);
-	float VoN = abs(dot(V, N));
-#if !SIMPLIFIED_MATERIAL_SHADER
-	if (Opacity < 1.0 && Ior != 1.0)
-	{
-		float PathRoughness = PackedPayload.GetPathRoughness();
-		float Roughness = GetMaterialRoughness(PixelMaterialInputs);
-		if (PathRoughness <= Roughness)
-		{
-			// not using fast caustic approximation - treat as opaque
-			return;
-		}
-		// compute transmission through the slab (fresnel + absorption)
-		Transparency *= ComputeThinSlabWeights(Transmission, VoN, Ior).Transmitted;
-
-		// fake caustic approximation (see comments below)
-		Transparency *= (1 - Roughness * Roughness) * saturate(PathRoughness - Roughness);
-	}
-	else
-#endif
-	{
-		// no bending at the interface so no fresnel - equation above simplifies to just A
-		float3 A = pow(Transmission, 1.0 / VoN);
-		Transparency *= A;
-	}
-#elif MATERIALBLENDING_MASKED && MATERIAL_DITHER_OPACITY_MASK
-	float Opacity = DitheredOpacityMaskToOpacity(GetMaterialMask(PixelMaterialInputs));
-	float Transparency = 1 - Opacity;
-#elif MATERIALBLENDING_TRANSLUCENT
-	float Opacity = GetMaterialOpacity(PixelMaterialInputs);
-	float Transparency = 1 - Opacity;
-#if REFRACTION_USE_INDEX_OF_REFRACTION && !SIMPLIFIED_MATERIAL_SHADER
-	float Ior = GetMaterialRefraction(PixelMaterialInputs).x;
-#else
-	float Ior = 1.0;
-#endif
-
-#if !SIMPLIFIED_MATERIAL_SHADER
-	// Is refraction enabled?
-	if (Transparency > 0 && Ior != 1.0)
-	{
-		float PathRoughness = PackedPayload.GetPathRoughness();
-		float Roughness = GetMaterialRoughness(PixelMaterialInputs);
-		if (PathRoughness <= Roughness)
-		{
-			// not using fast caustic approximation - treat as opaque
-			return;
-		}
-		// The heuristic used here is inspired by the following presentations:
-		//   - Kulla & Conty: Revisiting Physically Based Shading at Imageworks
-		//       https://blog.selfshadow.com/publications/s2017-shading-course/imageworks/s2017_pbs_imageworks_slides_v2.pdf
-		//   - Colin Barré-Brisebois - Pica Pica & Nvidia Turing
-		//       https://www.ea.com/seed/news/siggraph-2018-picapica-nv-turing
-
-		// fake caustics
-		float3 N = normalize(MaterialParameters.WorldNormal);
-		float Eta = Ior;
-		float VoN = abs(dot(WorldRayDirection(), N));
-		float Fr = FresnelReflectance(VoN, Eta);
-		Transparency *= pow(1 - Fr, 2) * (1 - Roughness * Roughness) * saturate(PathRoughness - Roughness);
-	}
-#endif
-#else
-#error "Control flow does not account for all blending modes!"
-#endif
-
-	// Update the ray throughput (it is packed simply into the payload since we don't need to carry any other information across hits)
-	float3 RayThroughput = PackedPayload.GetRayThroughput();
-
-	RayThroughput *= Transparency;
-
-	PackedPayload.SetRayThroughput(RayThroughput);
-
-	if (any(RayThroughput > 0))
-	{
-		// not at full opacity yet -- ignore the hit so we can keep going
-		IgnoreHit();
-	}
-	// If RayThroughput reached 0 -- just return which will accept the hit
 #endif // !MATERIALBLENDING_MASKED
 
 #endif // !MATERIALBLENDING_SOLID && !MATERIALBLENDING_ALPHAHOLDOUT && !MATERIALBLENDING_ADDITIVE

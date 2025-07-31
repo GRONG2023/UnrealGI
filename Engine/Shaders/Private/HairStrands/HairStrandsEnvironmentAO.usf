@@ -1,17 +1,13 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
   
-#include "HairStrandsVoxelPageCommonStruct.ush"
-
 #include "../Common.ush"
 #include "../MonteCarlo.ush"
-#include "../DeferredShadingCommon.ush"  
-#include "../SceneTextureParameters.ush"
-#include "HairStrandsCommon.ush"
-#include "HairStrandsVisibilityCommon.ush"
-#include "HairStrandsVoxelPageCommon.ush"
+#include "../DeferredShadingCommon.ush"
+#include "../PositionReconstructionCommon.ush"
+#include "../HairShadingCommon.ush"
+#include "../HairBsdf.ush"
 #include "HairStrandsEnvironmentLightingCommon.ush"
-
-#include "../ShaderDrawDebug.ush"
+#include "../Substrate/Substrate.ush"
 
 #define VOXEL_TRAVERSAL_TYPE VOXEL_TRAVERSAL_LINEAR_MIPMAP
 #define VOXEL_TRAVERSAL_DEBUG 0 
@@ -29,10 +25,8 @@ float AO_DistanceThreshold;
 uint Output_bHalfRes;
 float2 Output_InvResolution;
 
-float TraceAO(float3 WorldPosition, float3 WorldNormal, float2 SvPosition, float PixelRadius)
+float TraceAO(float3 TranslatedWorldPosition, float3 WorldNormal, float2 SvPosition, float PixelRadius)
 {
-	const float3 VoxelOffset = VirtualVoxel.VoxelWorldSize * GetHairVoxelJitter(SvPosition, View.StateFrameIndexMod8, VirtualVoxel.JitterMode);
-
 	const bool bDebugEnabled = all(uint2(SvPosition) == uint2(GetCursorPos()));
 	
 	float3 UnoccludedN = 0;
@@ -65,12 +59,11 @@ float TraceAO(float3 WorldPosition, float3 WorldNormal, float2 SvPosition, float
 
 	FVirtualVoxelCommonDesc CommonDesc;
 	CommonDesc.PageCountResolution = VirtualVoxel.PageCountResolution;
-	CommonDesc.VoxelWorldSize = VirtualVoxel.VoxelWorldSize;
 	CommonDesc.PageTextureResolution = VirtualVoxel.PageTextureResolution;
 	CommonDesc.PageResolution = VirtualVoxel.PageResolution;
+	CommonDesc.PageResolutionLog2 = VirtualVoxel.PageResolutionLog2;
 
-	const FPackedVirtualVoxelNodeDesc PackedNode = VirtualVoxel.NodeDescBuffer[Voxel_MacroGroupId];
-	const FVirtualVoxelNodeDesc NodeDesc = UnpackVoxelNode(PackedNode, VirtualVoxel.PageResolution);
+	const FVirtualVoxelNodeDesc NodeDesc = UnpackVoxelNode(VirtualVoxel.NodeDescBuffer[Voxel_MacroGroupId], VirtualVoxel.PageResolution);
 
 	FHairTraversalSettings TraversalSettings = InitHairTraversalSettings();
 	TraversalSettings.DensityScale = VirtualVoxel.DensityScale_AO;
@@ -88,21 +81,20 @@ float TraceAO(float3 WorldPosition, float3 WorldNormal, float2 SvPosition, float
 
 		const float3 LocalL = CosineSampleHemisphere(frac(Random4.xy)).xyz;
 		const float3 SampleL = TangentToWorld(LocalL.xyz, WorldNormal);
-		const float3 SampleBias = ComputePositionBias(SampleL, SampleL * Random4.z, VirtualVoxel.VoxelWorldSize, VirtualVoxel.DepthBiasScale_Environment);
+		const float3 SampleBias = ComputePositionBias(SampleL, SampleL * Random4.z, NodeDesc.VoxelWorldSize, VirtualVoxel.DepthBiasScale_Environment);
 
 		// Depth bias
-		const float3 SampleWorldPosition = WorldPosition + SampleBias;
-		const float3 SampleLightPosition = SampleWorldPosition + SampleL * VoxelAOMaxDistance;
+		const float3 SampleTranslatedWorldPosition = TranslatedWorldPosition + SampleBias;
+		const float3 SampleTranslatedLightPosition = SampleTranslatedWorldPosition + SampleL * VoxelAOMaxDistance;
 
 		// Compute the number of hair count between light & shading point
 
 		const FHairTraversalResult Result = ComputeHairCountVirtualVoxel(
-			SampleWorldPosition,
-			SampleLightPosition,
+			SampleTranslatedWorldPosition,
+			SampleTranslatedLightPosition,
 			CommonDesc,
 			NodeDesc,
 			VirtualVoxel.PageIndexBuffer,
-			VirtualVoxel.PageIndexOccupancyBuffer,
 			VirtualVoxel.PageTexture,
 			TraversalSettings);
 
@@ -118,19 +110,9 @@ float TraceAO(float3 WorldPosition, float3 WorldNormal, float2 SvPosition, float
 	return saturate(AO);
 }
 
-float3 TotWorldPosition(float2 UV, float Depth)
-{
-	float2 ScreenPosition = (UV - View.ScreenPositionScaleBias.wz) / View.ScreenPositionScaleBias.xy;
-	float4 HomogeneousWorldPosition = mul(float4(ScreenPosition * Depth, Depth, 1), View.ScreenToWorld);
-	float3 WorldPosition = HomogeneousWorldPosition.xyz / HomogeneousWorldPosition.w;
-
-	return WorldPosition;
-}
-
 void MainPS(
 	in float4 SvPosition : SV_Position,
-	out float4 OutAO : SV_Target0
-)
+	out float4 OutAO : SV_Target0)
 {
 	const bool bHalfRes = true; // Output_bHalfRes > 0;
 	float2 BufferUV = SvPositionToBufferUV(SvPosition);
@@ -139,32 +121,30 @@ void MainPS(
 		BufferUV = SvPosition.xy * Output_InvResolution;
 	}
 
-	OutAO = 1;
-
-	const FGBufferData GBuffer = GetGBufferDataFromSceneTextures(BufferUV);
-	const float3 WorldPosition = TotWorldPosition(BufferUV, GBuffer.Depth);
-	const float3 WorldNormal = GBuffer.WorldNormal;
-
-	// Trace AO for all pixel which are partially covered or not covered at all.
 	const uint2 PixelCoord = floor(SvPosition.xy);
-	bool bIsValid = false;
-	if (bHalfRes)
-	{
-		float Coverage0 = DecodeCategorizationData(HairCategorizationTexture.Load(uint3(PixelCoord              , 0))).PixelCoverage;
-		float Coverage1 = DecodeCategorizationData(HairCategorizationTexture.Load(uint3(PixelCoord + uint2(1, 0), 0))).PixelCoverage;
-		float Coverage2 = DecodeCategorizationData(HairCategorizationTexture.Load(uint3(PixelCoord + uint2(0, 1), 0))).PixelCoverage;
-		float Coverage3 = DecodeCategorizationData(HairCategorizationTexture.Load(uint3(PixelCoord + uint2(1, 1), 0))).PixelCoverage;
-		bIsValid = Coverage0 < 1 || Coverage1 < 1 || Coverage2 < 1 || Coverage3 < 1 || GBuffer.ShadingModelID != SHADINGMODELID_UNLIT;
-	}
-	else
-	{
-		bIsValid = DecodeCategorizationData(HairCategorizationTexture.Load(uint3(PixelCoord, 0))).PixelCoverage < 1;
-	}
+#if SUBSTRATE_ENABLED
+	FSubstrateAddressing SubstrateAddressing = GetSubstratePixelDataByteOffset(PixelCoord, uint2(View.BufferSizeAndInvSize.xy), Substrate.MaxBytesPerPixel);
+	FSubstratePixelHeader SubstratePixelHeader = UnpackSubstrateHeaderIn(Substrate.MaterialTextureArray, SubstrateAddressing, Substrate.TopLayerTexture);
+	const FSubstrateTopLayerData TopLayerData = SubstrateUnpackTopLayerData(Substrate.TopLayerTexture.Load(uint3(PixelCoord, 0)));
+	const bool bIsValid = SubstratePixelHeader.ClosureCount > 0;
+	const float3 WorldNormal = TopLayerData.WorldNormal;
 
+#else
+	// Trace AO for all pixel which are partially covered or not covered at all.
+	// Fully covered pixel are marked as unlit
+	const FGBufferData GBuffer = GetGBufferDataFromSceneTextures(BufferUV);
+	const bool bIsValid = GBuffer.ShadingModelID != SHADINGMODELID_UNLIT;
+	const float3 WorldNormal = GBuffer.WorldNormal;
+#endif
+
+	OutAO = 1;
 	if (bIsValid)
 	{
-		const float PixelRadius = GBuffer.Depth * VirtualVoxel.HairCoveragePixelRadiusAtDepth1;
-		OutAO = TraceAO(WorldPosition, WorldNormal, SvPosition.xy, PixelRadius);
+		const float DeviceZ = SampleDeviceZFromSceneTextures(BufferUV);
+		const float SceneDepth = ConvertFromDeviceZ(DeviceZ);
+		const float3 TranslatedWorldPosition = ReconstructTranslatedWorldPositionFromDepth(BufferUV, SceneDepth);
+		const float PixelRadius = ConvertGivenDepthRadiusForProjectionType(VirtualVoxel.HairCoveragePixelRadiusAtDepth1, SceneDepth);
+		OutAO = TraceAO(TranslatedWorldPosition, WorldNormal, SvPosition.xy, PixelRadius);
 	}
 	else
 	{

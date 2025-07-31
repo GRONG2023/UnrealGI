@@ -1,20 +1,8 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 /*=============================================================================
-	DistanceFieldAOShared.usf
+	DistanceFieldAOShared.ush
 =============================================================================*/
-
-#ifndef SORTTHREADGROUP_SIZEX
-#define SORTTHREADGROUP_SIZEX 1
-#endif
-
-#ifndef SORTTHREADGROUP_SIZEY
-#define SORTTHREADGROUP_SIZEY 1
-#endif
-
-#ifndef CONE_TRACE_PHASE
-#define CONE_TRACE_PHASE -1
-#endif
 
 // Must match C++
 #define NUM_CONE_STEPS 10
@@ -39,12 +27,6 @@ float GetAOMaxDistance()
 	return max(AOObjectMaxDistance, AOGlobalMaxOcclusionDistance);
 }
 
-// Pass a debug value through the pipeline instead of a bent normal
-#define PASS_THROUGH_DEBUG_VALUE 0
-
-// One for near, one for far
-#define NUM_CULLED_OBJECT_LISTS 2
-
 float GetStepOffset(float StepIndex)
 {
 	// Original heuristic
@@ -59,13 +41,13 @@ uint2 TileListGroupSize;
 Texture2D DistanceFieldNormalTexture;
 SamplerState DistanceFieldNormalSampler;
 
-float4 EncodeDownsampledGBuffer(FGBufferData GBufferData, float SceneDepth)
+float4 EncodeDownsampledGBuffer(in float3 WorldNormal, float SceneDepth)
 {
 	#if METAL_PROFILE 
 		// clamp max depth to avoid #inf
 		SceneDepth = min(SceneDepth, 65500.0f);
 	#endif
-	return float4(GBufferData.WorldNormal.xyz, SceneDepth);
+	return float4(WorldNormal, SceneDepth);
 } 
 
 void GetDownsampledGBuffer(float2 ScreenUV, out float3 OutNormal, out float OutDepth)
@@ -80,20 +62,10 @@ float GetDownsampledDepth(float2 ScreenUV)
 	return abs(Texture2DSampleLevel(DistanceFieldNormalTexture, DistanceFieldNormalSampler, ScreenUV, 0).w);
 }
 
-uint CurrentLevelDownsampleFactor;
-float2 AOBufferSize;
-
-uint DownsampleFactorToBaseLevel;
 float2 BaseLevelTexelSize;
 
 Texture2D BentNormalAOTexture;
 SamplerState BentNormalAOSampler;
-#if !SUPPORTS_INDEPENDENT_SAMPLERS
-SamplerState ConfidenceSampler;
-#endif
-
-Texture2D IrradianceTexture;
-SamplerState IrradianceSampler;
 
 bool SphereIntersectCone(float4 SphereCenterAndRadius, float3 ConeVertex, float3 ConeAxis, float ConeAngleCos, float ConeAngleSin)
 {
@@ -139,6 +111,7 @@ bool SphereIntersectConeWithDepthRanges(float4 SphereCenterAndRadius, float3 Con
 }
 
 Buffer<float> RecordConeVisibility;
+float4 SampleDirections[NUM_CONE_DIRECTIONS];
 float BentNormalNormalizeFactor;
 
 void FindBestAxisVectors2(float3 InZAxis, out float3 OutXAxis, out float3 OutYAxis )
@@ -158,7 +131,7 @@ float3 ComputeBentNormal(float3 RecordWorldNormal, uint RelativeRecordIndex)
 
 	for (uint ConeIndex = 0; ConeIndex < NUM_CONE_DIRECTIONS; ConeIndex++)
 	{
-		float3 ConeDirection = AOSamples2.SampleDirections[ConeIndex].xyz;
+		float3 ConeDirection = SampleDirections[ConeIndex].xyz;
 		float3 RotatedConeDirection = ConeDirection.x * TangentX + ConeDirection.y * TangentY + ConeDirection.z * RecordWorldNormal;
 
 		float ConeVisibility = RecordConeVisibility[RelativeRecordIndex * NUM_CONE_DIRECTIONS + ConeIndex];
@@ -173,11 +146,16 @@ float3 ComputeBentNormal(float3 RecordWorldNormal, uint RelativeRecordIndex)
 
 float2 AOBufferBilinearUVMax;
 
-float3 UpsampleDFAO(float2 BufferUV, float SceneDepth, float3 WorldNormal)
+struct FUpsampleDFAOOutput
 {
-	// Distance field AO was computed at 0,0 regardless of viewrect min
-	float2 DistanceFieldUVs = BufferUV - View.ViewRectMin.xy * View.BufferSizeAndInvSize.zw;
-	DistanceFieldUVs = min(DistanceFieldUVs, AOBufferBilinearUVMax);
+	float3 BentNormal;
+	float FadeAlpha;
+};
+FUpsampleDFAOOutput UpsampleDFAO(float2 BufferUV, float SceneDepth)
+{
+	FUpsampleDFAOOutput UpsampleDFAOOutput;
+
+	float2 DistanceFieldUVs = min(BufferUV, AOBufferBilinearUVMax);
 
 #define BILATERAL_UPSAMPLE 1
 #if BILATERAL_UPSAMPLE
@@ -219,11 +197,22 @@ float3 UpsampleDFAO(float2 BufferUV, float SceneDepth, float3 WorldNormal)
 
 #endif
 
+	UpsampleDFAOOutput.BentNormal = BentNormal;
 	// Fade to unoccluded in the distance
-	float FadeAlpha = saturate((AOMaxViewDistance - SceneDepth) * DistanceFadeScale);
-	BentNormal = lerp(WorldNormal, BentNormal, FadeAlpha);
+	UpsampleDFAOOutput.FadeAlpha = saturate((AOMaxViewDistance - SceneDepth) * DistanceFadeScale);
 
-	return BentNormal;
+	return UpsampleDFAOOutput;
+}
+
+float3 ApplyDFAO(FUpsampleDFAOOutput UpsampleDFAOOutput, float3 WorldNormal)
+{
+	return lerp(WorldNormal, UpsampleDFAOOutput.BentNormal, UpsampleDFAOOutput.FadeAlpha);
+}
+
+float3 UpsampleDFAO(float2 BufferUV, float SceneDepth, float3 WorldNormal)
+{
+	FUpsampleDFAOOutput UpsampleDFAOOutput = UpsampleDFAO(BufferUV, SceneDepth);
+	return ApplyDFAO(UpsampleDFAOOutput, WorldNormal);
 }
 
 #ifndef CULLED_TILE_SIZEX
@@ -274,7 +263,7 @@ float2 GetScreenUVFromScreenGrid(uint2 OutputCoordinate)
 	return GetScreenUVFromScreenGrid(OutputCoordinate, 1);
 }
 
-Buffer<uint> CulledTilesStartOffsetArray;
+StructuredBuffer<uint> CulledTilesStartOffsetArray;
 
 #define INVALID_TILE_INDEX 0xFFFF
 

@@ -11,7 +11,7 @@
 
 struct FAnisotropyPassVSToPS
 {
-	float4 Position : SV_POSITION;
+	INVARIANT_OUTPUT float4 Position : SV_POSITION;
 	FVertexFactoryInterpolantsVSToPS Interps;
 
 	#if USE_WORLD_POSITION_EXCLUDING_SHADER_OFFSETS
@@ -19,91 +19,29 @@ struct FAnisotropyPassVSToPS
 	#endif
 };
 
-#if USING_TESSELLATION
-	struct FAnisotropyPassVSToDS
-	{
-		FVertexFactoryInterpolantsVSToDS FactoryInterpolants;
-		float4 Position : VS_To_DS_Position;
-		#if USE_WORLD_POSITION_EXCLUDING_SHADER_OFFSETS
-			float3 PixelPositionExcludingWPO : TEXCOORD7;
-		#endif
-		OPTIONAL_VertexID_VS_To_DS
-	};
-	
-	#define FVertexOutput FAnisotropyPassVSToDS
-	#define VertexFactoryGetInterpolants VertexFactoryGetInterpolantsVSToDS
-#else
-	#define FVertexOutput FAnisotropyPassVSToPS
-	#define VertexFactoryGetInterpolants VertexFactoryGetInterpolantsVSToPS
-#endif
+#define FVertexOutput FAnisotropyPassVSToPS
+#define VertexFactoryGetInterpolants VertexFactoryGetInterpolantsVSToPS
 
-#if USING_TESSELLATION
-	#define FPassSpecificVSToDS FAnisotropyPassVSToDS
-	#define FPassSpecificVSToPS FAnisotropyPassVSToPS
-		
-	FAnisotropyPassVSToDS PassInterpolate(FAnisotropyPassVSToDS a, float aInterp, FAnisotropyPassVSToDS b, float bInterp)
-	{
-		FAnisotropyPassVSToDS O;
-
-		O.FactoryInterpolants = VertexFactoryInterpolate(a.FactoryInterpolants, aInterp, b.FactoryInterpolants, bInterp);
-		
-		#if USE_WORLD_POSITION_EXCLUDING_SHADER_OFFSETS
-			TESSELLATION_INTERPOLATE_MEMBER(PixelPositionExcludingWPO);
-		#endif
-
-		return O;
-	}
-	
-	FAnisotropyPassVSToPS PassFinalizeTessellationOutput(FAnisotropyPassVSToDS Interpolants, float4 WorldPosition, FMaterialTessellationParameters MaterialParameters)
-	{
-		FAnisotropyPassVSToPS O;
-		
-		O.Interps = VertexFactoryAssignInterpolants(Interpolants.FactoryInterpolants);
-		O.Position = mul(WorldPosition, ResolvedView.TranslatedWorldToClip);
-
-		#if USE_WORLD_POSITION_EXCLUDING_SHADER_OFFSETS
-			O.PixelPositionExcludingWPO = Interpolants.PixelPositionExcludingWPO;
-		#endif
-
-		return O;
-	}
-	
-	#include "Tessellation.ush"
-#endif
-	
 /*=============================================================================
  * Vertex Shader
  *============================================================================*/
-
+#if VERTEXSHADER
 void MainVertexShader(
 	FVertexFactoryInput Input,
-	OPTIONAL_VertexID
 	out FVertexOutput Output 
-#if USE_GLOBAL_CLIP_PLANE && !USING_TESSELLATION
+#if USE_GLOBAL_CLIP_PLANE
 	, out float OutGlobalClipPlaneDistance : SV_ClipDistance
 #endif
 #if INSTANCED_STEREO
-	, uint InstanceId : SV_InstanceID
-	#if !MULTI_VIEW
-		, out float OutClipDistance : SV_ClipDistance1
-	#else
-		, out uint ViewportIndex : SV_ViewPortArrayIndex
-	#endif
+	, out uint ViewportIndex : SV_ViewPortArrayIndex
 #endif
 	)
 {
 #if INSTANCED_STEREO
-	const uint EyeIndex = GetEyeIndex(InstanceId);
-	ResolvedView = ResolveView(EyeIndex);
-	#if !MULTI_VIEW
-		OutClipDistance = 0.0;
-	#else
-		ViewportIndex = EyeIndex;
-	#endif
-#else
-	uint EyeIndex = 0;
-	ResolvedView = ResolveView();
+	const uint EyeIndex = GetEyeIndexFromVF(Input);
+	ViewportIndex = EyeIndex;
 #endif
+	ResolvedView = ResolveViewFromVF(Input);
 	
 	FVertexFactoryIntermediates VFIntermediates = GetVertexFactoryIntermediates(Input);
 	float4 WorldPos = VertexFactoryGetWorldPosition(Input, VFIntermediates);
@@ -119,34 +57,12 @@ void MainVertexShader(
 		WorldPos.xyz += GetMaterialWorldPositionOffset(VertexParameters);
 	}
 
-#if USING_TESSELLATION
-	// Transformation is done in Domain shader when tessellating
-	Output.Position = WorldPos; 
-#else
 	{
 		float4 RasterizedWorldPosition = VertexFactoryGetRasterizedWorldPosition(Input, VFIntermediates, WorldPos);
-	#if ODS_CAPTURE
-		float3 ODS = OffsetODS(RasterizedWorldPosition.xyz, ResolvedView.TranslatedWorldCameraOrigin.xyz, ResolvedView.StereoIPD);
-		Output.Position = INVARIANT(mul(float4(RasterizedWorldPosition.xyz + ODS, 1.0), ResolvedView.TranslatedWorldToClip));
-	#else
 		Output.Position = INVARIANT(mul(RasterizedWorldPosition, ResolvedView.TranslatedWorldToClip));
-	#endif
 	}
 
-	#if INSTANCED_STEREO && !MULTI_VIEW
-		BRANCH 
-		if (IsInstancedStereo())  
-		{
-			// Clip at the center of the screen
-			OutClipDistance = dot(Output.Position, EyeClipEdge[EyeIndex]);
-
-			// Scale to the width of a single eye viewport
-			Output.Position.x *= 0.5 * ResolvedView.HMDEyePaddingOffset;
-
-			// Shift to the eye viewport
-			Output.Position.x += (EyeOffsetScale[EyeIndex] * Output.Position.w) * (1.0f - 0.5 * ResolvedView.HMDEyePaddingOffset);
-		}
-	#elif XBOXONE_BIAS_HACK
+	#if XBOXONE_BIAS_HACK
 		// XB1 needs a bias in the opposite direction to fix FORT-40853
 		// XBOXONE_BIAS_HACK is defined only in a custom node in a particular material
 		// This should be removed with a future shader compiler update
@@ -154,35 +70,25 @@ void MainVertexShader(
 	#endif
 
 	#if USE_GLOBAL_CLIP_PLANE
-		OutGlobalClipPlaneDistance = dot(ResolvedView.GlobalClippingPlane, float4(WorldPos.xyz - ResolvedView.PreViewTranslation.xyz, 1));
+		OutGlobalClipPlaneDistance = dot(ResolvedView.GlobalClippingPlane, float4(WorldPos.xyz, 1));
 	#endif
-#endif
 
-#if USING_TESSELLATION
-	Output.FactoryInterpolants = VertexFactoryGetInterpolants( Input, VFIntermediates, VertexParameters );
-#else
 	Output.Interps = VertexFactoryGetInterpolants(Input, VFIntermediates, VertexParameters);
-#endif // #if USING_TESSELLATION
 
 #if INSTANCED_STEREO
-	#if USING_TESSELLATION	
-		Output.Interps.InterpolantsVSToPS.EyeIndex = EyeIndex;
-	#else
-		Output.Interps.EyeIndex = EyeIndex;
-	#endif
+	Output.Interps.EyeIndex = EyeIndex;
 #endif
 
 #if USE_WORLD_POSITION_EXCLUDING_SHADER_OFFSETS
 	Output.PixelPositionExcludingWPO = WorldPositionExcludingWPO.xyz;
 #endif	
-
-	OutputVertexID( Output );
 }
+#endif // VERTEXSHADER
 
 /*=============================================================================
  * Pixel Shader
  *============================================================================*/
-
+#if PIXELSHADER
 void MainPixelShader(
 	in INPUT_POSITION_QUALIFIERS float4 SvPosition : SV_Position,
 	FVertexFactoryInterpolantsVSToPS Input
@@ -228,3 +134,5 @@ void MainPixelShader(
 
 	GBufferF = EncodeWorldTangentAndAnisotropy(WorldTangent, Anisotropy);
 }
+#endif // PIXELSHADER
+

@@ -5,6 +5,7 @@
 =============================================================================*/
 
 #include "Common.ush"
+#include "Substrate/Substrate.ush"
 #include "PostProcessCommon.ush"
 #include "DeferredShadingCommon.ush"
 #include "SubsurfaceProfileCommon.ush"
@@ -14,25 +15,30 @@
 
 #include "ScreenPass.ush"
 
-// x:Radius*DistanceToProjectionWindow/KernelSize*0.5, y:DistanceToProjectionWindow, z:OverrideNumSamples, w: unused
+// x:Radius*DistanceToProjectionWindow/KernelSize*0.5, y:DistanceToProjectionWindow, z:OverrideNumSamples, w: MinGenerateMipsTileCount
 float4 SubsurfaceParams;
 
 Texture2D SubsurfaceInput0_Texture;
 Texture2D SubsurfaceInput1_Texture;
 Texture2D SubsurfaceInput2_Texture;
+Texture2D SubsurfaceInput3_Texture;
 
 SamplerState SubsurfaceSampler0;
 SamplerState SubsurfaceSampler1;
 SamplerState SubsurfaceSampler2;
+SamplerState SubsurfaceSampler3;
 
 #if SUPPORTS_INDEPENDENT_SAMPLERS
 	#define SharedSubsurfaceSampler0 SubsurfaceSampler0
 	#define SharedSubsurfaceSampler1 SubsurfaceSampler0
 	#define SharedSubsurfaceSampler2 SubsurfaceSampler0
+	#define SharedSubsurfaceSampler3 SubsurfaceSampler0
+
 #else
 	#define SharedSubsurfaceSampler0 SubsurfaceSampler0
 	#define SharedSubsurfaceSampler1 SubsurfaceSampler1
 	#define SharedSubsurfaceSampler2 SubsurfaceSampler2
+	#define SharedSubsurfaceSampler3 SubsurfaceSampler3
 #endif
 
 SCREEN_PASS_TEXTURE_VIEWPORT(SubsurfaceInput0)
@@ -40,6 +46,12 @@ SCREEN_PASS_TEXTURE_VIEWPORT(SubsurfaceInput1)
 SCREEN_PASS_TEXTURE_VIEWPORT(Output)
 
 RWTexture2D<uint> ProfileIdTexture;
+
+// the same to FSubsurfaceTiles::ETileType
+#define SUBSURFACE_TILE_TYPE_AFIS		0
+#define SUBSURFACE_TILE_TYPE_SEPARABLE	1
+#define SUBSURFACE_TILE_TYPE_ALL		2
+#define SUBSURFACE_TILE_TYPE_COUNT		3
 
 #define SUBSURFACE_PASS_ONE 0
 #define SUBSURFACE_PASS_TWO 1
@@ -73,6 +85,18 @@ RWTexture2D<uint> ProfileIdTexture;
 	#define SUBSURFACE_HALFRES 1
 #endif
 
+// Validate if the checkerboard neighbor pixel is subsurface in recombine pass
+#ifndef SUBSURFACE_RECOMBINE
+	#define SUBSURFACE_RECOMBINE 0
+#endif
+
+#ifndef CHECKERBOARD_NEIGHBOR_SSS_VALIDATION
+	#define CHECKERBOARD_NEIGHBOR_SSS_VALIDATION SUBSURFACE_RECOMBINE
+	#if CHECKERBOARD_NEIGHBOR_SSS_VALIDATION
+uint CheckerboardNeighborSSSValidation;
+	#endif
+#endif
+
 //=============================================================================
 // setup for "SeparableSSS.ush"
 //=============================================================================
@@ -97,37 +121,43 @@ float GetMaskFromDepthInAlpha(float Alpha)
 	return Alpha > 0;
 }
 
+#if SUBSTRATE_ENABLED
+FSubstrateSubsurfaceData LoadSubstrateSSSData(float2 UV)
+{
+	const float2 PixelPos = UV.xy * View.BufferSizeAndInvSize.xy;
+	return SubstrateLoadSubsurfaceData(Substrate.MaterialTextureArray, Substrate.FirstSliceStoringSubstrateSSSData, PixelPos);
+}
+FSubstrateSubsurfaceHeader LoadSubstrateSSSHeader(float2 UV)
+{
+	const float2 PixelPos = UV.xy * View.BufferSizeAndInvSize.xy;
+	return SubstrateLoadSubsurfaceHeader(Substrate.MaterialTextureArray, Substrate.FirstSliceStoringSubstrateSSSData, PixelPos);
+}
+#endif
+
 // can be optimized
 float GetSubsurfaceStrength(float2 UV)
 {
+#if SUBSTRATE_ENABLED
+	const FSubstrateSubsurfaceHeader SSSHeader = LoadSubstrateSSSHeader(UV);
+	const float Mask = SubstrateSubSurfaceHeaderGetUseDiffusion(SSSHeader) ? 1.0f : 0.0f;
+	const float RadiusScale = SubstrateSubSurfaceHeaderGetProfileRadiusScale(SSSHeader);
+#else
 	FScreenSpaceData ScreenSpaceData = GetScreenSpaceData(UV);
-
-	float Mask = UseSubsurfaceProfile(ScreenSpaceData.GBuffer.ShadingModelID) ? 1.0f : 0.0f;
-	return Mask * ScreenSpaceData.GBuffer.CustomData.a;
+	const float Mask = UseSubsurfaceProfile(ScreenSpaceData.GBuffer.ShadingModelID) ? 1.0f : 0.0f;
+	const float RadiusScale = ScreenSpaceData.GBuffer.CustomData.a;
+#endif
+	return Mask * RadiusScale;
 }
 
 // @return .rgb is the weight for color channel, .a is the sample location
 float4 GetSubsurfaceProfileKernel(uint SampleIndex, uint SubsurfaceProfileInt)
 {
+#if SUBSTRATE_ENABLED
+	if (SubsurfaceProfileInt == SSS_PROFILE_ID_PERPIXEL) return float4(1, 1, 1, 1);
+#endif
 	const float4 TableMax = float4(1, 1, 1, SUBSURFACE_KERNEL_SIZE);
 
-	return ActualSSProfilesTexture.Load(int3(SampleIndex, SubsurfaceProfileInt, 0)) * TableMax;
-}
-
-float GetSubsurfaceProfileRadiusScale(FGBufferData GBufferData)
-{
-	// 0..255, which SubSurface profile to pick
-	uint SubsurfaceProfileInt = ExtractSubsurfaceProfileInt(GBufferData);
-
-	return GetSubsurfaceProfileKernel(SSSS_N_KERNELWEIGHTOFFSET + SSSS_N_KERNELWEIGHTCOUNT - 1, SubsurfaceProfileInt).a;
-}
-
-float3 GetSubsurfaceProfileColor(FGBufferData GBufferData)
-{
-	// 0..255, which SubSurface profile to pick
-	uint SubsurfaceProfileInt = ExtractSubsurfaceProfileInt(GBufferData);
-
-	return GetSubsurfaceProfileKernel(SSSS_SUBSURFACE_COLOR_OFFSET, SubsurfaceProfileInt).rgb;
+	return View.SSProfilesTexture.Load(int3(SampleIndex, SubsurfaceProfileInt, 0)) * TableMax;
 }
 
 float3 GetSubsurfaceProfileNormal(float2 BufferUV)
@@ -139,20 +169,23 @@ float3 GetSubsurfaceProfileNormal(float2 BufferUV)
 	return LocalGBufferData.WorldNormal;
 }
 
-
 uint GetSubsurfaceProfileId(float2 BufferUV)
 {
 	BufferUV = clamp(BufferUV, SubsurfaceInput0_UVViewportBilinearMin, SubsurfaceInput0_UVViewportBilinearMax);
-
+#if SUBSTRATE_ENABLED
+	const FSubstrateSubsurfaceHeader SSSHeader = LoadSubstrateSSSHeader(BufferUV);
+	return SubstrateSubSurfaceHeaderGetProfileId(SSSHeader);
+#else
 	FGBufferData LocalGBufferData = GetGBufferData(BufferUV);
 	return ExtractSubsurfaceProfileInt(LocalGBufferData);
+#endif
 }
 
-float3 GetSubsurfaceProfileBoundaryColorBleed(FGBufferData GBufferData)
+float3 GetSubsurfaceProfileBoundaryColorBleed(uint SubsurfaceProfileInt)
 {
-	// 0..255, which SubSurface profile to pick
-	uint SubsurfaceProfileInt = ExtractSubsurfaceProfileInt(GBufferData);
-
+#if SUBSTRATE_ENABLED
+	if (SubsurfaceProfileInt == SSS_PROFILE_ID_PERPIXEL) return float3(1.f, 1.f, 1.f);
+#endif
 	return GetSubsurfaceProfileKernel(SSSS_BOUNDARY_COLOR_BLEED_OFFSET, SubsurfaceProfileInt).rgb;
 }
 
@@ -162,6 +195,117 @@ float4 GetSceneColor(float2 BufferUV)
 
 	return Texture2DSampleLevel(SubsurfaceInput0_Texture, SharedSubsurfaceSampler0, BufferUV, 0);
 }
+
+#include "BurleyNormalizedSSSCommon.ush"
+
+#if SUBSTRATE_ENABLED
+
+// Calculate the Subsurface profile kernel on the fly using integration instead of LUT.
+half4 GetSubsurfaceProfileKernel(int SampleIndex, float3 D, float ScatterRadiusInMM, float WorldUnitScale)
+{
+	// See notes in SubsurfaceProfile.cpp. Scatter radius is in mm instead of cm here.
+	ScatterRadiusInMM = max(ScatterRadiusInMM,1.0f);
+	
+	const float Range = ((2 * SSSS_N_KERNELWEIGHTCOUNT - 1) > 20) ? 3.0f : 2.0f;
+
+	const float r = Range * float(SampleIndex) / (SSSS_N_KERNELWEIGHTCOUNT - 1);
+	const float r0 = Range * (float(SampleIndex) - 0.5f) / (SSSS_N_KERNELWEIGHTCOUNT - 1);
+	const float r1 = Range * (float(SampleIndex) + 0.5f) / (SSSS_N_KERNELWEIGHTCOUNT - 1);
+
+	const float x = r * r / (Range );
+	const float x0 = r0 * r0 / (Range );
+	const float x1 = r1 * r1 / (Range );
+	const float3 MaxCDF = GetCDF3D(D, ScatterRadiusInMM * Range * (1.0f + 0.5f / (SSSS_N_KERNELWEIGHTCOUNT - 1)));
+
+	half4 Kernel = (half4)0.0f;
+
+	BRANCH
+		if (SampleIndex == 0)
+		{
+			Kernel.rgb = GetCDF3D(D, ScatterRadiusInMM * x1) / MaxCDF;
+			Kernel.a = 0.0f;
+		}
+		else
+		{
+			// Need to multiply by 0.5f, and modify MaxCDF to match as close as offline LUT. Here favors integration 
+			// instead of discrete approximation.
+			Kernel.rgb = (GetCDF3D(D, ScatterRadiusInMM * x1) - GetCDF3D(D, ScatterRadiusInMM * x0)) / MaxCDF;
+			Kernel.a = 2.0 * x; // 2.0f is consistent to the scale in ComputeMirroredBSSSKernel of BurleyNormalizedSSS.cpp
+		}
+
+	// Scale to match offline encoding
+	// const float TableMaxA = SUBSURFACE_KERNEL_SIZE;
+	// const FLinearColor TableColorScale = FLinearColor(
+	//		1.0f / TableMaxRGB,
+	//		1.0f / TableMaxRGB,
+	//		1.0f / TableMaxRGB,
+	//		1.0f / TableMaxA);
+	// C *= TableColorScale
+	// C.W *= Data.ScatterRadius / SUBSURFACE_RADIUS_SCALE;
+	// SUBSURFACE_KERNEL_SIZE and TableMaxA cancels out
+	Kernel.a *= (ScatterRadiusInMM * BURLEY_MM_2_CM) * WorldUnitScale /** SUBSURFACE_KERNEL_SIZE*/ /(/*TableMaxA **/ SUBSURFACE_RADIUS_SCALE);
+
+	return Kernel;
+}
+#endif
+
+// fetch surface albedo and diffuse mean free path
+// The diffuse mean free path is modulated by world scale and a custom term passed in
+// which is the opacity texture.
+#if SUBSTRATE_ENABLED
+FBurleyParameter GetBurleyParameters(FSubstrateSubsurfaceData SSSData)
+{
+	FBurleyParameter Out = (FBurleyParameter)0;
+	if (SubstrateSubSurfaceHeaderGetIsProfile(SSSData.Header))
+	{
+		uint ProfileId = SubstrateSubSurfaceHeaderGetProfileId(SSSData.Header);
+		float ProfileRadiusScale = SubstrateSubSurfaceHeaderGetProfileRadiusScale(SSSData.Header);
+
+		Out.SurfaceAlbedo = GetSubsurfaceProfileSurfaceAlbedo(ProfileId);
+		Out.DiffuseMeanFreePath = DecodeDiffuseMeanFreePath(GetSubsurfaceProfileDiffuseMeanFreePath(ProfileId));
+		Out.WorldUnitScale = DecodeWorldUnitScale(GetSubsurfaceProfileWorldUnitScale(ProfileId)) * BURLEY_CM_2_MM;
+
+		Out.SurfaceOpacity = ProfileRadiusScale;
+		Out.DiffuseMeanFreePath *= Out.SurfaceOpacity;
+	}
+	else if (SubstrateSubSurfaceHeaderGetUseDiffusion(SSSData.Header))
+	{
+		float3 SSSMFP = SubstrateSubSurfaceHeaderGetMFP(SSSData.Header);
+		float3 SSSBaseColor = SubstrateSubsurfaceExtrasGetBaseColor(SSSData.Extras);
+
+		// Decode the MFP stored as Float111110 in a uint over a RGBA8 unorm
+		const float3 MFP = SSSMFP * BURLEY_CM_2_MM; // Stored DMFP is in cm, converted into mm
+
+		const float MaxMFP = max3(MFP.x, MFP.y, MFP.z);
+		const uint IndexOfMaxMfp = (MFP.r == MaxMFP) ? 0 : ((MFP.g == MaxMFP) ? 1 : 2);
+
+		const float3 DMFP = GetDMFPFromMFPApprox(SSSBaseColor, MFP);
+
+		Out.SurfaceAlbedo = float4(SSSBaseColor, SSSBaseColor[IndexOfMaxMfp]);
+		Out.DiffuseMeanFreePath = float4(DMFP, DMFP[IndexOfMaxMfp]);
+		Out.WorldUnitScale = 1.0f;	// no world unit scale change.
+
+		// SUBSTRATE_TODO smooth transistion based on pixel footprint w.r.t. MFPRadius and pixel footprint
+		Out.SurfaceOpacity = 1.0f;
+		Out.DiffuseMeanFreePath *= Out.SurfaceOpacity;
+	}
+	return Out;
+}
+#else
+FBurleyParameter GetBurleyParameters(uint SubsurfaceProfileInt, FGBufferData GBuffer)
+{
+	FBurleyParameter Out = (FBurleyParameter)0;
+	Out.SurfaceAlbedo = GetSubsurfaceProfileSurfaceAlbedo(SubsurfaceProfileInt);
+	Out.DiffuseMeanFreePath = DecodeDiffuseMeanFreePath(GetSubsurfaceProfileDiffuseMeanFreePath(SubsurfaceProfileInt));
+	Out.WorldUnitScale = DecodeWorldUnitScale(GetSubsurfaceProfileWorldUnitScale(SubsurfaceProfileInt)) * BURLEY_CM_2_MM;
+
+	// Mask should always be true, we can probably ignore it?
+	Out.SurfaceOpacity = UseSubsurfaceProfile(GBuffer.ShadingModelID) ? GBuffer.CustomData.a : 0.0f;
+	Out.DiffuseMeanFreePath *= Out.SurfaceOpacity;
+
+	return Out;
+}
+#endif
 
 // from https://github.com/iryoku/separable-sss/tree/master/Demo
 // Jorge Jimenez http://www.iryoku.com/
@@ -176,7 +320,7 @@ bool InUnitBox(float2 UV)
 }
 
 // @return 0=don't blend in, 1:fully blend in
-float ComputeFullResLerp(FScreenSpaceData ScreenSpaceData, float2 UVSceneColor, float2 FullResInputSizeInverse)
+float ComputeFullResLerp(float ProfileRadiusScale, float PixelRadiusScale, float2 UVSceneColor, float2 FullResInputSizeInverse)
 {
 	float SSSScaleX = SubsurfaceParams.x;
 
@@ -187,7 +331,7 @@ float ComputeFullResLerp(FScreenSpaceData ScreenSpaceData, float2 UVSceneColor, 
 	// Calculate the final step to fetch the surrounding pixels:
 	float finalStep = scale * HorizontalScaler;
 
-	finalStep *= GetSubsurfaceProfileRadiusScale(ScreenSpaceData.GBuffer);
+	finalStep *= ProfileRadiusScale;
 
 	float PixelSizeRadius = finalStep / (FullResInputSizeInverse.x * 0.5f);
 
@@ -197,10 +341,27 @@ float ComputeFullResLerp(FScreenSpaceData ScreenSpaceData, float2 UVSceneColor, 
 	float Ret = saturate(PixelSizeRadius - PixelSize);
 
 	// opacity allows to scale the radius - at some point we should fade in the full resolution, we don't have a masking other than that.
-	Ret *= saturate(ScreenSpaceData.GBuffer.CustomData.a * 10);
+	Ret *= saturate(PixelRadiusScale * 10);
 
 	// todo: Subsurface has some non scatter contribution - all that should come from the Full res
 	return Ret;
+}
+
+uint MiniFontCharFromSubsurfaceProfile(uint SubsurfaceProfileInt)
+{
+	if (SubsurfaceProfileInt <= 9)
+	{
+		return _0_ + SubsurfaceProfileInt;
+	}
+
+	SubsurfaceProfileInt -= 10;
+
+	if (SubsurfaceProfileInt <= _Z_ - _A_)
+	{
+		return _A_ + SubsurfaceProfileInt;
+	}
+
+	return _QUESTIONMARK_;
 }
 
 // visualization (doesn't have to be fast)
@@ -220,13 +381,22 @@ void VisualizePS(in noperspective float4 UVAndScreenPos : TEXCOORD0, float4 SvPo
 	{
 		float2 UV = SubsurfaceInput0_ViewportMin * SubsurfaceInput0_ExtentInverse + IDAreaLocalUV * (SubsurfaceInput0_ViewportSize * SubsurfaceInput0_ExtentInverse);
 
-		FScreenSpaceData ScreenSpaceData = GetScreenSpaceData(UV);
-
-		int SubsurfaceProfileInt = ExtractSubsurfaceProfileInt(ScreenSpaceData.GBuffer);
+	#if SUBSTRATE_ENABLED
+		const FSubstrateSubsurfaceHeader SSSHeader = LoadSubstrateSSSHeader(UV);
+		const uint SubsurfaceProfileInt = SubstrateSubSurfaceHeaderGetProfileId(SSSHeader);
+		const bool bIsProfile = SubstrateSubSurfaceHeaderGetIsProfile(SSSHeader);
+		const float PixelRadiusScale = SubstrateSubSurfaceHeaderGetProfileRadiusScale(SSSHeader);
+	#else
+		const FScreenSpaceData ScreenSpaceData = GetScreenSpaceData(UV);
+		const uint SubsurfaceProfileInt = ExtractSubsurfaceProfileInt(ScreenSpaceData.GBuffer);
+		const bool bIsProfile = UseSubsurfaceProfile(ScreenSpaceData.GBuffer.ShadingModelID);
+		const float PixelRadiusScale = ScreenSpaceData.GBuffer.CustomData.a;
+	#endif
+		const float ProfileRadiusScale = GetSubsurfaceProfileKernel(SSSS_N_KERNELWEIGHTOFFSET + SSSS_N_KERNELWEIGHTCOUNT - 1, SubsurfaceProfileInt).a;
 
 		OutColor = float4(0.5f, 0.5f, 0.5f, 0);
 
-		BRANCH if (UseSubsurfaceProfile(ScreenSpaceData.GBuffer.ShadingModelID))
+		BRANCH if (bIsProfile)
 		{
 			if (SubsurfaceProfileInt == 0)
 			{
@@ -267,12 +437,11 @@ void VisualizePS(in noperspective float4 UVAndScreenPos : TEXCOORD0, float4 SvPo
 			}
 
 			int2 LeftTop = (PixelPos / 8) * 8;
-			PrintCharacter(PixelPos, OutColor.rgb, float3(1, 1, 1), LeftTop, SubsurfaceProfileInt);
+			PrintCharacter(PixelPos, OutColor.rgb, float3(1, 1, 1), LeftTop, MiniFontCharFromSubsurfaceProfile(SubsurfaceProfileInt));
 
-			OutColor.rgb *= ComputeFullResLerp(ScreenSpaceData, UV, SubsurfaceInput0_ExtentInverse);
+			OutColor.rgb *= ComputeFullResLerp(ProfileRadiusScale, PixelRadiusScale, UV, SubsurfaceInput0_ExtentInverse);
 		}
 	}
-
 }
 
 
@@ -282,11 +451,39 @@ struct SDiffuseAndSpecular
 	float3 Specular;
 };
 
+#if CHECKERBOARD_NEIGHBOR_SSS_VALIDATION
+bool IsCheckerBoardNeighborSubsurface(float2 SceneUV, int2 PixelOffset)
+{
+	const float2 UV = SceneUV + PixelOffset * View.BufferSizeAndInvSize.zw;
+
+#if SUBSTRATE_ENABLED
+	const FSubstrateSubsurfaceData SSSData = LoadSubstrateSSSData(UV);
+	const bool bHasSSSProfile = SubstrateSubSurfaceHeaderGetIsValid(SSSData.Header);
+#else
+	FScreenSpaceData ScreenSpaceData = GetScreenSpaceData(UV);
+	const bool bHasSSSProfile = UseSubsurfaceProfile(ScreenSpaceData.GBuffer.ShadingModelID);
+#endif
+
+	return bHasSSSProfile;
+}
+#endif
+
 // can be moved/shared
 half3 LookupSceneColor(float2 SceneUV, int2 PixelOffset)
 {
 	// faster
-	return SubsurfaceInput0_Texture.SampleLevel(SharedSubsurfaceSampler0, SceneUV, 0, PixelOffset).rgb;
+	float3 SceneColor = SubsurfaceInput0_Texture.SampleLevel(SharedSubsurfaceSampler0, SceneUV, 0, PixelOffset).rgb;
+
+#if CHECKERBOARD_NEIGHBOR_SSS_VALIDATION
+	// Fix border background color leaking into subsurface diffuse/specular.
+	BRANCH
+	if (CheckerboardNeighborSSSValidation != 0)
+	{
+		bool bIsSubsurface = IsCheckerBoardNeighborSubsurface(SceneUV, PixelOffset);
+		SceneColor = lerp(0, SceneColor, bIsSubsurface);
+	}
+#endif
+	return SceneColor;
 }
  
 // @param UVSceneColor for the full res rendertarget (BufferSize) e.g. SceneColor or GBuffers
@@ -294,6 +491,14 @@ half3 LookupSceneColor(float2 SceneUV, int2 PixelOffset)
 SDiffuseAndSpecular ReconstructLighting(float2 UVSceneColor, uint ReconstructMethod)
 {
 	SDiffuseAndSpecular Ret;
+
+#if SUBSTRATE_OPAQUE_ROUGH_REFRACTION_ENABLED
+	// In this mode, we only read isolated diffuse lighting.
+	float3 CenterSample = SubsurfaceInput0_Texture.SampleLevel(SharedSubsurfaceSampler0, UVSceneColor, 0).rgb;
+	Ret.Diffuse = CenterSample;
+	Ret.Specular = 0.0f;
+	return Ret;
+#endif
 
 	// If SUBSURFACE_CHANNEL_MODE is 0, checkerboard is forced on
 #if SUBSURFACE_PROFILE_CHECKERBOARD || SUBSURFACE_CHANNEL_MODE == 0
@@ -376,11 +581,16 @@ SDiffuseAndSpecular ReconstructLighting(float2 UVSceneColor, uint ReconstructMet
 // @return .RGB Color that should be scattared, .A:1 for subsurface scattering material, 0 for not
 float4 SetupSubsurfaceForOnePixel(float2 UVSceneColor)
 {
-	float4 Ret = 0;
-
+#if SUBSTRATE_ENABLED
+	const FSubstrateSubsurfaceHeader SSSHeader = LoadSubstrateSSSHeader(UVSceneColor);
+	const bool bHasSSSDiffusion = SubstrateSubSurfaceHeaderGetUseDiffusion(SSSHeader);
+#else
 	FScreenSpaceData ScreenSpaceData = GetScreenSpaceData(UVSceneColor);
+	const bool bHasSSSDiffusion = UseSubsurfaceProfile(ScreenSpaceData.GBuffer.ShadingModelID);
+#endif
 
-	BRANCH if (UseSubsurfaceProfile(ScreenSpaceData.GBuffer.ShadingModelID))
+	float4 Ret = 0;
+	BRANCH if (bHasSSSDiffusion)
 	{
 		// '1' is lower quality but that is acceptable here
 		SDiffuseAndSpecular DiffuseAndSpecular = ReconstructLighting(UVSceneColor, 1);
@@ -390,8 +600,22 @@ float4 SetupSubsurfaceForOnePixel(float2 UVSceneColor)
 		// it's a valid sample
 		Ret.a = 1;
 	}
-
 	return Ret;
+}
+
+Buffer<uint> TileTypeCountBuffer;
+
+bool ShouldGenerateMipmaps(uint TileType)
+{
+	bool bShouldGenerateMipmaps = false;
+
+	if (SUBSURFACE_TILE_TYPE_AFIS == TileType)
+	{
+		uint TileCount = TileTypeCountBuffer[TileType];
+		bShouldGenerateMipmaps = (TileCount >= SubsurfaceParams.w);
+	}
+
+	return bShouldGenerateMipmaps;
 }
 
 // Ref: https://graphics.pixar.com/library/ApproxBSSRDF/paper.pdf
@@ -404,30 +628,57 @@ float4 SetupSubsurfaceForOnePixel(float2 UVSceneColor)
 // Indirect dispatch parameters
 RWBuffer<uint> RWSeparableGroupBuffer;
 RWBuffer<uint> RWBurleyGroupBuffer;
+RWBuffer<uint> RWAllGroupBuffer;
 RWBuffer<uint> RWIndirectDispatchArgsBuffer;
+RWBuffer<uint> RWIndirectDrawArgsBuffer;
+RWBuffer<uint> RWTileTypeCountBuffer;
 Buffer<uint> GroupBuffer;
-
 
 [numthreads(1, 1, 1)]
 void InitValueBufferCS()
 {
-	// Clear the first buffer element which is used as the buffer counter.
-	RWSeparableGroupBuffer[0] = 0;
-	RWBurleyGroupBuffer[0] = 0;
+	// Clear the buffer counter for all types of tile.
+	UNROLL
+	for (uint i = 0; i < SUBSURFACE_TILE_TYPE_COUNT; ++i)
+	{
+		RWTileTypeCountBuffer[i] = 0;
+	}
 }
 
-// fixed to 64 by now
+uint MinGenerateMipsTileCount;
+uint Offset;
+RWBuffer<uint> RWMipsConditionBuffer;
+
 [numthreads(1, 1, 1)]
-void BuildIndirectDispatchArgsCS()
+void FillMipsConditionBufferCS()
 {
-	uint ValueCount = min(SubsurfaceUniformParameters.MaxGroupCount, GroupBuffer[0]);
-	RWIndirectDispatchArgsBuffer[0] = ValueCount;// (ValueCount + (THREAD_SIZE_1D*THREAD_SIZE_1D) - 1) / (THREAD_SIZE_1D*THREAD_SIZE_1D);
-	RWIndirectDispatchArgsBuffer[1] = 1;
-	RWIndirectDispatchArgsBuffer[2] = 1;
+	uint TileCount = TileTypeCountBuffer[Offset];
+	RWMipsConditionBuffer[Offset] = (TileCount >= MinGenerateMipsTileCount) ? 1 : 0;
+}
+
+[numthreads(8, 1, 1)]
+void BuildIndirectDispatchArgsCS(uint2 DispatchThreadId : SV_DispatchThreadID)
+{
+	if (DispatchThreadId.y == 0 && DispatchThreadId.x < SUBSURFACE_TILE_TYPE_COUNT)
+	{
+		uint TileType = DispatchThreadId.x;
+		const uint TileCount = TileTypeCountBuffer[TileType];
+		
+		// Indirect draw
+		RWIndirectDrawArgsBuffer[TileType * DRAW_INDIRECT_UINT_COUNT + 0] = SubsurfaceUniformParameters.bRectPrimitive > 0 ? 4 : 6;  // VertexCountPerInstance
+		RWIndirectDrawArgsBuffer[TileType * DRAW_INDIRECT_UINT_COUNT + 1] = TileCount;  // InstanceCount
+		RWIndirectDrawArgsBuffer[TileType * DRAW_INDIRECT_UINT_COUNT + 2] = 0;  // StartVertexLocation
+		RWIndirectDrawArgsBuffer[TileType * DRAW_INDIRECT_UINT_COUNT + 3] = 0;  // StartInstanceLocation
+
+		// Indirect dispatch
+		const uint IndirectDispatchSize = TileCount; // (TileCount + (THREAD_SIZE_1D*THREAD_SIZE_1D) - 1) / (THREAD_SIZE_1D*THREAD_SIZE_1D);
+		WriteDispatchIndirectArgs(RWIndirectDispatchArgsBuffer, TileType, IndirectDispatchSize, 1, 1);
+	}
 }
 
 #define TYPE_SEPARABLE 0x1
 #define TYPE_BURLEY    0x2
+#define TYPE_IN_VIEWPORT 0x4
 
 // 0, no subsurface
 // 1, Separable
@@ -445,15 +696,15 @@ void AddSeparableGroup(uint2 GroupXY)
 	//buffer counter is stored in the .Count in the first element.
 	uint IndexToStore = 0;
 
-	InterlockedAdd(RWSeparableGroupBuffer[0], 1, IndexToStore);
+	InterlockedAdd(RWTileTypeCountBuffer[SUBSURFACE_TILE_TYPE_SEPARABLE], 1, IndexToStore);
 
 	if (IndexToStore >= SubsurfaceUniformParameters.MaxGroupCount)
 	{
 		return;
 	}
 
-	RWSeparableGroupBuffer[2 *(IndexToStore + 1) + 0] = GroupXY.x;
-	RWSeparableGroupBuffer[2 *(IndexToStore + 1) + 1] = GroupXY.y;
+	RWSeparableGroupBuffer[2 * IndexToStore + 0] = GroupXY.x;
+	RWSeparableGroupBuffer[2 * IndexToStore + 1] = GroupXY.y;
 }
 
 void AddBurleyGroup(uint2 GroupXY)
@@ -461,15 +712,31 @@ void AddBurleyGroup(uint2 GroupXY)
 	//buffer counter is stored in the .Count in the first element.
 	uint IndexToStore = 0;
 
-	InterlockedAdd(RWBurleyGroupBuffer[0], 1, IndexToStore);
+	InterlockedAdd(RWTileTypeCountBuffer[SUBSURFACE_TILE_TYPE_AFIS], 1, IndexToStore);
 
 	if (IndexToStore >= SubsurfaceUniformParameters.MaxGroupCount)
 	{
 		return;
 	}
 
-	RWBurleyGroupBuffer[2*(IndexToStore + 1 ) + 0] = GroupXY.x;
-	RWBurleyGroupBuffer[2*(IndexToStore + 1 ) + 1] = GroupXY.y;
+	RWBurleyGroupBuffer[2* IndexToStore + 0] = GroupXY.x;
+	RWBurleyGroupBuffer[2* IndexToStore + 1] = GroupXY.y;
+}
+
+void AddAllGroup(uint2 GroupXY)
+{
+	//buffer counter is stored in the .Count in the first element.
+	uint IndexToStore = 0;
+
+	InterlockedAdd(RWTileTypeCountBuffer[SUBSURFACE_TILE_TYPE_ALL], 1, IndexToStore);
+
+	if (IndexToStore >= SubsurfaceUniformParameters.MaxGroupCount)
+	{
+		return;
+	}
+
+	RWAllGroupBuffer[2 * IndexToStore + 0] = GroupXY.x;
+	RWAllGroupBuffer[2 * IndexToStore + 1] = GroupXY.y;
 }
 
 void AddSubsurfaceComputeGroup(uint GI, uint Type, uint2 GroupXY)
@@ -478,14 +745,21 @@ void AddSubsurfaceComputeGroup(uint GI, uint Type, uint2 GroupXY)
 
 	GroupMemoryBarrierWithGroupSync();
 
-	if (GI == 0 && (SubsurfaceTypeFlag & TYPE_SEPARABLE))
+	if (GI == 0 && ((SubsurfaceTypeFlag & TYPE_SEPARABLE) && (SubsurfaceTypeFlag & TYPE_IN_VIEWPORT)))
 	{
 		AddSeparableGroup(GroupXY);
 	}
 
-	if (GI == 0 && (SubsurfaceTypeFlag & TYPE_BURLEY))
+	if (GI == 0 && ((SubsurfaceTypeFlag & TYPE_BURLEY) && (SubsurfaceTypeFlag & TYPE_IN_VIEWPORT)))
 	{
 		AddBurleyGroup(GroupXY);
+	}
+
+	if (GI == 0 && ((SubsurfaceTypeFlag & TYPE_IN_VIEWPORT) &&
+				   ((SubsurfaceTypeFlag &	TYPE_SEPARABLE) ||
+					(SubsurfaceTypeFlag &	   TYPE_BURLEY))))
+	{
+		AddAllGroup(GroupXY);
 	}
 }
 
@@ -506,7 +780,6 @@ void SetupIndirectCS(uint3 DT_ID : SV_DispatchThreadID,
 	GroupMemoryBarrierWithGroupSync();
 
 	uint2 Pos = DT_ID.xy + Output_ViewportMin;
-	bool bHasSubsurface = false;
 	float2 BufferUV = ConvertGridPos2UV(Pos);
 	uint Type = 0;
 	float4 OutColor = 0;
@@ -522,7 +795,12 @@ void SetupIndirectCS(uint3 DT_ID : SV_DispatchThreadID,
 
 	float4 Sum = (A + B) + (C + D);
 
-	float Div = 1.0f / max(Sum.a, 0.00001f);
+	// Each alpha value of A/B/C/D should be either 1.0f or 0.0, so a check of 0.5 should be safe
+	bool bHasSubsurface = (Sum.a >= .50f);
+
+	// Sum.a should either be one of {0,1,2,3,4}, add a max of 1 to avoid floating point specials. If Sum.a is 0, Sum.rgb should be 0 as well so it
+	// shouldn't matter what Div is.
+	float Div = 1.0f / max(Sum.a, 1.0f);
 
 	OutColor.rgb = Sum.rgb * Div;
 
@@ -539,6 +817,8 @@ void SetupIndirectCS(uint3 DT_ID : SV_DispatchThreadID,
 	}
 	//BufferUV += min(float2(-0.25, -0.25f) * SubsurfaceInput0_ExtentInverse, SubsurfaceInput0_UVViewportBilinearMax);
 #else // SUBSURFACE_HALF_RES
+	
+	bool bHasSubsurface = false;
 	OutColor = SetupSubsurfaceForOnePixel(BufferUV);
 
 	if (OutColor.a > 0)
@@ -604,6 +884,7 @@ void SetupIndirectCS(uint3 DT_ID : SV_DispatchThreadID,
 
 	if (all(Pos < Output_ViewportMax))
 	{
+		Type |= TYPE_IN_VIEWPORT;
 		SetupTexture[Pos] = OutColor;
 
 #if !SUBSURFACE_FORCE_SEPARABLE && ENABLE_PROFILE_ID_CACHE
@@ -621,7 +902,7 @@ void MainIndirectDispatchCS(
 )
 {
 	// The first element is used for counting
-	uint2 G_ID = uint2(GroupBuffer[2*(IndirectG_ID.x + 1) + 0], GroupBuffer[2*(IndirectG_ID.x + 1)+1]);
+	uint2 G_ID = uint2(GroupBuffer[2 * IndirectG_ID.x + 0], GroupBuffer[2 * IndirectG_ID.x + 1]);
 	uint2 DT_ID = G_ID * float2(THREAD_SIZE_X, THREAD_SIZE_Y) + float2(GI % THREAD_SIZE_X, GI / THREAD_SIZE_X);
 
 
@@ -634,10 +915,20 @@ void MainIndirectDispatchCS(
 
 	uint2 Pos = DT_ID.xy*SUBSURFACE_GROUP_SIZE / THREAD_SIZE_1D + Output_ViewportMin;
 	float2 BufferUV = ConvertGridPos2UV(Pos);
+	uint2  BufferPos = Pos;
+
+#if SUBSTRATE_ENABLED
+	const FSubstrateSubsurfaceHeader SSSHeader = LoadSubstrateSSSHeader(BufferUV);
+	const uint bUseBurley = SubstrateSubSurfaceHeaderGetIsProfile(SSSHeader) ? GetSubsurfaceProfileUseBurley(SubstrateSubSurfaceHeaderGetProfileId(SSSHeader)) : SubstrateSubSurfaceHeaderGetUseDiffusion(SSSHeader);
+#else
+	const FScreenSpaceData ScreenSpaceData = GetScreenSpaceData(BufferUV);
+	const uint SubsurfaceProfileInt = ExtractSubsurfaceProfileInt(ScreenSpaceData.GBuffer);
+	const bool bUseBurley = GetSubsurfaceProfileUseBurley(SubsurfaceProfileInt);
+#endif
 
 	// We need to check Burley here because the previous pass might write burley samplings here unless we have SUBSURFACE_FORCE_SEPARABLE to overwrite the setting.
 #if !SUBSURFACE_FORCE_SEPARABLE
-	BRANCH if (GetSubsurfaceProfileUseBurley(BufferUV))
+	BRANCH if (bUseBurley)
 	{
 		return;
 	}
@@ -654,7 +945,7 @@ void MainIndirectDispatchCS(
 
 	ViewportDirectionUV *= (SubsurfaceInput0_ViewportSize.x * SubsurfaceInput0_ExtentInverse.x);
 
-	float4 OutColor = SSSSBlurPS(BufferUV, ViewportDirectionUV, false);
+	float4 OutColor = SSSSBlurPS(BufferPos, BufferUV, ViewportDirectionUV, false, SubsurfaceInput0_Extent);
 
 #if SUBSURFACE_PASS == SUBSURFACE_PASS_TWO
 	// second pass prepares the setup from the recombine pass which doesn't need depth but wants to reconstruct the color
@@ -671,17 +962,53 @@ void MainIndirectDispatchCS(
  
 // Recombines the half res Subsurface filtered lighting contribution (upsampled and renormalized with the alpha)
 // with the SceneColor.
-void SubsurfaceRecombinePS(noperspective float4 UVAndScreenPos : TEXCOORD0, float4 SvPosition : SV_POSITION, out float4 OutColor : SV_Target0)
+void SubsurfaceRecombinePS(in FScreenVertexOutput Input, out float4 OutColor : SV_Target0)
 {
-	float2 BufferUV = UVAndScreenPos.xy;
+	const float2 BufferUV  = Input.UV.xy;
 
+#if SUBSTRATE_ENABLED
+	FSubstrateSubsurfaceData SSSData = LoadSubstrateSSSData(BufferUV);
+	const bool bUseSSSDiffusion = SubstrateSubSurfaceHeaderGetUseDiffusion(SSSData.Header);
+#else
 	FScreenSpaceData ScreenSpaceData = GetScreenSpaceData(BufferUV);
-	
-	if (!UseSubsurfaceProfile(ScreenSpaceData.GBuffer.ShadingModelID))
-	{
+	const bool bUseSSSDiffusion = UseSubsurfaceProfile(ScreenSpaceData.GBuffer.ShadingModelID);
+#endif
+
+	if (!bUseSSSDiffusion)
+	{  
 		OutColor = Texture2DSample(SubsurfaceInput0_Texture, SharedSubsurfaceSampler0, BufferUV);
 		return;
-	} 
+	}
+
+#if SUBSTRATE_ENABLED
+	const uint ProfileId			= SubstrateSubSurfaceHeaderGetProfileId(SSSData.Header);
+	// we multiply the base color later in to get more crips human skin textures (scanned data always has Subsurface included)
+	const float3 StoredBaseColor	= SubstrateSubsurfaceExtrasGetBaseColor(SSSData.Extras);
+	const float PixelRadiusScale	= SubstrateSubSurfaceHeaderGetProfileRadiusScale(SSSData.Header);
+
+	// asset specific color
+	float3 Tint = 0.0f;
+	float ProfileRadiusScale = 1.0f;
+	if (SubstrateSubSurfaceHeaderGetIsProfile(SSSData.Header))
+	{
+		Tint = GetSubsurfaceProfileKernel(SSSS_TINT_SCALE_OFFSET, ProfileId).rgb;
+		ProfileRadiusScale = GetSubsurfaceProfileKernel(SSSS_N_KERNELWEIGHTOFFSET + SSSS_N_KERNELWEIGHTCOUNT - 1, ProfileId).a;
+	}
+	else if (ProfileId == SSS_PROFILE_ID_PERPIXEL)
+	{
+		// This color is used to lerping 'incident light' into 'diffused light', i.e, controlling the sharpness of the lighting.
+		// In case of direct DMPF control, this is not needed.
+		Tint = float3(1, 1, 1);
+	}
+#else
+	const uint ProfileId = ExtractSubsurfaceProfileInt(ScreenSpaceData.GBuffer);
+	// we multiply the base color later in to get more crips human skin textures (scanned data always has Subsurface included)
+	const float3 StoredBaseColor	= ScreenSpaceData.GBuffer.StoredBaseColor;
+	const float PixelRadiusScale	= ScreenSpaceData.GBuffer.CustomData.a;
+	// asset specific color
+	const float3 Tint	= GetSubsurfaceProfileKernel(SSSS_TINT_SCALE_OFFSET, ProfileId).rgb;
+	const float ProfileRadiusScale	= GetSubsurfaceProfileKernel(SSSS_N_KERNELWEIGHTOFFSET + SSSS_N_KERNELWEIGHTCOUNT - 1, ProfileId).a;
+#endif
 
 	float3 SSSColor = float3(0, 0, 0);
 	float LerpFactor = 1;
@@ -690,11 +1017,13 @@ void SubsurfaceRecombinePS(noperspective float4 UVAndScreenPos : TEXCOORD0, floa
 #if SUBSURFACE_HALF_RES
 	// fade out subsurface scattering if radius is too small to be more crips (not blend with half resolution)
 	// minor quality improvement (faces are more detailed in distance)
-	LerpFactor = ComputeFullResLerp(ScreenSpaceData, BufferUV, SubsurfaceInput1_ExtentInverse);
+	LerpFactor = ComputeFullResLerp(ProfileRadiusScale, PixelRadiusScale, BufferUV, SubsurfaceInput1_ExtentInverse);
 #endif // SUBSURFACE_HALF_RES
 
 	{
-		float4 SSSColorWithAlpha = Texture2DSample(SubsurfaceInput1_Texture, SharedSubsurfaceSampler1, BufferUV);
+		// subsurface scattering buffer has garbage data outside of viewport bilinear min/max. 
+		float2 ClampedBufferUV = clamp(BufferUV, SubsurfaceInput1_UVViewportBilinearMin, SubsurfaceInput1_UVViewportBilinearMax);
+		float4 SSSColorWithAlpha = Texture2DSampleLevel(SubsurfaceInput1_Texture, SharedSubsurfaceSampler1, ClampedBufferUV, 0);
 
 		// renormalize to dilate RGB to fix half res upsampling artifacts
 		SSSColor = SSSColorWithAlpha.rgb / max(SSSColorWithAlpha.a, 0.00001f);
@@ -706,12 +1035,14 @@ void SubsurfaceRecombinePS(noperspective float4 UVAndScreenPos : TEXCOORD0, floa
 
 	float3 DirectColor = Texture2DSample(SubsurfaceInput0_Texture, SharedSubsurfaceSampler0, BufferUV).rgb;
 
-	uint ProfileId = ExtractSubsurfaceProfileInt(ScreenSpaceData.GBuffer);
-
 	bool bIsHalfResUpsample = false;
 	if (bIsHalfResUpsample && GetSubsurfaceProfileUseBurley(ProfileId))
 	{
-		FBurleyParameter BurleyParameter = GetBurleyParameters(ScreenSpaceData.GBuffer);
+	#if SUBSTRATE_ENABLED
+		FBurleyParameter BurleyParameter = GetBurleyParameters(SSSData);
+	#else
+		FBurleyParameter BurleyParameter = GetBurleyParameters(ProfileId, ScreenSpaceData.GBuffer);
+	#endif
 		
 		float Depth = CalcSceneDepth(BufferUV);
 
@@ -720,25 +1051,25 @@ void SubsurfaceRecombinePS(noperspective float4 UVAndScreenPos : TEXCOORD0, floa
 		SSSColor = lerp(SSSColor,DirectColor,CenterSampleWeight);
 	}
 
-	// we multiply the base color later in to get more crips human skin textures (scanned data always has Subsurface included)
-	float3 StoredBaseColor = ScreenSpaceData.GBuffer.StoredBaseColor;
-	float StoredSpecular = ScreenSpaceData.GBuffer.StoredSpecular;
-
 	uint ReconstructMethod = (SUBSURFACE_RECOMBINE_QUALITY == SUBSURFACE_RECOMBINE_QUALITY_HIGH) ? 3 : 1;
 
 	SDiffuseAndSpecular DiffuseAndSpecular = ReconstructLighting(BufferUV, ReconstructMethod);
 	
 	float3 ExtractedNonSubsurface = DiffuseAndSpecular.Specular;
 
-	// asset specific color
-	float3 SubsurfaceColor = GetSubsurfaceProfileColor(ScreenSpaceData.GBuffer);
-
-	float3 FadedSubsurfaceColor = SubsurfaceColor * LerpFactor;
+	float3 FadedTint = Tint * LerpFactor;
 
 	// combine potentially half res with full res
-	float3 SubsurfaceLighting = lerp(DiffuseAndSpecular.Diffuse, SSSColor, FadedSubsurfaceColor);
+	float3 SubsurfaceLighting = lerp(DiffuseAndSpecular.Diffuse, SSSColor, FadedTint);
 
-	OutColor = float4(SubsurfaceLighting * StoredBaseColor + ExtractedNonSubsurface, 0);
+	OutColor = float4(SubsurfaceLighting * StoredBaseColor + ExtractedNonSubsurface, 0.0f);
+}
+
+void SubsurfaceRecombineCopyPS(in FScreenVertexOutput Input, out float4 OutColor : SV_Target0)
+{
+	const float2 BufferUV = Input.UV.xy;
+
+	OutColor = Texture2DSampleLevel(SubsurfaceInput0_Texture, SharedSubsurfaceSampler0, BufferUV, 0);
 }
 
 void SubsurfaceViewportCopyPS(noperspective float4 InUV : TEXCOORD0, out float4 OutColor : SV_Target0)

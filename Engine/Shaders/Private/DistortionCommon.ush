@@ -1,3 +1,5 @@
+// Copyright Epic Games, Inc. All Rights Reserved.
+
 /*=============================================================================
 	DistortionCommon.ush
 =============================================================================*/
@@ -6,31 +8,46 @@
 
 float2 ComputeBufferUVDistortion(
 	in FMaterialPixelParameters MaterialParameters, in FPixelMaterialInputs PixelMaterialInputs, in ViewState ResolvedView,
-	in half3 Normal, in float4 DistortionParameters, in float2 ScreenUV, in float2 RefractionIORAndBias, in bool TryToClip, in uint EyeIndex)
+	in half3 WorldNormal, in float InMaterialIOR,
+	in float4 DistortionParameters, in float2 ScreenUV, in FMaterialRefractionData RefractionData, in bool TryToClip, in uint EyeIndex)
 {
-#if MATERIAL_TANGENTSPACENORMAL
-	half3 ViewNormal = normalize(TransformTangentVectorToView(MaterialParameters, Normal));
-#else
-	half3 ViewNormal = normalize(TransformWorldVectorToView(Normal));
-#endif
+	half3 ViewNormal = normalize(TransformWorldVectorToView(WorldNormal));
 
 #if REFRACTION_USE_PIXEL_NORMAL_OFFSET
 	half3 ViewVertexNormal = TransformTangentVectorToView(MaterialParameters, float3(0, 0, 1));
 	// Treat refraction of 1 as no refraction, to be consistent with IOR mode
-	float2 ViewportUVDistortion = (ViewVertexNormal.xy - ViewNormal.xy) * (RefractionIORAndBias.x - 1);
-#else
+	float2 ViewportUVDistortion = (ViewVertexNormal.xy - ViewNormal.xy) * (GetMaterialRefractionPixelNormalStrength(RefractionData) - 1);
+
+#elif REFRACTION_USE_INDEX_OF_REFRACTION
 	// we assume the camera is in air
 	float AirIOR = 1.0f;
-	float2 ViewportUVDistortion = ViewNormal.xy * (RefractionIORAndBias.x - AirIOR);
+#if REFRACTION_ROOT_NODE_OVERRIDES_DEFAULT || SUBSTRATE_OPTIMIZED_UNLIT
+	float MaterialIOR = GetMaterialRefractionIOR(RefractionData);
+#else
+	float MaterialIOR = InMaterialIOR;
+#endif
+	float2 ViewportUVDistortion = ViewNormal.xy * (MaterialIOR - AirIOR);
+
+#elif REFRACTION_USE_2D_OFFSET
+	float2 ViewportUVDistortion = GetMaterialRefraction2DOffset(RefractionData);
+
+#elif REFRACTION_USE_NONE
+	float2 ViewportUVDistortion = 0.0f;
+
+#else
+#error Unkown refraction mode.
 #endif
 
 	float2 BufferUVDistortion = ViewportUVDistortion * ResolvedView.ViewSizeAndInvSize.xy * ResolvedView.BufferSizeAndInvSize.zw;
 
-	//clip if the distortion distance (squared) is too small to be noticed
-	//this will result in a less expensive apply pass since the clipped pixels won't set stencil to pass
-	if (TryToClip)
+	// Clip if the distortion distance (squared) is too small to be noticed.
+	// This will result in a less expensive apply pass since the clipped pixels won't set stencil to pass.
+	// We only clip if the distortion is less than the size of a pixel of the unscaled viewport, i.e. dynamic resolution = 100%, to ensure a good reconstruction.
+	const float2 FullResolutionDistortionPixelSize = ResolvedView.BufferSizeAndInvSize.zw;
+	if (TryToClip && 
+		all(abs(BufferUVDistortion) < FullResolutionDistortionPixelSize))
 	{
-		clip(dot(BufferUVDistortion, BufferUVDistortion) - .00001);
+		clip(-1.0f);
 	}
 
 	// When ISR is enabled we store two FOVs in the DistortionParameters and compute the aspect ratio here
@@ -59,10 +76,10 @@ float2 ComputeBufferUVDistortion(
 
 void PostProcessUVDistortion(
 	in FMaterialPixelParameters MaterialParameters, in FPixelMaterialInputs PixelMaterialInputs, 
-	in float DistortSceneDepth,	inout float2 BufferUVDistortion, in float2 RefractionIORAndBias)
+	in float DistortSceneDepth,	inout float2 BufferUVDistortion, in FMaterialRefractionData RefractionData)
 {
 	// Soft thresholding 
-	float Bias = -RefractionIORAndBias.y;
+	float Bias = -RefractionData.RefractionDepthBias;
 	float Range = clamp(abs(Bias * 0.5f), 0, 50);
 	float Z = DistortSceneDepth;
 	float ZCompare = MaterialParameters.ScreenPosition.w;

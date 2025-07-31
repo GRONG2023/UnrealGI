@@ -16,8 +16,9 @@ float4 ShadowBufferSize;
 /** Cube map texture. */
 TextureCube ShadowDepthCubeTexture;
 
-#if OPENGL_PROFILE || COMPILER_VULKAN || COMPILER_SWITCH
 // This is required on GLSL based languages as the standard does NOT allow having a texture being used with both a Comparison and regular SamplerState
+#define USE_SEPARATE_SHADOW_DEPTH_CUBE_TEXTURE (OPENGL_PROFILE || COMPILER_VULKAN || PLATFORM_NEEDS_SEPARATE_SHADOW_DEPTH_CUBE_TEXTURE)
+#if USE_SEPARATE_SHADOW_DEPTH_CUBE_TEXTURE
 TextureCube ShadowDepthCubeTexture2;
 #endif
 
@@ -198,7 +199,7 @@ float CubemapHardwarePCF(
 
 #if SHADOW_QUALITY <= 2
 
-		Shadow = InShadowDepthCubeTexture.SampleCmpLevelZero(InShadowDepthCubeTextureSampler, WorldSampleToLightVec, CompareDistance + ShadowDepthBias);
+		Shadow = InShadowDepthCubeTexture.SampleCmpLevelZero(InShadowDepthCubeTextureSampler, WorldSampleToLightVec, CompareDistance - ShadowDepthBias);
 
 #elif SHADOW_QUALITY == 3
 		UNROLL for(int i = 0; i < 5; ++i)
@@ -207,7 +208,7 @@ float CubemapHardwarePCF(
 			Shadow += InShadowDepthCubeTexture.SampleCmpLevelZero(
 				InShadowDepthCubeTextureSampler,
 				SamplePos, 
-				CompareDistance + ShadowDepthBias * length(DiscSamples5[i]));
+				CompareDistance - ShadowDepthBias * length(DiscSamples5[i]));
 		}
 		Shadow /= 5;
 
@@ -219,7 +220,7 @@ float CubemapHardwarePCF(
 			Shadow += InShadowDepthCubeTexture.SampleCmpLevelZero(
 				InShadowDepthCubeTextureSampler,
 				SamplePos, 
-				CompareDistance + ShadowDepthBias * length(DiscSamples12[i]));
+				CompareDistance - ShadowDepthBias * length(DiscSamples12[i]));
 		}
 		Shadow /= 12;
 
@@ -231,7 +232,7 @@ float CubemapHardwarePCF(
 			Shadow += InShadowDepthCubeTexture.SampleCmpLevelZero(
 				InShadowDepthCubeTextureSampler,
 				SamplePos, 
-				CompareDistance + ShadowDepthBias * length(DiscSamples29[i]));
+				CompareDistance - ShadowDepthBias * length(DiscSamples29[i]));
 		}
 		Shadow /= 29;
 
@@ -250,7 +251,8 @@ float CubemapHardwarePCF(
 		}*/
 	}
 
-	return Shadow;
+	// ReverseZ so flip the result
+	return 1.0f - Shadow;
 }
 
 float CubemapHardwarePCF(

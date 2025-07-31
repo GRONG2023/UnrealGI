@@ -12,8 +12,10 @@
 // used like this: mul(float4(SvPosition.xyz, 1), SvPositionToLight);
 float4x4 SvPositionToLight;
 
-/** Fade distance in x, disabled brightness in y, output for preview shadows mask in z. */
-float3 LightFunctionParameters2;
+/** Fade distance in x, disabled brightness in y, output for preview shadows mask in z, hair strands in w */
+float4 LightFunctionParameters2;
+
+Texture2D HairOnlyDepthTexture;
 
 void Main(
 	// in float4 ScreenPosition : TEXCOORD0, // Not used and not output in VS
@@ -27,6 +29,13 @@ void Main(
 
 	// make SvPosition appear to be rasterized with the depth from the depth buffer
 	SvPosition.z = LookupDeviceZ(ScreenUV);
+#if HAIR_STRANDS_SUPPORTED
+	BRANCH
+	if (LightFunctionParameters2.w > 0)
+	{
+		SvPosition.z = Texture2DSampleLevel(HairOnlyDepthTexture, SceneTexturesStruct_SceneDepthTextureSampler, ScreenUV, 0).r; 
+	}
+#endif
 
 	float3 LightVector;
 	{
@@ -34,15 +43,14 @@ void Main(
 		LightVector = Hom.xyz / Hom.w;
 	}
 	
-	// todo: TranslatedWorld would be better for quality
-	float3 AbsoluteWorldPosition = SvPositionToWorld(SvPosition);
+	float3 TranslatedWorldPosition = SvPositionToTranslatedWorld(SvPosition);
 
 	// Calculate radial view distance for stable fading
-	float ViewDistance = length(View.WorldCameraOrigin - AbsoluteWorldPosition);
+	float ViewDistance = GetDistanceToCameraFromViewVector(PrimaryView.TranslatedWorldCameraOrigin - TranslatedWorldPosition);
 
 	float GreyScale;
 	{
-		float3 Color = GetLightFunctionColor(LightVector, AbsoluteWorldPosition);
+		float3 Color = GetLightFunctionColor(LightVector, TranslatedWorldPosition);
 		GreyScale = dot(Color, .3333f);
 	}
 
@@ -54,7 +62,7 @@ void Main(
 	GreyScale = lerp(LightFunctionParameters2.y, GreyScale, LightFunctionParameters.y);
 
 #if FORWARD_SHADING
-	float LightInfluenceMask = GetLightInfluenceMask(AbsoluteWorldPosition);
+	float LightInfluenceMask = GetLightInfluenceMask(TranslatedWorldPosition);
 	GreyScale = lerp(1, GreyScale, LightInfluenceMask);
 	OutColor = EncodeLightAttenuation(GreyScale);
 #else

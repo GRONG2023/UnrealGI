@@ -4,6 +4,7 @@
 
 #include "SSDSignalCore.ush"
 #include "SSDPublicBufferEncoding.ush"
+#include "../Lumen/LumenBufferEncoding.ush"
 
 /** Whether the color should be clamped when encoding signal. */
 #define CONFIG_ENCODING_CLAMP_COLOR 1
@@ -140,7 +141,7 @@ void DecodeMultiplexedSignalsFromFloat4(
 		}
 	}
 	#endif
-	#if COMPILE_SIGNAL_COLOR_ARRAY >= 2
+	#if COMPILE_SIGNAL_COLOR_ARRAY >= 2 && SIGNAL_ARRAY_SIZE >= 2
 	else if (SignalBufferLayout == SIGNAL_BUFFER_LAYOUT_POLYCHROMATIC_PENUMBRA_HARMONIC_INPUT)
 	{
 		// The RGS output same weigth for diffuse and specular given it depends only on shading model id.
@@ -220,6 +221,7 @@ void DecodeMultiplexedSignalsFromFloat4(
 			OutSamples.Array[MultiplexId].SceneColor.rgb = RawSample[0].rgb * Weight;
 		}
 		
+	#if SIGNAL_ARRAY_SIZE >= 2
 		// Decode specular harmonic
 		{
 			const uint MultiplexId = 1;
@@ -234,6 +236,7 @@ void DecodeMultiplexedSignalsFromFloat4(
 			OutSamples.Array[MultiplexId].SampleCount = Weight;
 			OutSamples.Array[MultiplexId].SceneColor.rgb = RawSample[1].rgb * Weight;
 		}
+	#endif
 	}
 	#endif
 	#if COMPILE_SIGNAL_COLOR
@@ -278,16 +281,20 @@ void DecodeMultiplexedSignalsFromFloat4(
 			OutSamples.Array[0].SampleCount = RawSample[0].g > 0 ? 1 : 0;
 			OutSamples.Array[0].MissCount = RawSample[0].g > 0 ? RawSample[0].r : 0;
 			
+		#if SIGNAL_ARRAY_SIZE >= 2
 			OutSamples.Array[1].SampleCount = RawSample[0].a > 0 ? 1 : 0;
 			OutSamples.Array[1].MissCount = RawSample[0].a > 0 ? RawSample[0].b : 0;
+		#endif
 		}
 		else
 		{
 			OutSamples.Array[0].SampleCount = RawSample[0].g;
 			OutSamples.Array[0].MissCount = RawSample[0].g * RawSample[0].r;
 			
+		#if SIGNAL_ARRAY_SIZE >= 2
 			OutSamples.Array[1].SampleCount = RawSample[0].a;
 			OutSamples.Array[1].MissCount = RawSample[0].a * RawSample[0].b;
+		#endif
 		}
 	}
 	else if (SignalBufferLayout == SIGNAL_BUFFER_LAYOUT_AO_HISTORY)
@@ -359,9 +366,66 @@ void DecodeMultiplexedSignalsFromFloat4(
 	}
 	else if (SignalBufferLayout == SIGNAL_BUFFER_LAYOUT_SSGI_HISTORY_R11G11B10)
 	{
-		OutSamples.Array[0].SampleCount = RawSample[1].g * 64.0;
+		if (bNormalizeSample)
+		{
+			OutSamples.Array[0].SampleCount = RawSample[1].g > 0.0 ? 1.0 : 0.0;
+		}
+		else
+		{
+			OutSamples.Array[0].SampleCount = RawSample[1].g * 64.0;
+		}
 		OutSamples.Array[0].MissCount = OutSamples.Array[0].SampleCount * RawSample[1].r;
 		OutSamples.Array[0].SceneColor.rgb = OutSamples.Array[0].SampleCount * RawSample[0].rgb;
+	}
+	#endif
+	#if COMPILE_SIGNAL_COLOR_ARRAY >= 2
+	else if (SignalBufferLayout == SIGNAL_BUFFER_LAYOUT_DIFFUSE_PROBE_HIERARCHY_INPUT)
+	{
+		OutSamples.Array[0].SampleCount = 1;
+		OutSamples.Array[0].ColorArray[0].rgb = OutSamples.Array[0].SampleCount * RawSample[0].rgb;
+		OutSamples.Array[0].ColorArray[1].rgb = OutSamples.Array[0].SampleCount * RawSample[1].rgb;
+	}
+	else if (SignalBufferLayout == SIGNAL_BUFFER_LAYOUT_DIFFUSE_PROBE_HIERARCHY_HISTORY)
+	{
+		// Diffuse
+		if (bNormalizeSample)
+		{
+			OutSamples.Array[0].SampleCount = RawSample[2].r > 0.0 ? 1.0 : 0.0;
+		}
+		else
+		{
+			OutSamples.Array[0].SampleCount = RawSample[2].r * TARGETED_SAMPLE_COUNT;
+		}
+		OutSamples.Array[0].ColorArray[0].rgb = OutSamples.Array[0].SampleCount * RawSample[0].rgb;
+		OutSamples.Array[0].ColorArray[1].rgb = OutSamples.Array[0].SampleCount * RawSample[1].rgb;
+	}
+	#endif
+	#if COMPILE_SIGNAL_COLOR_SH
+	else if (SignalBufferLayout == SIGNAL_BUFFER_LAYOUT_LUMEN_DIFFUSE_INPUT)
+	{
+		DecodeLumenDiffuseLighting(RawSample[0], RawSample[1], /* out */ OutSamples.Array[0].ColorSH);
+		
+		float SampleCount = 1.0; // TODO(Denoiser)
+		
+		OutSamples.Array[0] = MulSignal(OutSamples.Array[0], SampleCount);
+		OutSamples.Array[0].SampleCount = SampleCount;
+	}
+	else if (SignalBufferLayout == SIGNAL_BUFFER_LAYOUT_LUMEN_DIFFUSE_HISTORY)
+	{
+		DecodeLumenDiffuseLighting(RawSample[0], RawSample[1], /* out */ OutSamples.Array[0].ColorSH);
+		
+		float SampleCount = RawSample[0].a;
+		if (bNormalizeSample)
+		{
+			SampleCount = SampleCount > 0 ? 1 : 0;
+		}
+		else
+		{
+			SampleCount = RawSample[0].a;
+		}
+		
+		OutSamples.Array[0] = MulSignal(OutSamples.Array[0], SampleCount);
+		OutSamples.Array[0].SampleCount = SampleCount;
 	}
 	#endif
 } // DecodeMultiplexedSignalsFromFloat4()
@@ -478,7 +542,7 @@ void EncodeMultiplexedSignals(
 		OutBufferCount = MultiplexCount;
 	}
 	#endif
-	#if COMPILE_SIGNAL_COLOR_ARRAY >= 2
+	#if COMPILE_SIGNAL_COLOR_ARRAY >= 2 && SIGNAL_ARRAY_SIZE >= 2
 	else if (SignalBufferLayout == SIGNAL_BUFFER_LAYOUT_POLYCHROMATIC_PENUMBRA_HARMONIC_RECONSTRUCTION)
 	{
 		// diffuse harmonic
@@ -520,6 +584,7 @@ void EncodeMultiplexedSignals(
 		}
 
 		// Encode specular harmonic
+	#if SIGNAL_ARRAY_SIZE >= 2
 		{
 			const uint MultiplexId = 1;
 
@@ -528,6 +593,7 @@ void EncodeMultiplexedSignals(
 			OutRawSample[1].rgb = ClampColorForEncoding(Sample[MultiplexId].SceneColor.rgb * NormalizationFactor);
 			OutRawSample[1].a = Sample[MultiplexId].SampleCount;
 		}
+	#endif
 
 		OutBufferCount = 2;
 	}
@@ -551,11 +617,13 @@ void EncodeMultiplexedSignals(
 		OutRawSample[0].r = Sample[0].SampleCount > 0 ? Sample[0].MissCount / Sample[0].SampleCount : 1.0;
 		OutRawSample[0].g = Sample[0].SampleCount;
 		
+	#if SIGNAL_ARRAY_SIZE >= 2
 		if (MultiplexCount == 2)
 		{
 			OutRawSample[0].b = Sample[1].SampleCount > 0 ? Sample[1].MissCount / Sample[1].SampleCount : 1.0;
 			OutRawSample[0].a = Sample[1].SampleCount;
 		}
+	#endif
 	}
 	else if (SignalBufferLayout == SIGNAL_BUFFER_LAYOUT_AO_HISTORY)
 	{
@@ -598,6 +666,28 @@ void EncodeMultiplexedSignals(
 		OutRawSample[0].rgb = ClampColorForEncoding(Sample[0].SceneColor * NormalizationFactor).rgb;
 		OutRawSample[1].g = saturate(Sample[0].SampleCount * rcp(64.0));
 		OutRawSample[1].r = Sample[0].MissCount * NormalizationFactor;
+		OutBufferCount = 2;
+	}
+	#endif
+	#if COMPILE_SIGNAL_COLOR_ARRAY >= 2
+	else if (SignalBufferLayout == SIGNAL_BUFFER_LAYOUT_DIFFUSE_PROBE_HIERARCHY_HISTORY)
+	{
+		float NormalizationFactor = SafeRcp(Sample[0].SampleCount);
+		OutRawSample[0].rgb = ClampColorForEncoding(Sample[0].ColorArray[0] * NormalizationFactor);
+		OutRawSample[1].rgb = ClampColorForEncoding(Sample[0].ColorArray[1] * NormalizationFactor);
+		OutRawSample[2].r = saturate(Sample[0].SampleCount * rcp(TARGETED_SAMPLE_COUNT));
+
+		OutBufferCount = 3;
+	}
+	#endif
+	#if COMPILE_SIGNAL_COLOR_SH
+	else if (SignalBufferLayout == SIGNAL_BUFFER_LAYOUT_LUMEN_DIFFUSE_HISTORY)
+	{
+		FSSDSignalSample NormalizedSample = NormalizeToOneSample(Sample[0]);
+		//FSSDSignalSample NormalizedSample = (Sample[0]);
+
+		EncodeLumenDiffuseLighting(NormalizedSample.ColorSH, /* out */ OutRawSample[0], /* out */ OutRawSample[1]);
+		OutRawSample[0].a = Sample[0].SampleCount;
 		OutBufferCount = 2;
 	}
 	#endif

@@ -1,19 +1,35 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 /*=============================================================================
-	HeightFogCommon.usf: 
+	HeightFogCommon.usf:  
 =============================================================================*/
 
-#ifndef SUPPORT_FOG_INSCATTERING_TEXTURE
-#define SUPPORT_FOG_INSCATTERING_TEXTURE (FEATURE_LEVEL >= FEATURE_LEVEL_SM4)
+#pragma once
+
+#include "/Engine/Shared/EnvironmentComponentsFlags.h"
+
+#ifndef PERMUTATION_SUPPORT_FOG_INSCATTERING_TEXTURE
+#define PERMUTATION_SUPPORT_FOG_INSCATTERING_TEXTURE 1
 #endif
 
-#ifndef SUPPORT_FOG_DIRECTIONAL_LIGHT_INSCATTERING
-#define SUPPORT_FOG_DIRECTIONAL_LIGHT_INSCATTERING 1
+#ifndef PERMUTATION_SUPPORT_FOG_DIRECTIONAL_LIGHT_INSCATTERING
+#define PERMUTATION_SUPPORT_FOG_DIRECTIONAL_LIGHT_INSCATTERING 1
 #endif
 
-#ifndef SUPPORT_VOLUMETRIC_FOG
-#define SUPPORT_VOLUMETRIC_FOG (FEATURE_LEVEL >= FEATURE_LEVEL_SM4)
+#ifndef PERMUTATION_SUPPORT_VOLUMETRIC_FOG
+#define PERMUTATION_SUPPORT_VOLUMETRIC_FOG 1
+#endif
+
+#ifndef PERMUTATION_SUPPORT_FOG_START_DISTANCE
+#define PERMUTATION_SUPPORT_FOG_START_DISTANCE 1
+#endif
+
+#ifndef PERMUTATION_SUPPORT_FOG_SECOND_TERM
+#define PERMUTATION_SUPPORT_FOG_SECOND_TERM 1
+#endif
+
+#ifndef FOG_MATERIALBLENDING_OVERRIDE
+#define FOG_MATERIALBLENDING_OVERRIDE 0
 #endif
 
 #if INSTANCED_STEREO
@@ -37,7 +53,7 @@ float3 ComputeInscatteringColor(float3 CameraToReceiver, float CameraToReceiverL
 {
 	half3 Inscattering = FogStruct.ExponentialFogColorParameter.xyz;
 
-#if SUPPORT_FOG_INSCATTERING_TEXTURE
+#if PERMUTATION_SUPPORT_FOG_INSCATTERING_TEXTURE
 	BRANCH
 	if (FogStruct.ExponentialFogParameters3.z > 0)
 	{
@@ -52,7 +68,7 @@ float3 ComputeInscatteringColor(float3 CameraToReceiver, float CameraToReceiverL
 #endif
 
 #if PROJECT_SUPPORT_SKY_ATMOSPHERE_AFFECTS_HEIGHFOG
-	Inscattering += View.SkyAtmosphereHeightFogContribution * Texture2DSampleLevel(View.DistantSkyLightLutTexture, View.DistantSkyLightLutTextureSampler, float2(0.5f, 0.5f), 0.0f).rgb;
+	Inscattering += FogStruct.SkyAtmosphereAmbientContributionColorScale.rgb * View.SkyAtmosphereHeightFogContribution.xxx * Texture2DSampleLevel(View.DistantSkyLightLutTexture, View.DistantSkyLightLutTextureSampler, float2(0.5f, 0.5f), 0.0f).rgb;
 #endif
 
 	return Inscattering;
@@ -75,12 +91,12 @@ half4 GetExponentialHeightFog(float3 WorldPositionRelativeToCamera, float Exclud
 	const half MinFogOpacity = FogStruct.ExponentialFogColorParameter.w;
 	const float MaxWorldObserverHeight = FogStruct.ExponentialFogParameters.z;
 
-	const float3 WorldObserverOrigin = float3(View.WorldCameraOrigin.xy, min(View.WorldCameraOrigin.z, MaxWorldObserverHeight)); // Clamp z to max height
+	const float3 WorldObserverOrigin = float3(DFHackToFloat(PrimaryView.WorldCameraOrigin).xy, min(DFHackToFloat(PrimaryView.WorldCameraOrigin).z, MaxWorldObserverHeight)); // Clamp z to max height
 
 	float3 CameraToReceiver = WorldPositionRelativeToCamera;
-	CameraToReceiver.z += View.WorldCameraOrigin.z - WorldObserverOrigin.z; // Compensate this vector for clamping the observer height 
+	CameraToReceiver.z += DFHackToFloat(PrimaryView.WorldCameraOrigin).z - WorldObserverOrigin.z; // Compensate this vector for clamping the observer height 
 	float CameraToReceiverLengthSqr = dot(CameraToReceiver, CameraToReceiver);
-	float CameraToReceiverLengthInv = rsqrt(CameraToReceiverLengthSqr);
+	float CameraToReceiverLengthInv = rsqrt(max(CameraToReceiverLengthSqr, 0.00000001f));
 	float CameraToReceiverLength = CameraToReceiverLengthSqr * CameraToReceiverLengthInv;
 	half3 CameraToReceiverNormalized = CameraToReceiver * CameraToReceiverLengthInv;
 
@@ -89,16 +105,13 @@ half4 GetExponentialHeightFog(float3 WorldPositionRelativeToCamera, float Exclud
 	float RayLength = CameraToReceiverLength;
 	float RayDirectionZ = CameraToReceiver.z;
 
-	// Factor in StartDistance
-	ExcludeDistance = max(ExcludeDistance, FogStruct.ExponentialFogParameters.w);
-	
 #if USE_GLOBAL_CLIP_PLANE
 
 	BRANCH
 	// While rendering a planar reflection with a clip plane, we must compute analytical fog using a camera path starting from the plane, rather than the virtual camera origin
 	if (dot(View.GlobalClippingPlane.xyz, 1) > 0.0f)
 	{
-		float CameraOriginPlaneDistance = dot(View.GlobalClippingPlane, float4(WorldObserverOrigin, 1));
+		float CameraOriginPlaneDistance = dot(View.GlobalClippingPlane, float4(WorldObserverOrigin + DFHackToFloat(PrimaryView.PreViewTranslation), 1));
 		float PlaneIntersectionTime = -CameraOriginPlaneDistance / dot(CameraToReceiver, View.GlobalClippingPlane.xyz);
 
 		// Only modify the start distance if the reflection plane is between the camera and receiver point
@@ -110,6 +123,9 @@ half4 GetExponentialHeightFog(float3 WorldPositionRelativeToCamera, float Exclud
 
 #endif
 
+	// Factor in StartDistance
+#if PERMUTATION_SUPPORT_FOG_START_DISTANCE
+	ExcludeDistance = max(ExcludeDistance, FogStruct.ExponentialFogParameters.w);
 	if (ExcludeDistance > 0)
 	{
 		float ExcludeIntersectionTime = ExcludeDistance * CameraToReceiverLengthInv;
@@ -127,20 +143,24 @@ half4 GetExponentialHeightFog(float3 WorldPositionRelativeToCamera, float Exclud
 		float ExponentSecond = max(-127.0f, FogStruct.ExponentialFogParameters2.y * (ExclusionIntersectionZ - FogStruct.ExponentialFogParameters2.w)); 	 
 		RayOriginTermsSecond = FogStruct.ExponentialFogParameters2.z * exp2(-ExponentSecond);
 	}
+#endif
 
 	// Calculate the "shared" line integral (this term is also used for the directional light inscattering) by adding the two line integrals together (from two different height falloffs and densities)
-	float ExponentialHeightLineIntegralShared = CalculateLineIntegralShared(FogStruct.ExponentialFogParameters.y, RayDirectionZ, RayOriginTerms) + CalculateLineIntegralShared(FogStruct.ExponentialFogParameters2.y, RayDirectionZ, RayOriginTermsSecond);
+	float ExponentialHeightLineIntegralShared = CalculateLineIntegralShared(FogStruct.ExponentialFogParameters.y, RayDirectionZ, RayOriginTerms);
+#if PERMUTATION_SUPPORT_FOG_SECOND_TERM
+	ExponentialHeightLineIntegralShared+= CalculateLineIntegralShared(FogStruct.ExponentialFogParameters2.y, RayDirectionZ, RayOriginTermsSecond);
+#endif
 
 	float ExponentialHeightLineIntegral = ExponentialHeightLineIntegralShared * RayLength;
 
 	half3 InscatteringColor = ComputeInscatteringColor(CameraToReceiver, CameraToReceiverLength);
 	half3 DirectionalInscattering = 0;
 
-#if SUPPORT_FOG_DIRECTIONAL_LIGHT_INSCATTERING
+#if PERMUTATION_SUPPORT_FOG_DIRECTIONAL_LIGHT_INSCATTERING
 	// if InscatteringLightDirection.w is negative then it's disabled, otherwise it holds directional inscattering start distance
 	BRANCH
 	if (FogStruct.InscatteringLightDirection.w >= 0
-	#if SUPPORT_FOG_INSCATTERING_TEXTURE
+	#if PERMUTATION_SUPPORT_FOG_INSCATTERING_TEXTURE
 		&& FogStruct.ExponentialFogParameters3.z == 0
 	#endif
 	)
@@ -150,13 +170,13 @@ half4 GetExponentialHeightFog(float3 WorldPositionRelativeToCamera, float Exclud
 		half3 DirectionalInscatteringColor;
 		half3 DirectionalLightInscattering;
 
-		// No need to test View.AtmosphereLightColorGlobalPostTransmittance[0].a because InscatteringLightDirection.w above is doing the same test already.
-		DirectionalInscatteringColor = FogStruct.DirectionalInscatteringColor.xyz + View.SkyAtmosphereHeightFogContribution * View.AtmosphereLightColorGlobalPostTransmittance[0].rgb * UniformPhaseFunction;
+		// No need to test View.AtmosphereLightIlluminanceOnGroundPostTransmittance[0].a because InscatteringLightDirection.w above is doing the same test already.
+		DirectionalInscatteringColor = FogStruct.DirectionalInscatteringColor.xyz + View.SkyAtmosphereHeightFogContribution * View.AtmosphereLightIlluminanceOnGroundPostTransmittance[0].rgb * UniformPhaseFunction;
 		DirectionalLightInscattering = DirectionalInscatteringColor * pow(saturate(dot(CameraToReceiverNormalized, View.AtmosphereLightDirection[0].xyz)), FogStruct.DirectionalInscatteringColor.w);
 
-		if (View.AtmosphereLightColorGlobalPostTransmittance[1].a > 0.0f) // Skip DirectionalInscatteringColor on the second light when disabled.
+		if (View.AtmosphereLightIlluminanceOnGroundPostTransmittance[1].a > 0.0f) // Skip DirectionalInscatteringColor on the second light when disabled.
 		{
-			DirectionalInscatteringColor = FogStruct.DirectionalInscatteringColor.xyz + View.SkyAtmosphereHeightFogContribution * View.AtmosphereLightColorGlobalPostTransmittance[1].rgb * UniformPhaseFunction;
+			DirectionalInscatteringColor = FogStruct.DirectionalInscatteringColor.xyz + View.SkyAtmosphereHeightFogContribution * View.AtmosphereLightIlluminanceOnGroundPostTransmittance[1].rgb * UniformPhaseFunction;
 			DirectionalLightInscattering += DirectionalInscatteringColor * pow(saturate(dot(CameraToReceiverNormalized, View.AtmosphereLightDirection[1].xyz)), FogStruct.DirectionalInscatteringColor.w);
 		}
 #else
@@ -185,28 +205,38 @@ half4 GetExponentialHeightFog(float3 WorldPositionRelativeToCamera, float Exclud
 	}
 
 	// Fog color is unused when additive / modulate blend modes are active.
-	#if (MATERIALBLENDING_ADDITIVE || MATERIALBLENDING_MODULATE)
+	#if (MATERIALBLENDING_ADDITIVE || MATERIALBLENDING_MODULATE) && !FOG_MATERIALBLENDING_OVERRIDE
 		half3 FogColor = 0.0;
 	#else
 		half3 FogColor = (InscatteringColor) * (1 - ExpFogFactor) + DirectionalInscattering;
 	#endif
+
+#if POST_PROCESS_ALPHA
+	if (IsExponentialFogHoldout(View.EnvironmentComponentsFlags) && View.RenderingReflectionCaptureMask == 0.0f)
+	{
+		FogColor.rgb *= 0;
+	}
+#endif
 
 	return half4(FogColor, ExpFogFactor);
 }
 
 half4 CalculateHeightFog(float3 WorldPositionRelativeToCamera)
 {
-	float3 WorldPosition = WorldPositionRelativeToCamera + ResolvedView.TranslatedWorldCameraOrigin - ResolvedView.PreViewTranslation.xyz;
-	
-	float ExcludeDistance = 0;
+	if (View.RenderingReflectionCaptureMask == 0.0f && !IsExponentialFogRenderedInMain(View.EnvironmentComponentsFlags))
+	{
+		return float4(0.0f, 0.0f, 0.0f, 1.0f);
+	}
 
-#if SUPPORT_VOLUMETRIC_FOG
-	float InvCosAngle = length(WorldPositionRelativeToCamera) / dot(WorldPositionRelativeToCamera, View.ViewForward);
+	float ExcludeDistance = 0;
+#if PERMUTATION_SUPPORT_VOLUMETRIC_FOG
 	// Volumetric fog covers up to MaxDistance along ViewZ, exclude analytical fog from this range
-	ExcludeDistance = max(View.VolumetricFogMaxDistance * InvCosAngle, 0);
+	float CosAngle = dot(normalize(WorldPositionRelativeToCamera), View.ViewForward);
+	float InvCosAngle = (CosAngle > FLT_EPSILON) ? rcp(CosAngle) : 0;
+	ExcludeDistance = View.VolumetricFogMaxDistance * InvCosAngle;
 #endif
 
-	float4 FogInscatteringAndOpacity = GetExponentialHeightFog(WorldPositionRelativeToCamera, ExcludeDistance);
+	half4 FogInscatteringAndOpacity = GetExponentialHeightFog(WorldPositionRelativeToCamera, ExcludeDistance);
 	return FogInscatteringAndOpacity;
 }
 
@@ -216,30 +246,54 @@ half4 CalculateHeightFog(float3 WorldPositionRelativeToCamera)
 	#define SharedIntegratedLightScatteringSampler FogStruct.IntegratedLightScatteringSampler
 #endif
 
-float4 CombineVolumetricFog(float4 GlobalFog, float3 VolumeUV, uint EyeIndex)
+float4 CombineVolumetricFog(float4 GlobalFog, float3 VolumeUV, uint EyeIndex, float SceneDepth)
 {
 	float4 VolumetricFogLookup = float4(0, 0, 0, 1);
+	
+	if (View.RenderingReflectionCaptureMask == 0.0f && !IsExponentialFogRenderedInMain(View.EnvironmentComponentsFlags))
+	{
+		return VolumetricFogLookup;
+	}
 
-#if SUPPORT_VOLUMETRIC_FOG
+#if PERMUTATION_SUPPORT_VOLUMETRIC_FOG
+	float VolFogStartDistance = 0.0f;
 	if (FogStruct.ApplyVolumetricFog > 0)
 	{
 	#if INSTANCED_STEREO
 		if (EyeIndex == 0)
 		{
+			VolFogStartDistance = FogStruct.VolumetricFogStartDistance;
 			VolumetricFogLookup = Texture3DSampleLevel(FogStruct.IntegratedLightScattering, SharedIntegratedLightScatteringSampler, VolumeUV, 0);
 		}
 		else
 		{
+			VolFogStartDistance = FogStructISR.VolumetricFogStartDistance;
 			VolumetricFogLookup = Texture3DSampleLevel(FogStructISR.IntegratedLightScattering, SharedIntegratedLightScatteringSampler, VolumeUV, 0);
 		}
 	#else
+		VolFogStartDistance = FogStruct.VolumetricFogStartDistance;
 		VolumetricFogLookup = Texture3DSampleLevel(FogStruct.IntegratedLightScattering, SharedIntegratedLightScatteringSampler, VolumeUV, 0);
 	#endif
+
+		// IntegratedLightScattering is pre-exposed, remove pre exposure now so that it can correctly be applied later
+		VolumetricFogLookup.rgb *= View.OneOverPreExposure;
 	}
+
+	// Do not apply the Froxel volumetric texture in front of the fog start distance. (the soft fading occur in FinalIntegrationCS).
+	// We go with a quickly increasing step function because the soft fade in from start distance occurs in FinalIntegrationCS.
+	VolumetricFogLookup = lerp(float4(0, 0, 0, 1), VolumetricFogLookup, saturate((SceneDepth - VolFogStartDistance) * 100000000.0f));
 #endif
 
 	// Visualize depth distribution
 	//VolumetricFogLookup.rgb += .1f * frac(min(ZSlice, 1.0f) / View.VolumetricFogInvGridSize.z);
+
+#if POST_PROCESS_ALPHA
+	if (IsExponentialFogHoldout(View.EnvironmentComponentsFlags) && View.RenderingReflectionCaptureMask == 0.0f)
+	{
+		VolumetricFogLookup.rgb *= 0;
+		GlobalFog.rgb *= 0;
+	}
+#endif
 
 	return float4(VolumetricFogLookup.rgb + GlobalFog.rgb * VolumetricFogLookup.a, VolumetricFogLookup.a * GlobalFog.a);
 }
@@ -252,11 +306,38 @@ float ComputeNormalizedZSliceFromDepth(float SceneDepth)
 float3 ComputeVolumeUVFromNDC(float4 NDCPosition)
 {
 	NDCPosition.xy /= NDCPosition.w;
-	return float3(NDCPosition.xy * float2(.5f, -.5f) + .5f, ComputeNormalizedZSliceFromDepth(NDCPosition.w));
+	float3 VolumeUV = float3(NDCPosition.xy * float2(.5f, -.5f) + .5f, ComputeNormalizedZSliceFromDepth(NDCPosition.w));
+	return min(VolumeUV * float3(View.VolumetricFogScreenToResourceUV.xy, 1.0), float3(View.VolumetricFogUVMax, 1.0));
 }
-float3 ComputeVolumeUV(float3 WorldPosition, float4x4 WorldToClip)
+float3 ComputeVolumeUVFromTranslatedPos(float3 TranslatedWorldPosition, float4x4 TranslatedWorldToClip)
+{
+	float4 NDCPosition = mul(float4(TranslatedWorldPosition, 1), TranslatedWorldToClip);
+	return ComputeVolumeUVFromNDC(NDCPosition);
+}
+float3 ComputeVolumeUV_DEPRECATED(float3 WorldPosition, float4x4 WorldToClip)
 {
 	float4 NDCPosition = mul(float4(WorldPosition, 1), WorldToClip);
 	return ComputeVolumeUVFromNDC(NDCPosition);
 }
+float3 ComputeVolumeUV(FDFVector3 WorldPosition, FDFInverseMatrix WorldToClip)
+{
+	float4 NDCPosition = DFMultiplyDemote(MakeDFVector(WorldPosition, 1.0f), WorldToClip);
+	return ComputeVolumeUVFromNDC(NDCPosition);
+}
 
+float3 ComputeHistoryVolumeUVFromNDC(float4 NDCPosition)
+{
+	NDCPosition.xy /= NDCPosition.w;
+	float3 VolumeUV = float3(NDCPosition.xy * float2(.5f, -.5f) + .5f, ComputeNormalizedZSliceFromDepth(NDCPosition.w));
+	return min(VolumeUV * float3(View.VolumetricFogViewGridUVToPrevViewRectUV.xy * View.VolumetricFogPrevViewGridRectUVToResourceUV.xy, 1.0), float3(View.VolumetricFogPrevUVMaxForTemporalBlend, 1.0));
+}
+float3 ComputeHistoryVolumeUV_DEPRECATED(float3 WorldPosition, float4x4 WorldToClip)
+{
+	float4 NDCPosition = mul(float4(WorldPosition, 1), WorldToClip);
+	return ComputeHistoryVolumeUVFromNDC(NDCPosition);
+}
+float3 ComputeHistoryVolumeUV(FDFVector3 WorldPosition, FDFInverseMatrix WorldToClip)
+{
+	float4 NDCPosition = DFMultiplyDemote(MakeDFVector(WorldPosition, 1.0f), WorldToClip);
+	return ComputeHistoryVolumeUVFromNDC(NDCPosition);
+}

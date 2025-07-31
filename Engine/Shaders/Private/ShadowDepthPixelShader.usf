@@ -1,14 +1,29 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright Epic Games, Inc. All Rights Reserved. 
 
 /*=============================================================================
 	ShadowDepthPixelShader.usf: Pixel shader for writing shadow depth.
 =============================================================================*/
 
+#if !MATERIAL_LWC_ENABLED
+#define UE_DF_FORCE_FP32_OPS 1
+#endif
+
 // needs to before Common.usf
 #define SHADOW_DEPTH_SHADER 1
 #define USE_STENCIL_LOD_DITHER	0
 
-#include "LPVListEntry.ush"
+#ifndef ENABLE_NON_NANITE_VSM
+#error "ENABLE_NON_NANITE_VSM should be defined to either 0 or 1!"
+#endif
+
+
+#if ENABLE_NON_NANITE_VSM
+	#define VIRTUAL_SM_ENABLED (!(ONEPASS_POINTLIGHT_SHADOW || PERSPECTIVE_CORRECT_DEPTH))
+#else
+	#define VIRTUAL_SM_ENABLED 0
+#endif
+
+#include "Nanite/NanitePackedNaniteView.ush"
 #include "Common.ush"
 
 // Reroute SceneTexturesStruct uniform buffer references to the shadow depth pass uniform buffer
@@ -24,36 +39,22 @@
 #include "/Engine/Generated/VertexFactory.ush"
 #include "ShadowDepthCommon.ush"
 
-#define SECONDARY_OCCLUSION			1
 
-#define NO_LPV						COMPILER_HLSLCC
-
-// With this enabled, very large or one-sided objects (e.g. terrain) inject an additional layer of GV cells 
-// to increase AO contribution. The AO calculation works best with closed geometry and small-medium scale objects
-#define LPV_GV_BOOST				1
-
-#if REFLECTIVE_SHADOW_MAP && !NO_LPV
-	// Reroute LpvWrite uniform buffer references to the shadow depth pass uniform buffer
-	#define LpvWrite PassStruct.LPV
-	#include "LPVWriteVplCommon.ush"
+#if VIRTUAL_SM_ENABLED
+#include "Nanite/NaniteDataDecode.ush"
+#include "SceneData.ush"
+#include "VirtualShadowMaps/VirtualShadowMapPageAccessCommon.ush"
 #endif
 
-
-float3 GetMaterialBounceColor(FPixelMaterialInputs PixelMaterialInputs)
-{
-	half3 BaseColor = GetMaterialBaseColor(PixelMaterialInputs);
-	return BaseColor;
-}
-
+#define SECONDARY_OCCLUSION			1
 
 void Main( 
 	FShadowDepthVSToPS Inputs,
-	in float4 SvPosition : SV_Position,		// after all interpolators
-	out float4 OutColor : SV_Target0
-#if REFLECTIVE_SHADOW_MAP
-	,out float4 OutReflectiveShadowMapDiffuse : SV_Target1
+#if VIRTUAL_SM_ENABLED
+	nointerpolation uint PackedPageInfo : TEXCOORD8,
 #endif
-#if PERSPECTIVE_CORRECT_DEPTH
+	in float4 SvPosition : SV_Position		// after all interpolators
+#if PERSPECTIVE_CORRECT_DEPTH || COMPILER_METAL
 	,out float OutDepth : SV_DEPTH
 #endif
 	)
@@ -64,14 +65,24 @@ void Main(
 	
 	FMaterialPixelParameters MaterialParameters = GetMaterialPixelParameters(Inputs.FactoryInterpolants, SvPosition);
 	FPixelMaterialInputs PixelMaterialInputs;
-	#if INTERPOLATE_POSITION
+	#if INTERPOLATE_POSITION || (USE_WORLD_POSITION_EXCLUDING_SHADER_OFFSETS && !IS_NANITE_PASS)
 	    {
 			float4 ScreenPosition  = SvPositionToResolvedScreenPosition(SvPosition);  
 			
-			float3 TranslatedWorld = Inputs.PixelPosition.xyz;
+			float3 TranslatedWorld = 
+		#if INTERPOLATE_POSITION
+			Inputs.PixelPosition.xyz;
+		#else
+			SvPositionToResolvedTranslatedWorld(SvPosition);
+		#endif
 
-			CalcMaterialParametersEx(MaterialParameters, PixelMaterialInputs, SvPosition, ScreenPosition, 1, TranslatedWorld, TranslatedWorld);
-
+			CalcMaterialParametersEx(MaterialParameters, PixelMaterialInputs, SvPosition, ScreenPosition, 1, TranslatedWorld, 
+		#if USE_WORLD_POSITION_EXCLUDING_SHADER_OFFSETS && !IS_NANITE_PASS
+				Inputs.PixelPositionExcludingWPO
+		#else
+				TranslatedWorld
+		#endif			
+			);
 		}
 	#else
 		CalcMaterialParameters(MaterialParameters, PixelMaterialInputs, SvPosition, 1);
@@ -85,79 +96,31 @@ void Main(
 
 #if PERSPECTIVE_CORRECT_DEPTH
 	const float InvMaxSubjectDepth = PassStruct.ShadowParams.w;
-	Inputs.ShadowDepth *= InvMaxSubjectDepth;
+	Inputs.ShadowDepth = 1 - Inputs.ShadowDepth * InvMaxSubjectDepth;
 	Inputs.ShadowDepth += Inputs.DepthBias;
 
 	OutDepth = saturate(Inputs.ShadowDepth);
+#elif COMPILER_METAL
+	// Metal fragment shader must not be empty,
+	// so output depth value explicitly if this shader permuation was not discarded
+	OutDepth = SvPosition.z;
 #endif
 
-	OutColor = 0;
+#if ENABLE_NON_NANITE_VSM && VIRTUAL_TEXTURE_TARGET
+	uint2 vAddress = (uint2)SvPosition.xy;
+	float DeviceZ = SvPosition.z;
 
-#if REFLECTIVE_SHADOW_MAP
-	OutReflectiveShadowMapDiffuse = 0;
-	float3 normal = normalize( MaterialParameters.TangentToWorld[2] ); // Smooth normal
-	float3 flux = GetMaterialBounceColor(PixelMaterialInputs);
+	FPageInfo PageInfo = UnpackPageInfo( PackedPageInfo );
+	FNaniteView NaniteView = UnpackNaniteView( PassStruct.PackedNaniteViews[ PageInfo.ViewId ] );
 
-#if MATERIAL_INJECT_EMISSIVE_INTO_LPV
-	float3 emissive = GetMaterialEmissive(PixelMaterialInputs);
+	FShadowPhysicalPage Page = ShadowDecodePageTable( PassStruct.VirtualSmPageTable[ CalcPageOffset( NaniteView.TargetLayerIndex, NaniteView.TargetMipLevel, vAddress >> VSM_LOG2_PAGE_SIZE ) ] );
 
-	// Remove directionality from the light in the VPL.
-	normal = float3 (0.0f, 0.0f, 0.0f);
-#endif
-
-#if MATERIAL_INJECT_EMISSIVE_INTO_LPV || MATERIAL_BLOCK_GI
-	float opacity = GetMaterialOpacity(PixelMaterialInputs);
-#endif
-
-#if (SECONDARY_OCCLUSION || MATERIAL_INJECT_EMISSIVE_INTO_LPV) && !NO_LPV
-	// Optimisation: only add to GV/VPL if the fragment is within the grid
-	float3 grid = WorldToGrid( MaterialParameters.AbsoluteWorldPosition.xyz );
-	float minGrid = min( grid.x, min(grid.y,grid.z ) );
-	float maxGrid = max( grid.x, max(grid.y,grid.z ) );
-
-	[branch]
-	if ( minGrid > -0.5f && maxGrid <= 32.5f ) // Account for 0.5 cell offset
+	if( Page.bThisLODValid )
 	{
-#if SECONDARY_OCCLUSION && (MATERIALBLENDING_MASKED || MATERIALBLENDING_SOLID) && !MATERIAL_BLOCK_GI
-		float3 GvInjectPosition = MaterialParameters.AbsoluteWorldPosition - normal * LpvWrite.GeometryVolumeInjectionBias;
-#if LPV_GV_BOOST
-		if ( GetPrimitiveData(MaterialParameters.PrimitiveId).LpvBiasMultiplier < 0.25 ) 
-		{
-			// Add an additional layer of GV cells facing the opposite direction to improve AO contribution
-			// TODO: add per-primitive AO-boost tickbox instead of hijacking LpvBiasMultiplier like this
-			// NOTE: The cost of this additional branch is minimal (on AMD at least)
-			float offset = ( LpvWrite.LpvScale * 3.0f );
-			AddToGvList( GvInjectPosition - normal * offset, flux, -normal );
-		}
-#endif
-		AddToGvList( GvInjectPosition, flux, normal ); 
-
-#endif
-
-#if MATERIAL_INJECT_EMISSIVE_INTO_LPV && !MATERIAL_BLOCK_GI
-		AddToVplList( MaterialParameters.AbsoluteWorldPosition, emissive * LpvWrite.EmissiveInjectionMultiplier, normal, true );
-#endif
+		uint2 pAddress = Page.PhysicalAddress * VSM_PAGE_SIZE + (vAddress & VSM_PAGE_SIZE_MASK);
+		// If requested, render to the static page
+		const int ArrayIndex = PageInfo.bStaticPage ? GetVirtualShadowMapStaticArrayIndex() : 0;
+		InterlockedMax( PassStruct.OutDepthBufferArray[ uint3( pAddress, ArrayIndex ) ], asuint( DeviceZ ) );
 	}
-	else
-	{
-		OutColor = 0;
-		OutReflectiveShadowMapDiffuse = 0;
-		return;
-	}
-#endif
-
-#if MATERIAL_BLOCK_GI
-	OutColor = 1.0f;
-	OutReflectiveShadowMapDiffuse = opacity;
-#elif MATERIALBLENDING_TRANSLUCENT || MATERIALBLENDING_ALPHACOMPOSITE || MATERIALBLENDING_ALPHAHOLDOUT
-	OutColor = 0;
-	OutReflectiveShadowMapDiffuse = 0;
-	clip(-1.0);
-#else
-	// Pass the LPV bias multiplier in the alpha channel of the normal
-	OutColor = float4(normal * .5 + .5, GetPrimitiveData(MaterialParameters.PrimitiveId).LpvBiasMultiplier / 32.0f );
-	OutReflectiveShadowMapDiffuse = float4(flux, 0);
-#endif
-
 #endif
 }

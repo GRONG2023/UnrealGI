@@ -15,6 +15,7 @@
 #include "../ColorSpace.ush"
 #include "../SphericalGaussian.ush"
 #include "/Engine/Public/WaveBroadcastIntrinsics.ush"
+#include "/Engine/Private/Substrate/Substrate.ush"
 
 #if SPHERICAL_HARMONIC_ORDER > 0
 	#include "../SHCommon.ush"
@@ -50,8 +51,12 @@
 
 #elif CONFIG_SIGNAL_PROCESSING == SIGNAL_PROCESSING_SSGI
 	#define TARGETED_SAMPLE_COUNT 128
-	#define CONFIG_METADATA_BUFFER_LAYOUT METADATA_BUFFER_LAYOUT_DEPTH_VIEWNORMAL
-	#define CONFIG_USE_VIEW_SPACE 1
+	// #define CONFIG_METADATA_BUFFER_LAYOUT METADATA_BUFFER_LAYOUT_DEPTH_VIEWNORMAL // TODO Guillaume:
+	//#define CONFIG_USE_VIEW_SPACE 1
+
+#elif CONFIG_SIGNAL_PROCESSING == SIGNAL_PROCESSING_DIFFUSE_PROBE_HIERARCHY
+	#define TARGETED_SAMPLE_COUNT 32
+	#define CONFIG_METADATA_BUFFER_LAYOUT METADATA_BUFFER_LAYOUT_FED_DEPTH_SHADINGMODEL
 
 #else
 	#error Unconfigured TARGETED_SAMPLE_COUNT
@@ -76,28 +81,38 @@
 uint2 ViewportMin;
 uint2 ViewportMax;
 float4 ThreadIdToBufferUV;
-float4 BufferSizeAndInvSize;
-float4 BufferBilinearUVMinMax;
+float4 DenoiserBufferSizeAndInvSize;
+float4 DenoiserBufferBilinearUVMinMax;
 float2 BufferUVToOutputPixelPosition;
-float4 BufferUVToScreenPosition;
+float4 SceneBufferUVToScreenPosition;
 float4x4 ScreenToView;
 float2 BufferUVBilinearCorrection;
 
 
 float4 PrevSceneBufferUVToScreenPosition;
 
-float WorldDepthToPixelWorldRadius;
-
 Texture2D PrevDepthBuffer;
 Texture2D PrevGBufferA;
 Texture2D PrevGBufferB;
 // There is intentionally no PrevScreenToView, because the all point of is to avoid full matrix computation in inner loops.
+
+#if CONFIG_METADATA_BUFFER_LAYOUT == METADATA_BUFFER_LAYOUT_FED_DEPTH_SHADINGMODEL
+
+Texture2D<float> CompressedMetadata_0;
+Texture2D<uint> CompressedMetadata_1;
+
+Texture2D<float> PrevCompressedMetadata_0;
+Texture2D<uint> PrevCompressedMetadata_1;
+
+#else
 
 Texture2D<uint> CompressedMetadata_0;
 Texture2D<uint> CompressedMetadata_1;
 
 Texture2D<uint> PrevCompressedMetadata_0;
 Texture2D<uint> PrevCompressedMetadata_1;
+
+#endif
 
 #if DEBUG_OUTPUT
 RWTexture2D<float4> DebugOutput;
@@ -150,12 +165,12 @@ float4x4 GetScreenToViewDistanceMatrix()
 	// NOP
 
 #elif SPHERICAL_HARMONIC_ORDER == 2
-typedef FTwoBandSHVector FSSDSphericalHarmonic;
-typedef FTwoBandSHVectorRGB FSSDSphericalHarmonicRGB;
+#define FSSDSphericalHarmonic FTwoBandSHVector
+#define FSSDSphericalHarmonicRGB FTwoBandSHVectorRGB
 
 #elif SPHERICAL_HARMONIC_ORDER == 3
-typedef FThreeBandSHVector FSSDSphericalHarmonic;
-typedef FThreeBandSHVectorRGB FSSDSphericalHarmonicRGB;
+#define FSSDSphericalHarmonic FThreeBandSHVector
+#define FSSDSphericalHarmonicRGB FThreeBandSHVectorRGB
 
 #else
 	#error Unknown spherical harmonic configuration.
@@ -180,7 +195,7 @@ float ComputeAnisotropyInvFactor(FSSDSampleSceneInfos SceneMetadata)
 float ComputeWorldBluringRadiusCausedByPixelSize(FSSDSampleSceneInfos SceneMetadata)
 {
 	// Should be multiplied 0.5* for the diameter to radius, and by 2.0 because GetTanHalfFieldOfView() cover only half of the pixels.
-	return WorldDepthToPixelWorldRadius * GetWorldDepth(SceneMetadata);
+	return GetDepthPixelRadiusForProjectionType(GetWorldDepth(SceneMetadata));
 }
 
 /** Convert to bilateral world distance. */
@@ -207,7 +222,21 @@ uint2 BufferUVToBufferPixelCoord(float2 SceneBufferUV)
 
 float2 DenoiserBufferUVToScreenPosition(float2 SceneBufferUV)
 {
-	return SceneBufferUV * BufferUVToScreenPosition.xy + BufferUVToScreenPosition.zw;
+	return SceneBufferUV * SceneBufferUVToScreenPosition.xy + SceneBufferUVToScreenPosition.zw;
+}
+
+FSSDCompressedSceneInfos MaterialToCompressedSceneMetadata(float Depth, float3 WorldNormal, float Roughness, uint ShadingID)
+{
+	FSSDCompressedSceneInfos CompressedMetadata = CreateCompressedSceneInfos();
+
+	CompressedMetadata.VGPR[0] = asuint(Depth);
+	CompressedMetadata.VGPR[1] = asuint(WorldNormal.x);
+	CompressedMetadata.VGPR[2] = asuint(WorldNormal.y);
+	CompressedMetadata.VGPR[3] = asuint(WorldNormal.z);
+	CompressedMetadata.VGPR[4] = asuint(Roughness);
+	CompressedMetadata.VGPR[5] = ShadingID;
+
+	return CompressedMetadata;
 }
 
 FSSDCompressedSceneInfos SampleCompressedSceneMetadata(
@@ -215,31 +244,67 @@ FSSDCompressedSceneInfos SampleCompressedSceneMetadata(
 	float2 BufferUV, uint2 PixelCoord)
 #if CONFIG_METADATA_BUFFER_LAYOUT == METADATA_BUFFER_LAYOUT_DISABLED
 {
-	FSSDCompressedSceneInfos CompressedMetadata = CreateCompressedSceneInfos();
-
+  #if SUBSTRATE_ENABLED
+	float SceneDepth = 0;
 	if (bPrevFrame)
 	{
-		// TODO(Denoiser): so what to do with mip level of these guys?
-		float WorldSceneDepth = ConvertFromDeviceZ(PrevDepthBuffer.SampleLevel(GlobalPointClampedSampler, BufferUV, 0).r);
-		float3 WorldNormal = DecodeNormal(PrevGBufferA.SampleLevel(GlobalPointClampedSampler, BufferUV, 0).rgb);
-		float Roughness = PrevGBufferB.SampleLevel(GlobalPointClampedSampler, BufferUV, 0).b;
-
-		CompressedMetadata.VGPR[0] = asuint(WorldSceneDepth);
-		CompressedMetadata.VGPR[1] = asuint(WorldNormal.x);
-		CompressedMetadata.VGPR[2] = asuint(WorldNormal.y);
-		CompressedMetadata.VGPR[3] = asuint(WorldNormal.z);
-		CompressedMetadata.VGPR[4] = asuint(Roughness);
+		SceneDepth = ConvertFromDeviceZ(PrevDepthBuffer.SampleLevel(GlobalPointClampedSampler, BufferUV, 0).r);
 	}
 	else
 	{
-		float DeviceZ = SampleDeviceZFromSceneTextures(BufferUV);
-		FGBufferData GBufferData = GetGBufferDataFromSceneTextures(BufferUV);
-		
-		CompressedMetadata.VGPR[0] = asuint(GBufferData.Depth);
-		CompressedMetadata.VGPR[1] = asuint(GBufferData.WorldNormal.x);
-		CompressedMetadata.VGPR[2] = asuint(GBufferData.WorldNormal.y);
-		CompressedMetadata.VGPR[3] = asuint(GBufferData.WorldNormal.z);
-		CompressedMetadata.VGPR[4] = asuint(GBufferData.Roughness);
+		SceneDepth = ConvertFromDeviceZ(SampleDeviceZFromSceneTextures(BufferUV));
+	}
+
+	// SUBSTRATE_TODO: Manage bPrevFrame
+	const FSubstrateTopLayerData TopLayerData = SubstrateUnpackTopLayerData(Substrate.TopLayerTexture.Load(uint3(PixelCoord, 0)));
+	return MaterialToCompressedSceneMetadata(SceneDepth, TopLayerData.WorldNormal, TopLayerData.Roughness, IsSubstrateMaterial(TopLayerData) ? SHADINGMODELID_SUBSTRATE : SHADINGMODELID_UNLIT);
+  #else // SUBSTRATE_ENABLED
+	FGBufferData GBufferData;
+	if (bPrevFrame)
+	{
+		float DeviceZ = PrevDepthBuffer.SampleLevel(GlobalPointClampedSampler, BufferUV, 0).r;
+
+		uint CustomStencil = 0;
+		float CustomNativeDepth = 0;
+
+		float SceneDepth = ConvertFromDeviceZ(DeviceZ);
+
+		float4 GBufferA = PrevGBufferA.SampleLevel(GlobalPointClampedSampler, BufferUV, 0);
+		float4 GBufferB = PrevGBufferB.SampleLevel(GlobalPointClampedSampler, BufferUV, 0);
+		float4 GBufferC = 0.0;
+		float4 GBufferD = 0.0;
+		float4 GBufferE = 0.0;
+		float4 GBufferF = 0.5f;
+		float4 GBufferVelocity = 0.0;
+
+		bool bGetNormalizedNormal = false;
+
+		GBufferData = DecodeGBufferData(
+			GBufferA, GBufferB, GBufferC, GBufferD, GBufferE, GBufferF, GBufferVelocity,
+			CustomNativeDepth, CustomStencil, SceneDepth, bGetNormalizedNormal, CheckerFromSceneColorUV(BufferUV));
+	}
+	else
+	{
+		GBufferData = GetGBufferDataFromSceneTextures(BufferUV);	
+	}
+	return MaterialToCompressedSceneMetadata(GBufferData.Depth, GBufferData.WorldNormal, GBufferData.Roughness, GBufferData.ShadingModelID);
+  #endif  // SUBSTRATE_ENABLED
+}
+#elif CONFIG_METADATA_BUFFER_LAYOUT == METADATA_BUFFER_LAYOUT_FED_DEPTH_SHADINGMODEL
+{
+	FSSDCompressedSceneInfos CompressedMetadata = CreateCompressedSceneInfos();
+
+	int3 Coord = int3(PixelCoord, /* MipLevel = */ 0);
+
+	if (bPrevFrame)
+	{
+		CompressedMetadata.VGPR[0] = asuint(PrevCompressedMetadata_0.Load(Coord));
+		CompressedMetadata.VGPR[1] = PrevCompressedMetadata_1.Load(Coord);
+	}
+	else
+	{
+		CompressedMetadata.VGPR[0] = asuint(CompressedMetadata_0.Load(Coord));
+		CompressedMetadata.VGPR[1] = CompressedMetadata_1.Load(Coord);
 	}
 
 	return CompressedMetadata;
@@ -248,10 +313,16 @@ FSSDCompressedSceneInfos SampleCompressedSceneMetadata(
 {
 	FSSDCompressedSceneInfos CompressedMetadata = CreateCompressedSceneInfos();
 
-	Texture2D<uint> CompressedMetadata0 = bPrevFrame ? PrevCompressedMetadata_0 : CompressedMetadata_0; 
-
 	int3 Coord = int3(PixelCoord, /* MipLevel = */ 0);
-	CompressedMetadata.VGPR[0] = CompressedMetadata0.Load(Coord);
+
+	if (bPrevFrame)
+	{
+		CompressedMetadata.VGPR[0] = PrevCompressedMetadata_0.Load(Coord);
+	}
+	else
+	{
+		CompressedMetadata.VGPR[0] = CompressedMetadata_0.Load(Coord);
+	}
 	
 	return CompressedMetadata;
 }

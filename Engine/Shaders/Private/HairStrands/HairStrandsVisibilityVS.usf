@@ -1,7 +1,5 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "HairStrandsVisibilityCommonStruct.ush"
-
 #include "../Common.ush"
 #include "../VelocityCommon.ush"
 #include "/Engine/Generated/Material.ush"
@@ -11,7 +9,7 @@
 struct FHairVisibilityAccumulateVSToPS
 {
 #if HAIR_RENDER_MODE == RENDER_MODE_MSAA_VISIBILITY
-	nointerpolation uint HairPrimitiveId : HAIR_PRIMITIVE_ID;
+	nointerpolation uint HairControlPointId : HAIR_PRIMITIVE_ID;
 #else
 	FVertexFactoryInterpolantsVSToPS FactoryInterpolants;
 #endif
@@ -19,9 +17,9 @@ struct FHairVisibilityAccumulateVSToPS
 #if HAIR_RENDER_MODE != RENDER_MODE_MSAA_VISIBILITY
 	float WorldStrandRadius : TEXCOORD8;
 #endif
-#if HAIR_RENDER_MODE == RENDER_MODE_MSAA || HAIR_RENDER_MODE == RENDER_MODE_PPLL
-	float4 PackedVelocityA : TEXCOORD9;
-	float4 PackedVelocityC : TEXCOORD12;
+#if HAIR_RENDER_MODE == RENDER_MODE_PPLL
+	INVARIANT_OUTPUT float4 PackedVelocityA : TEXCOORD9;
+	INVARIANT_OUTPUT float4 PackedVelocityC : TEXCOORD12;
 #endif
 };
 
@@ -31,7 +29,6 @@ struct FHairVisibilityAccumulateVSToPS
 
 void Main(
 	FVertexFactoryInput Input,
-	OPTIONAL_VertexID
 	out VS_OUTPUT_TYPE Output
 )
 #if HAIR_RENDER_MODE == RENDER_MODE_MSAA_VISIBILITY && HAIR_STRAND_MESH_FACTORY
@@ -48,10 +45,10 @@ void Main(
 	HairViewInfo.RadiusAtDepth1 = lerp(HairRenderInfo.RadiusAtDepth1Primary, HairRenderInfo.RadiusAtDepth1Velocity, VelocityScale);
 	HairViewInfo.bIsOrthoView = HairRenderInfo.bIsOrthoView;
 
-	uint HairPrimitiveId = 0;
-	const float4 WorldPosition = VertexFactoryGetWorldPosition_Visibility(Input, HairViewInfo, HairPrimitiveId);
+	uint HairControlPointId = 0;
+	const float4 WorldPosition = VertexFactoryGetWorldPosition_Visibility(Input, HairViewInfo, HairControlPointId);
 	Output.Position = mul(WorldPosition, View.TranslatedWorldToClip);
-	Output.HairPrimitiveId = HairPrimitiveId;
+	Output.HairControlPointId = HairControlPointId;
 }
 #else // HAIR_RENDER_MODE == RENDER_MODE_MSAA_VISIBILITY
 {
@@ -77,7 +74,7 @@ void Main(
 	// The higher the velocity, the larger a strand becomes.
 	float VelocityScale = 0;
 	const FHairRenderInfo HairRenderInfo = GetHairRenderInfo(ResolvedView.HairRenderInfo, ResolvedView.HairRenderInfoBits, bUseStableRasterization);
-	#if HAIR_RENDER_MODE == RENDER_MODE_MSAA || HAIR_RENDER_MODE == RENDER_MODE_PPLL
+	#if HAIR_RENDER_MODE == RENDER_MODE_PPLL
 	{
 		const float4 PrevWorldPosition	= VertexFactoryGetPreviousWorldPosition(Input, VFIntermediates);
 		const float4 ScreenPos			= mul(float4(WorldPositionRaw.xyz, 1), ResolvedView.TranslatedWorldToClip);
@@ -118,7 +115,7 @@ void Main(
 	Output.Position = mul(WorldPosition, View.TranslatedWorldToClip);
 
 #if HAIR_RENDER_MODE == RENDER_MODE_MSAA_VISIBILITY
-	Output.HairPrimitiveId = VFIntermediates.HairPrimitiveId;
+	Output.HairControlPointId = VFIntermediates.HairControlPointId;
 #else
 	Output.FactoryInterpolants = VertexFactoryGetInterpolantsVSToPS(Input, VFIntermediates, VertexParameters);
 
@@ -128,8 +125,6 @@ void Main(
 	Output.WorldStrandRadius = 1;
   #endif
 #endif
-
-	OutputVertexID( Output );
 }
 #endif // HAIR_RENDER_MODE == RENDER_MODE_MSAA_VISIBILITY
 

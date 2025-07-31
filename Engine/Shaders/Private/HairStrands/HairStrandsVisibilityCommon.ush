@@ -3,16 +3,18 @@
 #pragma once
 
 // Render modes
-#define RENDER_MODE_MSAA 0
-#define RENDER_MODE_TRANSMITTANCE 1
-#define RENDER_MODE_PPLL 2
-#define RENDER_MODE_MSAA_VISIBILITY 3
-#define RENDER_MODE_TRANSMITTANCE_AND_HAIRCOUNT 4
+#define RENDER_MODE_TRANSMITTANCE 0
+#define RENDER_MODE_PPLL 1
+#define RENDER_MODE_MSAA_VISIBILITY 2
+#define RENDER_MODE_TRANSMITTANCE_AND_HAIRCOUNT 3
+#define RENDER_MODE_COMPUTE_RASTER 4
 
 #define INVALID_TILE_OFFSET ~0
 
 #define HAIR_VISIBILITY_GROUP_COUNT_WIDTH 64
 
+#include "../PackUnpack.ush"
+#include "/Engine/Shared/HairStrandsDefinitions.h"
 #include "HairStrandsVisibilityCommonStruct.ush"
 
  ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -109,38 +111,8 @@ float2 UnpackVelocity(uint PackedVelocity)
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-// Hair samples
-
-// Footprint: 128bits | 16bytes
-// Option to reduce the footprint: 
-// * we don't use PrimitiveID at the moment which is encoded on 3bytes
-// * Deferred the evaluation of Coverage & material properties into some other pass?
-
-struct FPackedHairSample
-{
-	float Depth;
-	uint  PrimitiveID_MacroGroupID;
-	uint  Tangent_Coverage8bit;
-	uint  BaseColor_Roughness;
-	uint  Specular_LightChannels_Backlit;
-};
-
-struct FHairSample
-{
-	float	Depth;
-	float3	Tangent;
-	uint	Coverage8bit;
-	uint	PrimitiveId;
-	uint	MacroGroupId;
-	float3	BaseColor;
-	float	Roughness;
-	float	Specular;
-	float	Backlit;
-	uint	LightChannelMask;
-	bool	bScatterSceneLighting;
-	float3  Emissive;
-};
-
+// Node Desc
+// 
 // * Max 67,108,864 total nodes (This is 32 nodes per pixel at 1080p if all pixel were covered)
 // * Max 63 nodes per pixel
 // 26bits for offset | 6 bits for count (max 63 nodes)
@@ -164,6 +136,111 @@ FNodeDesc DecodeNodeDesc(uint In)
 	return Out;
 }
 
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// Hair Vis
+
+uint PackHairVisDepthCoverage(float InDepth, float InCoverage)
+{
+	return (uint(InDepth * 0x00FFFFFF) << 8) | uint(0xFFu * saturate(InCoverage));
+}
+
+uint PackHairVisDepthCoverage(float InDepth, uint InCoverage8bits)
+{
+	return (uint(InDepth * 0x00FFFFFF) << 8) | min(0xFFu, InCoverage8bits);
+}
+
+uint PackHairVisControlPointMaterialId(uint ControlPointId, uint MaterialId)
+{
+	return (ControlPointId & 0x00FFFFFF) | ((MaterialId & 0xFF) << 24);
+}
+
+uint UnpackHairVisControlPointId(uint RawVis)
+{
+	return RawVis & 0x00FFFFFF;
+}
+
+uint UnpackHairVisMaterialId(uint RawVis)
+{
+	return (RawVis >> 24) & 0xFF;
+}
+
+float UnpackHairVisDepth(uint InPacked)
+{
+	return float(InPacked >> 8) / float(0x00FFFFFF);
+}
+
+float UnpackHairVisCoverage(uint InPacked)
+{
+	return float(InPacked & 0xFF) / float(0xFF);
+}
+
+uint UnpackHairVisCoverage8bits(uint InPacked)
+{
+	return InPacked & 0xFF;
+}
+
+uint GetInvalidHairControlPointId()
+{
+	return 0xFFFFFFFF;
+}
+
+void PatchPackedHairVisCoverage(inout FPackedHairVis Out, uint Coverage8bit)
+{
+	Out.Depth_Coverage8bit = (Out.Depth_Coverage8bit & (0x00FFFFFFu << 8)) | (Coverage8bit & 0xFFu);
+}
+
+struct FHairVis
+{
+	float	Depth;
+	float   Coverage;	  // Coverage in float point, but with 8-bits precision. For convenience.
+	uint	Coverage8bit;
+	uint	ControlPointId;
+	uint	MaterialId;
+};
+
+FPackedHairVis PackHairVis(const FHairVis In)
+{
+	FPackedHairVis Out;
+	Out.Depth_Coverage8bit	   = PackHairVisDepthCoverage(In.Depth, In.Coverage8bit);
+	Out.ControlPointID_MaterialID = PackHairVisControlPointMaterialId(In.ControlPointId, In.MaterialId);
+	return Out;
+}
+
+FHairVis UnpackHairVis(const FPackedHairVis In)
+{
+	FHairVis Out;
+	Out.Depth		 = UnpackHairVisDepth(In.Depth_Coverage8bit);
+	Out.Coverage8bit = UnpackHairVisCoverage8bits(In.Depth_Coverage8bit);
+	Out.Coverage	 = float(Out.Coverage8bit) / float(0xFF);
+	Out.ControlPointId= UnpackHairVisControlPointId(In.ControlPointID_MaterialID);
+	Out.MaterialId	 = UnpackHairVisMaterialId(In.ControlPointID_MaterialID);
+
+	return Out;
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// Hair sample
+
+// Footprint: 128bits | 16bytes
+// Option to reduce the footprint: 
+// * we don't use ControlPointId at the moment which is encoded on 3bytes
+// * Deferred the evaluation of Coverage & material properties into some other pass?
+struct FHairSample
+{
+	float	Depth;
+	float3	Tangent;
+	uint	Coverage8bit;
+	uint	ControlPointId;
+	uint	MacroGroupId;
+	float3	BaseColor;
+	float	Roughness;
+	float	Specular;
+	float	Backlit;
+	uint	LightChannelMask;
+	float3	Emissive;
+	uint	Flags;
+};
+
 FPackedHairSample PackHairSample(const FHairSample In)
 {
 	FPackedHairSample Out;
@@ -173,25 +250,23 @@ FPackedHairSample PackHairSample(const FHairSample In)
 	// Coverage is clamped o 255 as we only have 8 bits to store its value
 	const float3 T = saturate(EncodeTangent(In.Tangent));
 	Out.Tangent_Coverage8bit =
-		((0xFF & uint(T.x * 255)))      | 
-		((0xFF & uint(T.y * 255)) << 8) |
-		((0xFF & uint(T.z * 255)) << 16)| 
+		PackRGBA8(float4(T,0)) |
 		(min(uint(0xFF), In.Coverage8bit) << 24);
 
-	// PrimitiveId and MacroGroupId
+	// ControlPointId and MacroGroupId
 	// Encode into 1 x 32bits uint
-	// PrimitiveId is on 28bits | MacroGroupId is on 4bits
-	Out.PrimitiveID_MacroGroupID = 
-		((In.PrimitiveId  & 0x0FFFFFFF)) |
-		((In.MacroGroupId & 0xF) << 28);
+	// ControlPointId is on 28bits | MacroGroupId is on 4bits
+	Out.ControlPointID_MacroGroupID = 
+		((In.ControlPointId  & 0x0FFFFFFF)) |
+		((In.MacroGroupId & 0xF) << 28); // If this encoding change, ensure it conforms to MAX_HAIR_MACROGROUP_COUNT
 
 	Out.Depth					= In.Depth;																			// 32bits float
 	Out.BaseColor_Roughness		= float4ToUint(float4(sqrt(In.BaseColor), In.Roughness));							// 32bits uint
-	Out.Specular_LightChannels_Backlit = 
-		clamp(uint(In.Specular * 0xFF), 0, 0xFF) | 
-		((In.LightChannelMask & 0x7) << 8)  | 
-		((In.bScatterSceneLighting ? 1 : 0) << 12) |
-		(clamp(uint(In.Backlit * 0xFF), 0, 0xFF) << 16);
+	Out.Data 					= 
+		(PackR8(In.Specular)              )| 
+		(PackR8(In.Backlit)          <<  8)| 
+		((In.Flags & 0xFF)           << 16)|
+		((In.LightChannelMask & 0x7) << 24);
 
 	// Emissive is not packed/unpacked
 	return Out;
@@ -202,22 +277,19 @@ FHairSample UnpackHairSample(const FPackedHairSample In)
 	FHairSample Out;
 	Out.Depth = In.Depth;
 
-	Out.Tangent = DecodeTangent(float3(
-		float((In.Tangent_Coverage8bit)       & 0xFF) / 255.f,
-		float((In.Tangent_Coverage8bit >> 8)  & 0xFF) / 255.f,
-		float((In.Tangent_Coverage8bit >> 16) & 0xFF) / 255.f));
+	Out.Tangent 	 = DecodeTangent(UnpackRGBA8(In.Tangent_Coverage8bit).xyz);
 	Out.Coverage8bit = (In.Tangent_Coverage8bit >> 24) & 0xFF;
 
-	Out.PrimitiveId  = In.PrimitiveID_MacroGroupID & 0x0FFFFFFF;
-	Out.MacroGroupId = (In.PrimitiveID_MacroGroupID>>28) & 0xF;
+	Out.ControlPointId  = In.ControlPointID_MacroGroupID & 0x0FFFFFFF;
+	Out.MacroGroupId = (In.ControlPointID_MacroGroupID>>28) & 0xF; // If this encoding change, ensure it conforms to MAX_HAIR_MACROGROUP_COUNT
 
 	const float4 BaseColorAndRoughness = UintToFloat4(In.BaseColor_Roughness);
 	Out.BaseColor			= BaseColorAndRoughness.xyz * BaseColorAndRoughness.xyz;
 	Out.Roughness			= BaseColorAndRoughness.w;
-	Out.Specular			= float(0xFF & In.Specular_LightChannels_Backlit) / 0xFF;
-	Out.LightChannelMask	= (In.Specular_LightChannels_Backlit >>8) & 0x7;
-	Out.Backlit				= float(0xFF & (In.Specular_LightChannels_Backlit>>16)) / 0xFF;
-	Out.bScatterSceneLighting = (In.Specular_LightChannels_Backlit & (1<<12)) > 0;
+	Out.Specular			= UnpackR8(In.Data & 0xFF);
+	Out.Backlit				= UnpackR8((In.Data>>8) & 0xFF);
+	Out.Flags 				= (In.Data>>16) & 0xFF;
+	Out.LightChannelMask	= (In.Data>>24) & 0x7;
 
 	// Emissive is not packed/unpacked
 	return Out;
@@ -233,39 +305,19 @@ uint GetPackedHairSampleCoverage8bit(in FPackedHairSample In)
 	return 0xFF & (In.Tangent_Coverage8bit>>24);
 }
 
+uint2 GetHairSampleResolution(uint InNodeCount)
+{
+	uint Resolution = ceil(sqrt(InNodeCount));
+	return uint2(Resolution, Resolution);
+}
+
+uint2 GetHairSampleCoord(uint InLinearCoord, uint2 InResolution)
+{
+	return uint2(InLinearCoord % InResolution.x, InLinearCoord / InResolution.x);
+}
+
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-// Hair categorization
-
-// Rename FHairCatetorizationData
-struct FCategorizationData
-{
-	uint  TotalCoverage8bit;
-	uint  SampleCount;
-	float PixelCoverage;
-	float ClosestDepth;
-};
-
-uint4 EncodeCategorizationData(FCategorizationData Data)
-{
-	const uint ClosestDepthUint = asuint(Data.ClosestDepth);
-	const uint ClosestDepthLow  = ClosestDepthUint & 0xFFFF;
-	const uint ClosestDepthHigh	= (ClosestDepthUint >> 16) & 0xFFFF;
-	const uint ComponentX		= min(Data.TotalCoverage8bit, uint(0xFF)) | ((Data.SampleCount & 0xFF)<<8);
-	return uint4(ComponentX, f32tof16(Data.PixelCoverage), ClosestDepthLow, ClosestDepthHigh);
-}
-
-FCategorizationData DecodeCategorizationData(uint4 Data)
-{
-	FCategorizationData Out;
-	Out.TotalCoverage8bit		= Data.x & 0xFF;
-	Out.SampleCount				=(Data.x>>8) & 0xFF;
-	Out.PixelCoverage			= f16tof32(Data.y);
-	const uint ClosestDepthLow	= Data.z & 0xFFFF;
-	const uint ClosestDepthHigh	=(Data.w & 0xFFFF) << 16;
-	Out.ClosestDepth			= asfloat(ClosestDepthHigh | ClosestDepthLow);
-
-	return Out;
-}
+// Hair velocity
 
 // Return true if the underlying pixel need to run with TAA fast resolve. This is the case when 
 // the velocity is larger than a certain threshold.
@@ -291,8 +343,8 @@ struct FHairRenderInfo
 	float RadiusAtDepth1Velocity;
 	float VelocityMagnitudeScale;
 
-	bool bIsOrthoView;
 	bool bIsGPUDriven;
+	bool bIsOrthoView; // Only used for shadow view
 
 	float3 ViewForward;
 	float3 TranslatedWorldCameraOrigin;
@@ -317,7 +369,7 @@ struct FHairViewInfo
 	float3 TranslatedWorldCameraOrigin;
 	float3 ViewForward;
 	float  RadiusAtDepth1;
-	bool	bIsOrthoView;
+	bool   bIsOrthoView;
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -331,125 +383,45 @@ float TransmittanceToCoverage(float InTransmittance, float InCoverageThreashold)
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // Hair PPLL
 
-uint GetCoverage8Bits(FPPLLNodeData In)
-{
-	return (In.Tangent_Coverage8bit >> 24) & 0xFF;
-}
-
-uint GetCoverage16Bits(FPPLLNodeData In)
-{
-	return (In.Specular_LightChannel_Backlit_Coverage16bit >> 16) & 0xFFFF;
-}
-
-FPPLLNodeData CreatePPLLNodeData(
+FPackedHairVisPPLL PackHairVisPPLL(
 	float	Depth, 
-	uint	PrimitiveId,
-	uint	MacroGroupId,
-	float3	Tangent,
-	float	CoverageFullPrecision, 
-	uint	Coverage8bit,
-	float3	BaseColor,
-	float	Roughness, 
-	float	Specular, 
-	float	Backlit, 
-	uint	LightChannelMask, 
-	float2	Velocity, 
+	float	Coverage,
+	uint	ControlPointId,
+	uint	MaterialId,
 	uint	NextNodeIndex)
 {
-	FHairSample S;
+	FHairVis S;
 	S.Depth = Depth;
-	S.PrimitiveId = PrimitiveId;
-	S.MacroGroupId = MacroGroupId;
-	S.Tangent = Tangent;
-	S.Coverage8bit = Coverage8bit;
-	S.BaseColor = BaseColor;
-	S.Roughness = Roughness;
-	S.Specular = 0;			// Custom encoding for PPLL
-	S.Backlit = 0;			// Custom encoding for PPLL
-	S.LightChannelMask = 0; // Custom encoding for PPLL
-	
-	const FPackedHairSample PackedS = PackHairSample(S);
-	const uint Coverage16bit = To16bitCoverage(CoverageFullPrecision);
+	S.Coverage8bit = To8bitCoverage(Coverage); // To16bitCoverage(CoverageFullPrecision)
+	S.ControlPointId = ControlPointId;
+	S.MaterialId = MaterialId;
+	const FPackedHairVis PackedS = PackHairVis(S);
 
-	FPPLLNodeData Out;
-	Out.Depth = PackedS.Depth;
-	Out.PrimitiveID_MacroGroupID = PackedS.PrimitiveID_MacroGroupID;
-	Out.Tangent_Coverage8bit = PackedS.Tangent_Coverage8bit;
-	Out.BaseColor_Roughness = PackedS.BaseColor_Roughness;
-	Out.Specular_LightChannel_Backlit_Coverage16bit = clamp(uint(Specular * 0xFF), 0, 0xFF) |  (clamp(uint(Backlit * 0x1F), 0, 0x1F)<<11) | ((LightChannelMask & 0x7)<<8) |  ((0xFFFF & Coverage16bit) << 16);
+	FPackedHairVisPPLL Out;
+	Out.Depth_Coverage8bit = PackedS.Depth_Coverage8bit;
+	Out.ControlPointID_MaterialID = PackedS.ControlPointID_MaterialID;
 	Out.NextNodeIndex = NextNodeIndex;
-	Out.PackedVelocity = PackVelocity(Velocity);
-
 	return Out;
 }
 
-FPackedHairSample ConvertToPackedHairSample(FPPLLNodeData In, uint InNewCoverage8bit)
+FHairVis UnpackHairVisPPLL(FPackedHairVisPPLL In)
 {
-	const uint Specular_LightChannel = In.Specular_LightChannel_Backlit_Coverage16bit & 0x7FF;
-	const float Backlit = float((In.Specular_LightChannel_Backlit_Coverage16bit >> 11) & 0x1F) / float(0x1F);
+	FPackedHairVis Temp;
+	Temp.Depth_Coverage8bit = In.Depth_Coverage8bit;
+	Temp.ControlPointID_MaterialID = In.ControlPointID_MaterialID;
+	return UnpackHairVis(Temp);
+}
 
-	FPackedHairSample Out;
-	Out.Depth = In.Depth;
-	Out.PrimitiveID_MacroGroupID = In.PrimitiveID_MacroGroupID;
-	Out.Tangent_Coverage8bit = (In.Tangent_Coverage8bit & 0x00FFFFFF) | ((InNewCoverage8bit & 0xFF)<<24);
-	Out.BaseColor_Roughness = In.BaseColor_Roughness;
-	Out.Specular_LightChannels_Backlit = Specular_LightChannel | (clamp(uint(Backlit * 0xFF), 0, 0xFF) << 16);
-
+FPackedHairVis ConvertToPackedHairVis(FPackedHairVisPPLL In)
+{
+	FPackedHairVis Out;
+	Out.Depth_Coverage8bit = In.Depth_Coverage8bit;
+	Out.ControlPointID_MaterialID = In.ControlPointID_MaterialID;
 	return Out;
 }
 
  ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
- // Hair visibility buffer 
-
-// Renamed into FHairNodeVisFat
-struct FNodeVis // 128 bit aligments. TODO: Move the coverage computation into the material evaluation for saving 64 bits? 
-{
-	float Depth;		// 32 bits
-	uint  PrimitiveId;	// 32 bits
-	uint  MaterialId;	//  8 bits : this could be packed into a the 3 high bits of PrimitiveId: up to 8 material on screen
-	uint  Coverage8bit;	//  8 bits
-};
-
-struct FHairVisSample
-{
-	uint PrimitiveId;
-	uint MaterialId;
-};
-
-uint GetInvalidHairPrimitiveId()
-{
-return 0xFFFFFFFF;
-}
-
-uint PackHairVisSample(uint PrimitiveId, uint MaterialId)
-{
-	return (PrimitiveId & 0x0FFFFFFF) | ((MaterialId & 0xF) << 28);
-}
-
-FHairVisSample UnpackHairVisSample(uint RawVis)
-{
-	FHairVisSample Out;
-	Out.PrimitiveId = RawVis & 0x0FFFFFFF;
-	Out.MaterialId = (RawVis >> 28) & 0xF;
-	return Out;
-}
- 
-// Pack depth & coverage within a uint32
-uint PackHairVisSampleDepth(float InDepth, float InCoverage)
-{
-	//return asuint(Depth);
-	return (uint(InDepth * 0x00FFFFFF) << 8) | uint(0xFF * saturate(InCoverage));
-}
-
-// Unpack depth & coverage from a uint32
-float2 UnpackHairVisSampleDepth(uint InPacked)
-{
-	//return asfloat(InPacked);
-	float OutDepth = float(InPacked >> 8) / float(0x00FFFFFF);
-	float OutCoverage = float(InPacked & 0xFF) / float(0xFF);
-
-	return float2(OutDepth, OutCoverage);
-}
+ // Coverage and hair count
 
 uint PackCoverageAndHairCount(float InCoverage)
 {
@@ -463,68 +435,4 @@ float UnpackCoverageAndHairCount(uint InPacked)
 {
 	return float(InPacked) / 1000.f;
 }
-
- ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
- // Hair MSAA buffer 
-
-bool IsValidHairData(uint2 MRT0Data)
-{
-	const uint InvalidSample = GetInvalidHairPrimitiveId();// &0x0FFFFFFF; // PrimitiveId mask, see EncodeVisSample()
-	return MRT0Data.x != InvalidSample;
-}
-
-uint2 PackHairMRT0(uint PrimitiveId, uint MacroGroupId, uint Coverage8bit, float3 Tangent)
-{
-	uint2 Out;
-	Out.x =
-		((PrimitiveId & 0x0FFFFFFF)) |
-		((MacroGroupId & 0xF) << 28);
-
-	const float3 T = saturate(EncodeTangent(Tangent));
-	Out.y =
-		((0xFF & uint(T.x * 255))) |
-		((0xFF & uint(T.y * 255)) << 8) |
-		((0xFF & uint(T.z * 255)) << 16) |
-		(min(uint(0xFF), Coverage8bit) << 24);
-
-	return Out;
-}
-
-float4 PackHairMRT1(float3 BaseColor, float Roughness)
-{
-	return float4(sqrt(BaseColor), Roughness);
-}
-
-float4 PackHairMRT2(float Specular, uint LightChannelMask, float Backlit, bool bUseScatterSceneLighting)
-{
-	return float4(Specular, float(LightChannelMask) / 255.f, Backlit, bUseScatterSceneLighting? 1 : 0);
-}
-
-void UnpackHairMRT0(uint2 In, inout uint PrimitiveId, inout uint MacroGroupId, inout uint Coverage8bit, inout float3 Tangent)
-{
-	PrimitiveId  =  In.x & 0x0FFFFFFF;
-	MacroGroupId = (In.x >> 28) & 0xF;
-
-	Tangent = DecodeTangent(float3(
-		float((In.y) & 0xFF) / 255.f,
-		float((In.y >> 8) & 0xFF) / 255.f,
-		float((In.y >> 16) & 0xFF) / 255.f));
-	Coverage8bit = (In.y >> 24) & 0xFF;
-}
-
-void UnpackHairMRT1(float4 In, inout float3 BaseColor, inout float Roughness)
-{
-	// Cheap gamma encoding since this is encoded into 8bit target
-	BaseColor = In.xyz * In.xyz;
-	Roughness = In.w;
-}
-
-void UnpackHairMRT2(float4 In, inout float Specular, inout uint LightChannelMask, inout float Backlit, inout bool bUseScatterSceneLighting)
-{
-	Specular = In.x;
-	LightChannelMask = uint(In.y * 0xFF);
-	Backlit = In.z;
-	bUseScatterSceneLighting = In.w > 0;
-}
-
 

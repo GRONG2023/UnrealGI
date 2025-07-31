@@ -83,6 +83,13 @@
 	/** Compress depth and view normal. */
 	#define METADATA_BUFFER_LAYOUT_DEPTH_VIEWNORMAL 2
 
+	/** Compress depth shading model id. */
+	#define METADATA_BUFFER_LAYOUT_FED_DEPTH_SHADINGMODEL 3
+
+	/** Uncompressed translated world position and shading model id. */
+	#define METADATA_BUFFER_LAYOUT_WORLD_POS_SHADINGMODEL 4
+
+
 
 
 /** Layouts of the signal buffer. */
@@ -147,6 +154,16 @@
 	#define SIGNAL_BUFFER_LAYOUT_SSGI_HISTORY_R11G11B10 0xD301
 
 
+	/** Buffer layouts for Lumen diffuse indirect. */
+	#define SIGNAL_BUFFER_LAYOUT_LUMEN_DIFFUSE_INPUT 0xD400
+
+	#define SIGNAL_BUFFER_LAYOUT_LUMEN_DIFFUSE_HISTORY 0xD401
+
+
+	/** Buffer layouts for Lumen diffuse indirect. */
+	#define SIGNAL_BUFFER_LAYOUT_DIFFUSE_PROBE_HIERARCHY_INPUT 0xD500
+
+	#define SIGNAL_BUFFER_LAYOUT_DIFFUSE_PROBE_HIERARCHY_HISTORY 0xD501
 
 
 /** Defines how the signal is being processed. Matches C++'s ESignalProcessing. */
@@ -171,6 +188,9 @@
 	/** Diffuse indirect using spherical harmonic. */
 	#define SIGNAL_PROCESSING_SSGI 6
 
+	/** Diffuse indirect using spherical harmonic. */
+	#define SIGNAL_PROCESSING_DIFFUSE_PROBE_HIERARCHY 7
+
 
 
 /** Defines the color space bitfield. */
@@ -180,13 +200,6 @@
 
 	#define COLOR_SPACE_UNPREMULTIPLY 0x4
 	#define COLOR_SPACE_KARIS_WEIGHTING 0x8
-
-
-/** Light types */
-	#define LIGHT_TYPE_DIRECTIONAL 0
-	#define LIGHT_TYPE_POINT 1
-	#define LIGHT_TYPE_SPOT 2
-	#define LIGHT_TYPE_RECT 3
 
 
 /** Sets of sample available for the spatial kernel. */
@@ -219,6 +232,8 @@
 
 	#define SAMPLE_SET_DIRECTIONAL_RECT 14
 	#define SAMPLE_SET_DIRECTIONAL_ELLIPSE 15
+
+	#define SAMPLE_SET_RAW_EXPERIMENTAL_KERNEL 16
 
 
 /** Compression of signal for VGPR occupency. */
@@ -260,6 +275,7 @@
 	#define BILATERAL_TOKOYASHI_LOBE 0x0020
 	#define BILATERAL_TOKOYASHI_AXES 0x0040
 	#define BILATERAL_TOKOYASHI (BILATERAL_TOKOYASHI_LOBE | BILATERAL_TOKOYASHI_AXES)
+	#define BILATERAL_SHADING_MODEL 0x0080
 
 /** Bilateral settings presets for spatial kernels. */
 	// No bilateral settings.
@@ -279,6 +295,7 @@
 
 	#define BILATERAL_PRESET_AO 0x4001
 	#define BILATERAL_PRESET_AO_HISTORY 0x4002
+	#define BILATERAL_PRESET_PROBE_HIERARCHY 0xF000
 
 
 

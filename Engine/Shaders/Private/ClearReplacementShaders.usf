@@ -51,6 +51,12 @@
 
 	#elif RESOURCE_TYPE == 4
 	
+		RWStructuredBuffer<VALUE_TYPE> ClearResource;
+		#define ADDR(p) (p).x
+		#define COMP(a,b) ((a).x < (b).x)
+
+	#elif RESOURCE_TYPE == 5
+	
 		RWBuffer        <VALUE_TYPE> ClearResource;
 		#define ADDR(p) (p).x
 		#define COMP(a,b) ((a).x < (b).x)

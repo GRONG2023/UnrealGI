@@ -4,6 +4,8 @@
 	LocalVertexFactoryCommon.usf: Local vertex factory common functionality
 =============================================================================*/
 
+#define NEEDS_PER_INSTANCE_PARAMS ((USE_INSTANCING || USE_INSTANCE_CULLING) && (USES_PER_INSTANCE_FADE_AMOUNT || USES_SPEEDTREE || USE_DITHERED_LOD_TRANSITION || (!VF_USE_PRIMITIVE_SCENE_DATA && USES_PER_INSTANCE_CUSTOM_DATA)))
+
 struct FVertexFactoryInterpolantsVSToPS
 {
 	TANGENTTOWORLD_INTERPOLATOR_BLOCK
@@ -12,9 +14,9 @@ struct FVertexFactoryInterpolantsVSToPS
 	half4	Color : COLOR0;
 #endif
 
-#if USE_INSTANCING
-	// x = per-instance random, y = per-instance fade out amount, z = hide/show flag, w dither fade cutoff
-	float4  PerInstanceParams : COLOR1;
+#if NEEDS_PER_INSTANCE_PARAMS
+	// x = per-instance fade out amount, y = hide/show flag, z dither fade cutoff, w - CustomData index
+	nointerpolation float4  PerInstanceParams : COLOR1;
 #endif
 
 #if NUM_TEX_COORD_INTERPOLATORS
@@ -35,10 +37,32 @@ struct FVertexFactoryInterpolantsVSToPS
 	#if NEEDS_LIGHTMAP_COORDINATE
 		nointerpolation uint LightmapDataIndex : LIGHTMAP_ID;
 	#endif
+	#if USES_PER_INSTANCE_CUSTOM_DATA
+		nointerpolation uint CustomDataOffset : CUSTOM_DATA_OFFSET;
+		nointerpolation uint CustomDataCount : CUSTOM_DATA_COUNT;
+	#endif
 #endif
-#if HAIR_STRAND_MESH_FACTORY || HAIR_CARD_MESH_FACTORY
-	nointerpolation uint HairPrimitiveId	: HAIR_PRIMITIVE_ID; // Control point ID
-	float2 HairPrimitiveUV					: HAIR_PRIMITIVE_UV; // U: parameteric distance between the two surrounding control points. V: parametric distance along the width.
+#if NEEDS_PER_INSTANCE_RANDOM_PS
+	nointerpolation float PerInstanceRandom : PER_INSTANCE_RANDOM;
+#endif
+
+#if HAIR_STRAND_MESH_FACTORY
+	nointerpolation uint HairControlPointId			: HAIR_PRIMITIVE_ID;	// Control point ID
+	float2 HairPrimitiveUV							: HAIR_PRIMITIVE_UV;	// U: parameteric distance between the two surrounding control points. V: parametric distance along the width.
+#endif
+#if HAIR_CARD_MESH_FACTORY
+	float2 HairPrimitiveUV							: HAIR_PRIMITIVE_UV;	// Atlas UV
+	float2 HairPrimitiveRootUV						: HAIR_PRIMITIVE_ROOTUV;// UV at the root point of the cards
+	float4 HairPrimitiveMaterial					: HAIR_PRIMITIVE_MATERIAL;
+	float  HairPrimitiveLength						: HAIR_PRIMITIVE_LENGTH;
+	nointerpolation float HairPrimitiveGroupIndex	: HAIR_PRIMITIVE_GROUPINDEX;
+#endif
+
+#if HAS_INSTANCE_LOCAL_TO_WORLD_PS
+	nointerpolation float3x4 InstanceLocalToWorld : INSTANCE_LOCAL_TO_WORLD;
+#endif
+#if HAS_INSTANCE_WORLD_TO_LOCAL_PS
+	nointerpolation float3x4 InstanceWorldToLocal : INSTANCE_WORLD_TO_LOCAL;
 #endif
 };
 
@@ -150,3 +174,38 @@ void SetLightmapDataIndex(inout FVertexFactoryInterpolantsVSToPS Interpolants, u
 	Interpolants.LightmapDataIndex = LightmapDataIndex;
 #endif
 }
+
+#if HAS_INSTANCE_LOCAL_TO_WORLD_PS
+void SetInstanceLocalToWorld(inout FVertexFactoryInterpolantsVSToPS Interpolants, FDFMatrix InstanceLocalToWorld)
+{
+	float4x4 InstanceLocalToTranslatedWorld = DFFastToTranslatedWorld(InstanceLocalToWorld, ResolvedView.PrevPreViewTranslation);
+	float4x4 InstanceLocalToTranslatedWorldT = transpose(InstanceLocalToTranslatedWorld);
+	Interpolants.InstanceLocalToWorld[0] = InstanceLocalToTranslatedWorldT[0];
+	Interpolants.InstanceLocalToWorld[1] = InstanceLocalToTranslatedWorldT[1];
+	Interpolants.InstanceLocalToWorld[2] = InstanceLocalToTranslatedWorldT[2];
+}
+
+FDFMatrix GetInstanceLocalToWorld(FVertexFactoryInterpolantsVSToPS Interpolants)
+{
+	float4x4 InstanceLocalToTranslatedWorld = transpose(float4x4(Interpolants.InstanceLocalToWorld[0], Interpolants.InstanceLocalToWorld[1], Interpolants.InstanceLocalToWorld[2], float4(0.0f, 0.0f, 0.0f, 1.0f)));
+	return DFMultiplyTranslation(InstanceLocalToTranslatedWorld, DFNegate(ResolvedView.PrevPreViewTranslation));
+}
+#endif
+
+#if HAS_INSTANCE_WORLD_TO_LOCAL_PS
+
+void SetInstanceWorldToLocal(inout FVertexFactoryInterpolantsVSToPS Interpolants, FDFInverseMatrix InstanceWorldToLocal)
+{
+	float4x4 InstanceTranslatedWorldToLocal = DFFastToTranslatedWorld(InstanceWorldToLocal, ResolvedView.PrevPreViewTranslation);
+	float4x4 InstanceTranslatedWorldToLocalT = transpose(InstanceTranslatedWorldToLocal);
+	Interpolants.InstanceWorldToLocal[0] = InstanceTranslatedWorldToLocalT[0];
+	Interpolants.InstanceWorldToLocal[1] = InstanceTranslatedWorldToLocalT[1];
+	Interpolants.InstanceWorldToLocal[2] = InstanceTranslatedWorldToLocalT[2];
+}
+
+FDFInverseMatrix GetInstanceWorldToLocal(FVertexFactoryInterpolantsVSToPS Interpolants)
+{
+	float4x4 InstanceTranslatedWorldToLocal = transpose(float4x4(Interpolants.InstanceWorldToLocal[0], Interpolants.InstanceWorldToLocal[1], Interpolants.InstanceWorldToLocal[2], float4(0.0f, 0.0f, 0.0f, 1.0f)));
+	return DFMultiplyTranslation(ResolvedView.PrevPreViewTranslation, InstanceTranslatedWorldToLocal);
+}
+#endif

@@ -60,49 +60,59 @@ bool IsInVoxelBounds(float3 P, float3 MinP, float3 MaxP)
 #define INVALID_VOXEL_PAGE_INDEX 0xFFFFFFFF
 #define INVALID_MACRO_GROUP_ID 0xFF
 
-#define VOXEL_HAIR_MASK		0x00FFFFFF
-#define VOXEL_OPAQUE_MASK	0xFF000000
-#define VOXEL_OPAQUE_ADD	0xFF000000
-#define VOXEL_OPAQUE_SHIFT	24
+#define VOXEL_CAST_NO_SHADOW_MASK	0x80000000	// Bit mask for holding if the voxel does *not* cast hair shadow (i.e. cast only transmission). The invert/negative logic is for making hair voxelization more efficient.
+#define VOXEL_HAIR_MASK				0x00FFFFFF	// Bit mask for holding hair count/density
+#define VOXEL_OPAQUE_MASK			0x7F000000	// Bit mask for holding opaque geometry
+#define VOXEL_OPAQUE_ADD			0x7F000000
+#define VOXEL_OPAQUE_SHIFT			24
 
 struct FVirtualVoxelCommonDesc
 {
 	uint3  PageCountResolution;
-	float  VoxelWorldSize;
 	uint3  PageTextureResolution;
 	uint   PageResolution;
+	uint   PageResolutionLog2;
 };
 
 struct FVirtualVoxelNodeDesc
 {
-	float3	MinAABB;
-	float3	MaxAABB;
+	float3	TranslatedWorldMinAABB; // In translated world space
+	float3	TranslatedWorldMaxAABB; // In translated world space
 	uint3	PageIndexResolution;
 	uint3   VirtualResolution;
 	uint    PageIndexOffset;
+	float   VoxelWorldSize;
+	bool    bIsValid;
 };
 
 FVirtualVoxelNodeDesc UnpackVoxelNode(FPackedVirtualVoxelNodeDesc In, uint InPageResolution)
 {
 	FVirtualVoxelNodeDesc Out;
-	Out.MaxAABB = In.MaxAABB;
-	Out.MinAABB = In.MinAABB;
+	Out.TranslatedWorldMaxAABB = In.TranslatedWorldMaxAABB;
+	Out.TranslatedWorldMinAABB = In.TranslatedWorldMinAABB;
 	Out.PageIndexResolution = uint3(In.PackedPageIndexResolution & 0xFF, (In.PackedPageIndexResolution >> 8) & 0xFF, (In.PackedPageIndexResolution >> 16) & 0xFF);
 	Out.VirtualResolution = Out.PageIndexResolution * InPageResolution;
-	Out.PageIndexOffset = In.PageIndexOffset;
+	Out.PageIndexOffset = (In.PageIndexOffset_VoxelWorldSize & 0x3FFFFFu);
+	Out.VoxelWorldSize = ((In.PageIndexOffset_VoxelWorldSize >> 22u) & 0x3FFu) * 0.00977517106f; // Encode voxel world size [0..10] onto 10bits, i.e.: 10.f / 1023u
+	Out.bIsValid = all(Out.PageIndexResolution != 0);
 	return Out;
 }
 
 FPackedVirtualVoxelNodeDesc PackVoxelNode(FVirtualVoxelNodeDesc In)
 {
+	// Encode voxel world size [0..10] onto 10bits, i.e.: 10.f / 1023u
+	const float NormalizedVoxelWorldSize = min(In.VoxelWorldSize, 10.f) * 0.1f;
+
 	FPackedVirtualVoxelNodeDesc Out;
-	Out.MinAABB = In.MinAABB;
-	Out.MaxAABB = In.MaxAABB;
+	Out.TranslatedWorldMinAABB = In.TranslatedWorldMinAABB;
+	Out.TranslatedWorldMaxAABB = In.TranslatedWorldMaxAABB;
 	Out.PackedPageIndexResolution =
 		 (In.PageIndexResolution.x & 0xFF) | 
 		((In.PageIndexResolution.y & 0xFF)<<8) | 
 		((In.PageIndexResolution.z & 0xFF)<<16);
-	Out.PageIndexOffset = In.PageIndexOffset;
+	Out.PageIndexOffset_VoxelWorldSize =
+		(In.PageIndexOffset & 0x3FFFFFu) |
+		(uint(NormalizedVoxelWorldSize * 1023.f) << 22u);
 	return Out;
 }
 
@@ -161,21 +171,17 @@ float GetInternalVoxelHairCount(uint RawDensity)
 	return Raw / VoxelFixPointScale;
 }
 
-FHairTraversalResult GetHairVirtualVoxelDensity(uint3 InVoxelPageCoord, Texture3D<uint> InPageTexture, uint MipIndex, float DensityScale)
+FHairTraversalResult GetHairVirtualVoxelDensity(uint3 InVoxelPageCoord, Texture3D<uint> InPageTexture, uint MipIndex, float DensityScale, bool bCastShadow)
 {
 	FHairTraversalResult Out = InitHairTraversalResult();
 	const uint RawDensity = InPageTexture.Load(uint4(InVoxelPageCoord >> MipIndex, MipIndex));
-	Out.HairCount  = GetInternalVoxelHairCount(RawDensity) * DensityScale;
-	Out.Visibility = GetInternalVoxelOpaqueVisibility(RawDensity);
-	return Out;
-}
 
-FHairTraversalResult GetHairVoxelDensity(uint3 InVolumeCoord, Texture3D<uint> InDensityTexture, uint MipIndex, float DensityScale)
-{
-	FHairTraversalResult Out = InitHairTraversalResult();
-	const uint RawDensity = InDensityTexture.Load(int4(InVolumeCoord, MipIndex));
-	Out.HairCount = GetInternalVoxelHairCount(RawDensity) * DensityScale;
-	Out.Visibility = GetInternalVoxelOpaqueVisibility(RawDensity);
+	const bool bValid = !bCastShadow || (bCastShadow && (RawDensity & VOXEL_CAST_NO_SHADOW_MASK) == 0);
+	if (bValid)
+	{
+		Out.HairCount  = GetInternalVoxelHairCount(RawDensity) * DensityScale;
+		Out.Visibility = GetInternalVoxelOpaqueVisibility(RawDensity);
+	}
 	return Out;
 }
 

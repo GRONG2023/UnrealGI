@@ -1,153 +1,122 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-/*=============================================================================
-	DistanceFieldVisualization.usf
-=============================================================================*/
-
 #include "Common.ush"
+#include "Visualization.ush"
 #include "DeferredShadingCommon.ush"
 #include "DistanceFieldLightingShared.ush"
 #include "DistanceFieldAOShared.ush"
-#include "GlobalDistanceFieldShared.ush"
+#include "DistanceField/GlobalDistanceFieldShared.ush"
+#include "DistanceField/GlobalDistanceFieldUtils.ush"
+#include "ReflectionEnvironmentShared.ush"
 
 RWTexture2D<float4> RWVisualizeMeshDistanceFields;
 
-#define MAX_INTERSECTING_OBJECTS 1024
+#define MAX_INTERSECTING_OBJECTS 2048
 groupshared uint IntersectingObjectIndices[MAX_INTERSECTING_OBJECTS];
 
 groupshared uint NumIntersectingObjects;
 
-void RayTraceThroughTileCulledDistanceFields(float3 WorldRayStart, float3 WorldRayEnd, float MaxRayTime, out float MinRayTime, out float TotalStepsTaken)
+#define SDF_TRACING_TRAVERSE_MIPS 1
+
+void RayTraceThroughTileCulledDistanceFields(float3 TranslatedWorldRayStart, float3 WorldRayDirection, float MaxRayTime, out float MinRayTime, out float TotalStepsTaken, out uint HitCulledObjectIndex)
 {
 	MinRayTime = MaxRayTime;
 	TotalStepsTaken = 0;
+	HitCulledObjectIndex = 0xFFFFFFFF;
 
 	LOOP
 	for (uint ListObjectIndex = 0; ListObjectIndex < min(NumIntersectingObjects, (uint)MAX_INTERSECTING_OBJECTS); ListObjectIndex++)
 	{
 		uint ObjectIndex = IntersectingObjectIndices[ListObjectIndex];
-		float4 SphereCenterAndRadius = LoadObjectPositionAndRadius(ObjectIndex);
+		FDFObjectData DFObjectData = LoadDFObjectData(ObjectIndex);
+		float4x4 TranslatedWorldToVolume = DFFastToTranslatedWorld(DFObjectData.WorldToVolume, PrimaryView.PreViewTranslation);
 
-		float3 LocalPositionExtent = LoadObjectLocalPositionExtent(ObjectIndex);
-		float4x4 WorldToVolume = LoadObjectWorldToVolume(ObjectIndex);
-		float4 UVScaleAndVolumeScale = LoadObjectUVScale(ObjectIndex);
-		float3 UVAdd = LoadObjectUVAddAndSelfShadowBias(ObjectIndex).xyz;
-		float2 DistanceFieldMAD = LoadObjectDistanceFieldMAD(ObjectIndex);
-
-		float3 VolumeRayStart = mul(float4(WorldRayStart, 1), WorldToVolume).xyz;
-		float3 VolumeRayEnd = mul(float4(WorldRayEnd, 1), WorldToVolume).xyz;
+		float3 VolumeRayStart = mul(float4(TranslatedWorldRayStart, 1.0f), TranslatedWorldToVolume).xyz;
+		float3 TranslatedWorldRayEnd = TranslatedWorldRayStart + WorldRayDirection * MaxRayTime;
+		float3 VolumeRayEnd = mul(float4(TranslatedWorldRayEnd, 1.0f), TranslatedWorldToVolume).xyz;
 		float3 VolumeRayDirection = VolumeRayEnd - VolumeRayStart;
 		float VolumeRayLength = length(VolumeRayDirection);
 		VolumeRayDirection /= VolumeRayLength;
 
-		float2 IntersectionTimes = LineBoxIntersect(VolumeRayStart, VolumeRayEnd, -LocalPositionExtent, LocalPositionExtent);
+		float2 VolumeSpaceIntersectionTimes = LineBoxIntersect(VolumeRayStart, VolumeRayEnd, -DFObjectData.VolumePositionExtent, DFObjectData.VolumePositionExtent) * VolumeRayLength;
 
-		if (IntersectionTimes.x < IntersectionTimes.y && IntersectionTimes.x < 1)
+		if (VolumeSpaceIntersectionTimes.x < VolumeSpaceIntersectionTimes.y && VolumeSpaceIntersectionTimes.x < VolumeRayLength)
 		{
-			float SampleRayTime = IntersectionTimes.x * VolumeRayLength;
+			uint ReversedMipIndex = 0;
+			FDFAssetData DFAssetMipData = LoadDFAssetData(DFObjectData.AssetIndex, ReversedMipIndex);
+			uint MaxMipIndex = DFAssetMipData.NumMips - 1;
 
-			float MinDistance = 1000000;
+			#if !SDF_TRACING_TRAVERSE_MIPS
+				ReversedMipIndex = MaxMipIndex;
+				DFAssetMipData = LoadDFAssetData(DFObjectData.AssetIndex, ReversedMipIndex);
+			#endif
 
+			float SampleRayTime = VolumeSpaceIntersectionTimes.x;
 			uint StepIndex = 0;
-			uint MaxSteps = 256;
+			uint MaxSteps = 64;
+			bool bHit = false;
 
 			LOOP
 			for (; StepIndex < MaxSteps; StepIndex++)
 			{
 				float3 SampleVolumePosition = VolumeRayStart + VolumeRayDirection * SampleRayTime;
-				float3 ClampedSamplePosition = clamp(SampleVolumePosition, -LocalPositionExtent, LocalPositionExtent);
-				float3 VolumeUV = DistanceFieldVolumePositionToUV(ClampedSamplePosition, UVScaleAndVolumeScale.xyz, UVAdd);
-				float DistanceField = SampleMeshDistanceField(VolumeUV, DistanceFieldMAD).x;
-				MinDistance = min(MinDistance, DistanceField);
+				float DistanceField = SampleSparseMeshSignedDistanceField(SampleVolumePosition, DFAssetMipData);
 
-				float MinStepSize = 1.0f / (4 * MaxSteps);
+				// Expand the surface to find thin features, but only away from the start of the trace where it won't introduce incorrect self-occlusion
+				// This still causes incorrect self-occlusion at grazing angles
+				float ExpandSurfaceDistance = DFObjectData.VolumeSurfaceBias;
+				const float ExpandSurfaceFalloff = 2.0f * ExpandSurfaceDistance;
+				const float ExpandSurfaceAmount = ExpandSurfaceDistance * saturate(SampleRayTime / ExpandSurfaceFalloff);
+
+#if SDF_TRACING_TRAVERSE_MIPS
+
+				float MaxEncodedDistance = DFAssetMipData.DistanceFieldToVolumeScaleBias.x + DFAssetMipData.DistanceFieldToVolumeScaleBias.y;
+
+				if (abs(DistanceField) > MaxEncodedDistance && ReversedMipIndex > 0)
+				{
+					ReversedMipIndex--;
+					DFAssetMipData = LoadDFAssetData(DFObjectData.AssetIndex, ReversedMipIndex);
+				}
+				else if (abs(DistanceField) < .25f * MaxEncodedDistance && ReversedMipIndex < MaxMipIndex)
+				{
+					DistanceField -= 6.0f * DFObjectData.VolumeSurfaceBias;
+					ReversedMipIndex++;
+					DFAssetMipData = LoadDFAssetData(DFObjectData.AssetIndex, ReversedMipIndex);
+				}
+				else 
+#endif
+				// Terminate the trace if we reached a negative area or went past the end of the ray
+				if (DistanceField < ExpandSurfaceAmount && ReversedMipIndex == MaxMipIndex)
+				{
+					bHit = true;
+					// One more step back to the surface
+					SampleRayTime = clamp(SampleRayTime + DistanceField - ExpandSurfaceAmount, VolumeSpaceIntersectionTimes.x, VolumeSpaceIntersectionTimes.y);
+					break;
+				}
+
+				float MinStepSize = 1.0f / (16 * MaxSteps);
 				float StepDistance = max(DistanceField, MinStepSize);
 				SampleRayTime += StepDistance;
 
-				// Terminate the trace if we reached a negative area or went past the end of the ray
-				if (DistanceField < 0 
-					|| SampleRayTime > IntersectionTimes.y * VolumeRayLength)
+				if (SampleRayTime > VolumeSpaceIntersectionTimes.y + ExpandSurfaceAmount)
 				{
 					break;
 				}
 			}
 
-			//Result = max(Result, StepIndex / (float)MaxSteps);
-
-			if (MinDistance * UVScaleAndVolumeScale.w < 0 || StepIndex == MaxSteps)
+			if (bHit || StepIndex == MaxSteps)
 			{
-				MinRayTime = min(MinRayTime, SampleRayTime * UVScaleAndVolumeScale.w);
+				const float NewHitDistance = length(VolumeRayDirection * SampleRayTime * DFObjectData.VolumeToWorldScale);
+
+				if (NewHitDistance < MinRayTime)
+				{
+					HitCulledObjectIndex = ObjectIndex;
+					MinRayTime = NewHitDistance;
+				}
 			}
 
-			TotalStepsTaken += StepIndex;
+			TotalStepsTaken += max(StepIndex, 1u);
 		}
-	}
-}
-
-void RayTraceThroughGlobalDistanceField(
-	uniform uint ClipmapIndex,
-	float3 WorldRayStart, 
-	float3 WorldRayEnd, 
-	float RayLength, 
-	float MinRayTime, 
-	out float OutMaxRayTime, 
-	out float OutIntersectRayTime, 
-	out float OutTotalStepsTaken)
-{
-	OutIntersectRayTime = RayLength;
-	OutTotalStepsTaken = 0;
-	OutMaxRayTime = 1;
-
-	float SurfaceBias = .5f * GlobalVolumeCenterAndExtent[ClipmapIndex].w * GlobalVolumeTexelSize;
-	float3 GlobalVolumeCenter = GlobalVolumeCenterAndExtent[ClipmapIndex].xyz;
-	// Subtract one texel from the extent to avoid filtering from invalid texels
-	float GlobalVolumeExtent = GlobalVolumeCenterAndExtent[ClipmapIndex].w - GlobalVolumeCenterAndExtent[ClipmapIndex].w * GlobalVolumeTexelSize;
-	float3 VolumeRayStart = WorldRayStart - GlobalVolumeCenter;
-	float3 VolumeRayEnd = WorldRayEnd - GlobalVolumeCenter;
-	float3 VolumeRayDirection = VolumeRayEnd - VolumeRayStart;
-	float VolumeRayLength = length(VolumeRayDirection);
-	VolumeRayDirection /= VolumeRayLength;
-
-	float2 IntersectionTimes = LineBoxIntersect(VolumeRayStart, VolumeRayEnd, -GlobalVolumeExtent.xxx, GlobalVolumeExtent.xxx);
-
-	if (IntersectionTimes.x < IntersectionTimes.y && IntersectionTimes.x < 1)
-	{
-		OutMaxRayTime = IntersectionTimes.y;
-		float SampleRayTime = max(MinRayTime, IntersectionTimes.x) * VolumeRayLength;
-
-		float MinDistance = 1000000;
-
-		uint StepIndex = 0;
-		uint MaxSteps = 512;
-
-		LOOP
-		for (; StepIndex < MaxSteps; StepIndex++)
-		{
-			float3 SampleVolumePosition = VolumeRayStart + VolumeRayDirection * SampleRayTime;
-			float3 VolumeUV = ComputeGlobalUV(SampleVolumePosition + GlobalVolumeCenter, ClipmapIndex);
-			float DistanceField = SampleGlobalDistanceField(ClipmapIndex, VolumeUV).x;
-			MinDistance = min(MinDistance, DistanceField);
-
-			float MinStepSize = GlobalVolumeExtent * 2 / 8000.0f;
-			float StepDistance = max(DistanceField, MinStepSize);
-			SampleRayTime += StepDistance;
-
-			// Terminate the trace if we reached a negative area or went past the end of the ray
-			if (DistanceField < SurfaceBias
-				|| SampleRayTime > IntersectionTimes.y * VolumeRayLength)
-			{
-				break;
-			}
-		}
-
-		//Result = max(Result, StepIndex / (float)MaxSteps);
-
-		if (MinDistance < SurfaceBias || StepIndex == MaxSteps)
-		{
-			OutIntersectRayTime = min(OutIntersectRayTime, SampleRayTime);
-		}
-
-		OutTotalStepsTaken += StepIndex;
 	}
 }
 
@@ -165,47 +134,24 @@ void VisualizeMeshDistanceFieldCS(
 	float2 ScreenPosition = (ScreenUV.xy - View.ScreenPositionScaleBias.wz) / View.ScreenPositionScaleBias.xy;
 
 	float SceneDepth = CalcSceneDepth(ScreenUV);
-	float3 OpaqueWorldPosition = mul(float4(ScreenPosition * SceneDepth, SceneDepth, 1), View.ScreenToWorld).xyz;
+	float3 TranslatedWorldPosition = mul(float4(GetScreenPositionForProjectionType(ScreenPosition, SceneDepth), SceneDepth, 1), View.ScreenToTranslatedWorld).xyz;
 
-	float TraceDistance = 40000;
-	float3 WorldRayStart = View.WorldCameraOrigin;
-	float3 WorldRayEnd = WorldRayStart + normalize(OpaqueWorldPosition - View.WorldCameraOrigin) * TraceDistance;
-	float3 WorldRayDirection = WorldRayEnd - WorldRayStart;
-	float3 UnitWorldRayDirection = normalize(WorldRayDirection);
+	float TraceDistance = 100000.0f;
+	float3 TranslatedWorldRayStart = PrimaryView.TranslatedWorldCameraOrigin;
+	float3 WorldRayDirection = normalize(TranslatedWorldPosition - View.TranslatedWorldCameraOrigin);
+	float3 WorldHitNormal = float3(0, 0, 1);
+	bool bHit = false;
 
 #if USE_GLOBAL_DISTANCE_FIELD
-	
-	float TotalStepsTaken = 0;
+	FGlobalSDFTraceInput TraceInput = SetupGlobalSDFTraceInput(TranslatedWorldRayStart, WorldRayDirection, 0.0f, TraceDistance, 1.0f, 1.0f);
+	FGlobalSDFTraceResult SDFTraceResult = RayTraceGlobalDistanceField(TraceInput);
 
-	float MaxRayTime0;
-	float IntersectRayTime;
-	float StepsTaken;
-	RayTraceThroughGlobalDistanceField((uint)0, WorldRayStart, WorldRayEnd, TraceDistance, 0, MaxRayTime0, IntersectRayTime, StepsTaken);
-
-	TotalStepsTaken += StepsTaken;
-
-	if (IntersectRayTime >= TraceDistance)
+	if (GlobalSDFTraceResultIsHit(SDFTraceResult))
 	{
-		float MaxRayTime1;
-		RayTraceThroughGlobalDistanceField((uint)1, WorldRayStart, WorldRayEnd, TraceDistance, MaxRayTime0, MaxRayTime1, IntersectRayTime, StepsTaken);
-		TotalStepsTaken += StepsTaken;
-
-		if (IntersectRayTime >= TraceDistance)
-		{
-			float MaxRayTime2;
-			RayTraceThroughGlobalDistanceField((uint)2, WorldRayStart, WorldRayEnd, TraceDistance, MaxRayTime1, MaxRayTime2, IntersectRayTime, StepsTaken);
-			TotalStepsTaken += StepsTaken;
-
-			if (IntersectRayTime >= TraceDistance)
-			{
-				float MaxRayTime3;
-				RayTraceThroughGlobalDistanceField((uint)3, WorldRayStart, WorldRayEnd, TraceDistance, MaxRayTime2, MaxRayTime3, IntersectRayTime, StepsTaken);
-				TotalStepsTaken += StepsTaken;
-			}
-		}
+		float3 TranslatedWorldRayEnd = TranslatedWorldRayStart + WorldRayDirection * SDFTraceResult.HitTime;
+		WorldHitNormal = ComputeGlobalDistanceFieldNormal(TranslatedWorldRayEnd, SDFTraceResult.HitClipmapIndex, -WorldRayDirection);
+		bHit = true;
 	}
-
-	float3 Result = saturate(TotalStepsTaken / 400.0f);
 
 #else
 	if (ThreadIndex == 0)
@@ -215,7 +161,7 @@ void VisualizeMeshDistanceFieldCS(
 
 	GroupMemoryBarrierWithGroupSync();
 
-	float3 TileConeVertex;
+	float3 TileConeTranslatedVertex;
 	float3 TileConeAxis;
 	float TileConeAngleCos;
 	float TileConeAngleSin;
@@ -229,20 +175,22 @@ void VisualizeMeshDistanceFieldCS(
 
 		float3 ViewSpaceTileConeAxis = normalize(TileCorner00 + TileCorner10 + TileCorner01 + TileCorner11);
 		TileConeAxis = mul(ViewSpaceTileConeAxis, (float3x3)View.ViewToTranslatedWorld);
-		TileConeAngleCos = dot(ViewSpaceTileConeAxis, TileCorner00);
+		TileConeAngleCos = min(min(dot(ViewSpaceTileConeAxis, TileCorner00), dot(ViewSpaceTileConeAxis, TileCorner10)), min(dot(ViewSpaceTileConeAxis, TileCorner01), dot(ViewSpaceTileConeAxis, TileCorner11)));
 		TileConeAngleSin = sqrt(1 - TileConeAngleCos * TileConeAngleCos);
-		TileConeVertex = View.WorldCameraOrigin;
+		TileConeTranslatedVertex = PrimaryView.TranslatedWorldCameraOrigin;
 	}
 
 	uint NumCulledObjects = GetCulledNumObjects();
 
 	LOOP
-	for (uint ObjectIndex = ThreadIndex; ObjectIndex < NumCulledObjects; ObjectIndex += THREADGROUP_TOTALSIZE)
+	for (uint IndexInCulledList = ThreadIndex; IndexInCulledList < NumCulledObjects; IndexInCulledList += THREADGROUP_TOTALSIZE)
 	{
-		float4 SphereCenterAndRadius = LoadObjectPositionAndRadius(ObjectIndex);
+		const uint ObjectIndex = CulledObjectIndices[IndexInCulledList];
+		FDFObjectBounds ObjectBounds = LoadDFObjectBounds(ObjectIndex);
+		float4 SphereTranslatedCenterAndRadius = float4(DFFastAddDemote(ObjectBounds.Center, PrimaryView.PreViewTranslation), ObjectBounds.SphereRadius);
 
 		BRANCH
-		if (SphereIntersectCone(SphereCenterAndRadius, TileConeVertex, TileConeAxis, TileConeAngleCos, TileConeAngleSin))
+		if (SphereIntersectCone(SphereTranslatedCenterAndRadius, TileConeTranslatedVertex, TileConeAxis, TileConeAngleCos, TileConeAngleSin))
 		{
 			uint ListIndex;
 			InterlockedAdd(NumIntersectingObjects, 1U, ListIndex);
@@ -258,24 +206,65 @@ void VisualizeMeshDistanceFieldCS(
 
 	float MinRayTime;
 	float TotalStepsTaken;
+	uint HitCulledObjectIndex;
 
 	// Trace once to find the distance to first intersection
-	RayTraceThroughTileCulledDistanceFields(WorldRayStart, WorldRayEnd, TraceDistance, MinRayTime, TotalStepsTaken);
+	RayTraceThroughTileCulledDistanceFields(TranslatedWorldRayStart, WorldRayDirection, TraceDistance, MinRayTime, TotalStepsTaken, HitCulledObjectIndex);
 
-	float TempMinRayTime;
-	// Recompute the ray end point
-	WorldRayEnd = WorldRayStart + UnitWorldRayDirection * MinRayTime;
-	// Trace a second time to only accumulate steps taken before the first intersection, improves visualization
-	RayTraceThroughTileCulledDistanceFields(WorldRayStart, WorldRayEnd, MinRayTime, TempMinRayTime, TotalStepsTaken);
-
-	float3 Result = saturate(TotalStepsTaken / 200.0f);
-
-	if (MinRayTime < TraceDistance)
+	if (HitCulledObjectIndex != 0xFFFFFFFF)
 	{
-		Result += .1f;
+		FDFObjectData DFObjectData = LoadDFObjectData(HitCulledObjectIndex);
+		float4x4 TranslatedWorldToVolume = DFFastToTranslatedWorld(DFObjectData.WorldToVolume, PrimaryView.PreViewTranslation);
+
+		float3 TranslatedWorldRayEnd = TranslatedWorldRayStart + WorldRayDirection * MinRayTime;
+		float3 VolumeHitPosition = mul(float4(TranslatedWorldRayEnd, 1.0f), TranslatedWorldToVolume).xyz;
+		//VolumeHitPosition = clamp(VolumeHitPosition, -DFObjectData.VolumePositionExtent, DFObjectData.VolumePositionExtent);
+		uint NumMips = LoadDFAssetData(DFObjectData.AssetIndex, 0).NumMips;
+		FDFAssetData DFAssetData = LoadDFAssetData(DFObjectData.AssetIndex, NumMips - 1);
+		float3 VolumeGradient = CalculateMeshSDFGradient(VolumeHitPosition, DFAssetData);
+		float VolumeGradientLength = length(VolumeGradient);
+		float3 VolumeNormal = VolumeGradientLength > 0.0f ? VolumeGradient / VolumeGradientLength : 0;
+		float3 WorldGradient = mul(VolumeNormal, transpose((float3x3)DFObjectData.WorldToVolume.M));
+		float WorldGradientLength = length(WorldGradient);
+		WorldHitNormal = WorldGradientLength > 0.0f ? WorldGradient / WorldGradientLength : 0;
+		bHit = true;
+	}
+#endif
+
+	float3 Lighting = 0;
+
+	float3 DirectionalLightColor = 10;
+	float3 DirectionalLightDirection = float3(.707f, 0, .707f);
+
+	if (ForwardLightData.HasDirectionalLight)
+	{
+		DirectionalLightColor = ForwardLightData.DirectionalLightColor;
+		DirectionalLightDirection = ForwardLightData.DirectionalLightDirection;
 	}
 
+	if (bHit)
+	{
+		// Compute simple lighting to help visualize errors in either position or normal in a way that is intuitive to artists
+		Lighting += DirectionalLightColor * saturate(dot(DirectionalLightDirection, WorldHitNormal));
+
+		Lighting += GetSkySHDiffuse(WorldHitNormal) * View.SkyLightColor.rgb;
+		float3 Albedo = .05f;
+#if !USE_GLOBAL_DISTANCE_FIELD
+		{
+			FDFObjectData DFObjectData = LoadDFObjectData(HitCulledObjectIndex);
+			Albedo = 0.1f * IntToColor(DFObjectData.GPUSceneInstanceIndex);
+		}
 #endif
+		Lighting *= Albedo;
+	}
+	else if (ReflectionStruct.SkyLightParameters.y > 0)
+	{
+		float SkyAverageBrightness = 1.0f;
+		float Roughness = 0.0f;
+		Lighting += GetSkyLightReflection(WorldRayDirection, Roughness, SkyAverageBrightness);
+	}
+
+	float3 Result = Lighting * View.PreExposure;
 
 	RWVisualizeMeshDistanceFields[DispatchThreadId.xy] = float4(Result, 0);
 }
@@ -289,10 +278,6 @@ void VisualizeDistanceFieldUpsamplePS(in float4 UVAndScreenPos : TEXCOORD0, out 
 	float2 DistanceFieldUVs = UVAndScreenPos.xy - View.ViewRectMin.xy * View.BufferSizeAndInvSize.zw;
 
 	float3 Value = Texture2DSampleLevel(VisualizeDistanceFieldTexture, VisualizeDistanceFieldSampler, DistanceFieldUVs, 0).xyz;
-
-#if USE_PREEXPOSURE
-	Value *= View.PreExposure;
-#endif
 
 	OutColor = float4(Value, 1);
 }

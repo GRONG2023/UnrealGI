@@ -12,6 +12,13 @@
 
 #include "Common.ush"
 
+#if USE_CLOUD_TRANSMITTANCE
+	Texture2D<float3> CloudShadowmapTexture;
+	SamplerState CloudShadowmapSampler;
+	float CloudShadowmapFarDepthKm;
+	float4x4 CloudShadowmapTranslatedWorldToLightClipMatrix;
+	float CloudShadowmapStrength;
+#endif
 
 // Uv in [0,1]
 // ZDepth = 1.0 for near clip plane (See FReversedZOrthoMatrix)
@@ -30,9 +37,9 @@ float3 CloudShadowUvToWorldSpace(in float ZDepth, in float2 UV, in float4x4 Worl
 // WorldSpace in centimeters
 // returns UV in [0,1]
 // returns UV in [0,1]
-float2 CloudShadowWorldSpaceToUv(in float3 WorldSpace, in float4x4 WorldToLightClipShadowMatrix, inout float z)
+float2 CloudShadowWorldSpaceToUv(in float3 TranslatedWorldPosition, in float4x4 TranslatedWorldToLightClipMatrix, inout float z)
 {
-	float4 ClipSpace = mul(float4(WorldSpace, 1.0f), WorldToLightClipShadowMatrix);
+	float4 ClipSpace = mul(float4(TranslatedWorldPosition, 1.0f), TranslatedWorldToLightClipMatrix);
 	ClipSpace /= ClipSpace.wwww;
 	z = ClipSpace.z;
 	float2 UVs = ClipSpace.xy;
@@ -44,11 +51,11 @@ float2 CloudShadowWorldSpaceToUv(in float3 WorldSpace, in float4x4 WorldToLightC
 
 // WorldSpace in centimeters
 // returns transmittance
-float GetCloudVolumetricShadow(in float3 WorldSpace, in float4x4 CloudShadowmapWorldToLightClipMatrix, in float ShadowmapFarDepthKm,
+float GetCloudVolumetricShadow(in float3 TranslatedWorldPosition, in float4x4 CloudShadowmapTranslatedWorldToLightClipMatrix, in float ShadowmapFarDepthKm,
 	Texture2D<float3> VolumetricCloudShadowMapTexture, SamplerState VolumetricCloudShadowMapTextureSampler, inout float OutOpticalDepth)
 {
 	float CloudShadowSampleZ = 0.0f;
-	float2 UVs = CloudShadowWorldSpaceToUv(WorldSpace, CloudShadowmapWorldToLightClipMatrix, CloudShadowSampleZ);
+	float2 UVs = CloudShadowWorldSpaceToUv(TranslatedWorldPosition, CloudShadowmapTranslatedWorldToLightClipMatrix, CloudShadowSampleZ);
 	const float3 CloudShadowData = VolumetricCloudShadowMapTexture.SampleLevel(VolumetricCloudShadowMapTextureSampler, UVs.xy, 0).rgb;
 	const float ShadowFrontDepthKm = CloudShadowData.r;	// unit kilometer
 	const float MeanExtinction = CloudShadowData.g;		// unit 1/m
@@ -70,11 +77,20 @@ float4 GetCloudLuminanceTransmittanceOverFog(
 	float4 NDC, float3 SampledWorldPos, float3 CameraWorldPos,
 	Texture2D<float4> VolumetricCloudColor, SamplerState VolumetricCloudColorSampler,
 	Texture2D<float4> VolumetricCloudDepth, SamplerState VolumetricCloudDepthSampler,
-	float OneOverPreExposure, float4 CurrentVertexFog)
+	float OneOverPreExposure, float4 CurrentVertexFog, float SoftBlendingDistanceKm)
 {
 	float2 ScreenUv = (NDC.xy / NDC.ww) * float2(0.5f, -0.5f) + 0.5f;
 
+
+#if FEATURE_LEVEL >= FEATURE_LEVEL_SM5
+	// When depth is reprojected using bilinear filtering, it can leave some trails that are visible when doing binary depth testing.
+	// Fixing the reprojection is costly and also not perfect so instead we workaround that issue but using the min of the gathered cloud front depth (being MaxHalf when no clouds have been traced)
+	float4 FrontDepth4 = VolumetricCloudDepth.Gather(VolumetricCloudDepthSampler, ScreenUv, int2(0, 0));
+	const float CloudFrontDepthKm = min(min(FrontDepth4.x, FrontDepth4.y), min(FrontDepth4.z, FrontDepth4.w));
+#else
 	const float CloudFrontDepthKm = Texture2DSample(VolumetricCloudDepth, VolumetricCloudDepthSampler, ScreenUv).r;
+#endif
+
 	const float DistanceFromCameraKm = length(SampledWorldPos.xyz - CameraWorldPos) * CENTIMETER_TO_KILOMETER;
 	const float DepthInsideKm = DistanceFromCameraKm - CloudFrontDepthKm;
 	float4 FinalFog = CurrentVertexFog;
@@ -83,7 +99,6 @@ float4 GetCloudLuminanceTransmittanceOverFog(
 		float4 CloudFog = Texture2DSample(VolumetricCloudColor, VolumetricCloudColorSampler, ScreenUv);
 		CloudFog.rgb *= OneOverPreExposure;
 
-		const float SoftBlendingDistanceKm = 0.5f;// 500 meters
 		const float BlendFactor = saturate(DepthInsideKm / SoftBlendingDistanceKm);
 		const float4 FogToApplyUnder = CurrentVertexFog;
 		const float4 FogToApplyOver = lerp(float4(0.0, 0.0, 0.0, 1.0), CloudFog, BlendFactor);

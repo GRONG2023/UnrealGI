@@ -14,7 +14,11 @@ GPUFastFourierTransform.usf: Core Fast Fourier Transform Code
 // SCAN_LINE_LENGTH
 
 // Map get the RADIX and NUMTHREADSX as a function of SCAN_LINE_LENGTH
-  
+
+#if MIXED_RADIX == 1 && SCAN_LINE_LENGTH > 8
+	#define RADIX 8
+#else
+
 #if SCAN_LINE_LENGTH == 2
 	#define RADIX  2
 #endif
@@ -63,6 +67,7 @@ GPUFastFourierTransform.usf: Core Fast Fourier Transform Code
 	#define RADIX 8
 #endif
 
+#endif
 
 // NB: This is only needed for the not group shared stuff below.
 // Need to make that work and re-factor to fix this.
@@ -121,7 +126,7 @@ uint2 Coord(in uint2 P, in bool bHorizontal)
 
 uint BitReverse(in uint Idx, in uint BitRange)
 {
-	uint ReversedValue = ReverseBits32(Idx);
+	uint ReversedValue = reversebits(Idx);
 		
 	// Shift into correct range.
 	// 32 = sizeof(uint) 
@@ -317,6 +322,9 @@ uint TransformType;
 uint2 SrcRectMin;
 uint2 SrcRectMax;
 uint4 DstRect;
+
+StructuredBuffer<float4> DstPostFilterParameters;
+
 [numthreads(NUMTHREADSX, 1, 1)]
 void GroupSharedTwoForOneFFTCS(uint3 GroupID : SV_GroupID, uint3 GroupThreadID : SV_GroupThreadID )
 {
@@ -397,6 +405,15 @@ void GroupSharedTwoForOneFFTCS(uint3 GroupID : SV_GroupID, uint3 GroupThreadID :
 		// This is specialized for images, where floating point errors may have
 		// resulted in (very very small) negative color values.
 		ScrubNANs(LocalBuffer);
+		
+		float4 Scale = DstPostFilterParameters[0];
+
+		UNROLL
+		for (uint r = 0; r < RADIX; r++)
+		{
+			LocalBuffer[0][r] *= Scale.xy;
+			LocalBuffer[1][r] *= Scale.xw;
+		}
 
 		CopyDataLocalToDstWindow(LocalBuffer, bIsHorizontal, ScanIdx, Head, Stride, DstRect);
 	}
@@ -424,10 +441,7 @@ void GroupSharedTwoForOneFFTCS(uint3 GroupID : SV_GroupID, uint3 GroupThreadID :
 //              (e.g. Vertical ComplexFFT ( Horizontal TwoForOneFFT(Kernel))) 
 //
 //      
-//              And needed helper functions           
-//
-//              NB: This code affects a scale preserving 'normalization' of the kernel, by using the integral of the largest channel
-//                  of the physical space kernel.    
+//              And needed helper functions
 // ---------------------------------------------------------------------------------------------------------------------------------------
 
 // Input SRV: 
@@ -623,30 +637,27 @@ void GSConvolutionWithTextureCS(uint3 GroupID : SV_GroupID, uint3 GroupThreadID 
 		GetKernelSum(FilterTexture, bIsHorizontal, NumScanlines, Norm);
 		// redSum = Norm[0].x;  greenSum = Norm[0].y; blueSum = Norm[1].x; alphaSum = Norm[1].y
 		
-		
-
-		// We normalize to preserve the relative sizes of the r,g,b kernels.
-		float NormMax = max(Norm[0].x, max(Norm[0].y, Norm[1].x));
-		float AlphaSum = (bUseAlpha) ? Norm[1].y : 1.f;
-
-
 		// Normalize R & G
 		{
+			//float Normal = NormMax;
+			float Normal = (bIsGAGroup) ? Norm[0].y :  Norm[0].x;
+
 			for (uint r = 0; r < RADIX; ++r)
 			{
 				// This is the R or G channel
-				LocalBuffer[0][r] /= NormMax; 
+				LocalBuffer[0][r] /= Normal; 
 			}
 		}
 		
-		float AorBNorm = (bIsGAGroup) ? AlphaSum : NormMax; 
-
 		// Normalize B & A
 		{
+			//float Normal = AorBNorm;
+			float Normal = (bIsGAGroup) ? Norm[1].y :  Norm[1].x;
+
 			for (uint r = 0; r < RADIX; ++r)
 			{
 				// This is the B or A channel
-				LocalBuffer[1][r] /= AorBNorm; 
+				LocalBuffer[1][r] /= Normal; 
 			}
 		}
 	}
@@ -764,7 +775,7 @@ uint InversePartialBitReverse(in uint InValue, in uint BitReverseCount, in uint 
 	// -- for testing
 	if (false && BitReverseCount == 1) 
 	{
-		uint HalfTransformLength = 1 << (BitRange -1);
+		uint HalfTransformLength = 1u << (BitRange -1);
 		if (InValue < HalfTransformLength )
 		{
 			ResultValue = 2 * InValue;
@@ -795,8 +806,8 @@ void ReorderFFTPassCS(uint3 GroupID : SV_GroupID, uint3 GroupThreadID : SV_Group
 	const uint BitReverseCount = BitCount;
 
 	// The lenght of the transform.
-	const uint TransformLenght = 1 << LogTwoLength;
-	const uint NumSubLengths = 1 << BitCount;
+	const uint TransformLenght = 1u << LogTwoLength;
+	const uint NumSubLengths = 1u << BitCount;
 	
 	// When inverting the transform the correct scale is 1 / TransformLenght
 	// But the group shared sub transforms will scale by NumSubLengths / TransformLength.
@@ -1000,6 +1011,7 @@ uint TransformType;
 uint BitCount;  // log(2, TransformLength) + 1;
 uint PowTwoLength;  // Power of two.  2^p where p is the pass number
 
+StructuredBuffer<float4> DstPostFilterParameters;
 
 [numthreads(NUMTHREADS_PER_COL, 1, 1)]
 void ComplexFFTPassCS(uint3 GroupID : SV_GroupID, uint3 GroupThreadID : SV_GroupThreadID )
@@ -1068,8 +1080,10 @@ void ComplexFFTPassCS(uint3 GroupID : SV_GroupID, uint3 GroupThreadID : SV_Group
 	float4 SrcValueA;
 	float4 SrcValueB;
 
-	const uint TransformLength = 1 << (BitCount-1);
-	const float Scale = (Ns == 1 && !bIsForward) ? 1.f / float(TransformLength) : 1.f;
+	const uint TransformLength = 1u << (BitCount-1);
+	
+	float4 Scale = DstPostFilterParameters[0] * ((Ns == 1 && !bIsForward) ? 1.f / float(TransformLength) : 1.f);
+
 	if (bIsHorizontal)
 	{
 		uint CurRowIdx = RowIdx;
@@ -1382,14 +1396,8 @@ void ComplexMultiplyImagesCS(uint3 GroupID : SV_GroupID, uint3 GroupThreadID : S
 
 		// redSum = Norm[0].x;  greenSum = Norm[0].y; blueSum = Norm[1].x; alphaSum = Norm[1].y
 
-		// We normalize to preserve the relative sizes of the r,g,b kernels.
-		float InvNormMax = 1.f / max(Norm[0].x, max(Norm[0].y, Norm[1].x));
-		
-		float InvAlphaSum = (bUseAlpha) ? 1.f / Norm[1].y : 1.f;
-		
-		float BorANorm = (bIsGAGroup) ? InvAlphaSum : InvNormMax;
-
-		InvNorm = float4(InvNormMax, InvNormMax, BorANorm, BorANorm);
+		// We normalize each RGBA channel independently.
+		InvNorm = float4(rcp((bIsGAGroup) ? Norm[0].y : Norm[0].x).xx, rcp((bIsGAGroup) ? Norm[1].y : Norm[1].x).xx);
 	}
 
 

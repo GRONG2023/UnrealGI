@@ -124,12 +124,17 @@ void CopyDataSrcWindowToLocal(inout Complex LocalBuffer[2][RADIX], bool bIsHoriz
 		UNROLL
 		for (uint i = 0; i < RADIX ; ++i, Pixel.x += Stride)
 		{	
-			bool InWindow = !(Pixel.x > Window.z); 
+			bool InWindow = Pixel.x < Window.z; 
 			if (InWindow)
 			{ 
 				float4 SrcValue = SrcTexture[Pixel];
 				LocalBuffer[0][ i ] = SrcValue.xy;
 				LocalBuffer[1][ i ] = SrcValue.zw;
+			}
+			else
+			{
+				LocalBuffer[0][ i ] = 0.0;
+				LocalBuffer[1][ i ] = 0.0;
 			}
 
 		}
@@ -141,12 +146,17 @@ void CopyDataSrcWindowToLocal(inout Complex LocalBuffer[2][RADIX], bool bIsHoriz
 		UNROLL
 		for (uint i = 0; i < RADIX; ++i, Pixel.y += Stride)
 		{
-			bool InWindow = !(Pixel.y > Window.w);
+			bool InWindow = Pixel.y < Window.w;
 			if (InWindow)
 			{ 
 				float4 SrcValue = SrcTexture[Pixel];
 				LocalBuffer[0][ i ] = SrcValue.xy;
 				LocalBuffer[1][ i ] = SrcValue.zw;
+			}
+			else
+			{
+				LocalBuffer[0][ i ] = 0.0;
+				LocalBuffer[1][ i ] = 0.0;
 			}
 		}
 	}
@@ -167,13 +177,18 @@ void CopyDataSrcWindowToLocal(inout Complex LocalBuffer[2][RADIX], bool bIsHoriz
 		UNROLL
 		for (uint i = 0; i < RADIX; ++i, Pixel.x += Stride)
 		{	
-			bool InWindow = !(Pixel.x > WindowMax.x); 
+			bool InWindow = Pixel.x < WindowMax.x; 
 			if (InWindow)
 			{ 
 				float4 SrcValue = SrcTexture[Pixel];
 				LocalBuffer[0][ i ] = SrcValue.xy;
 				LocalBuffer[1][ i ] = SrcValue.zw;
-			}		
+			}	
+			else
+			{
+				LocalBuffer[0][ i ] = 0.0;
+				LocalBuffer[1][ i ] = 0.0;
+			}	
 		}
 	}
 	else 
@@ -182,12 +197,17 @@ void CopyDataSrcWindowToLocal(inout Complex LocalBuffer[2][RADIX], bool bIsHoriz
 		UNROLL
 		for (uint i = 0; i < RADIX; ++i, Pixel.y += Stride)
 		{
-			bool InWindow = !(Pixel.y > WindowMax.y);
+			bool InWindow = Pixel.y < WindowMax.y;
 			if (InWindow)
 			{	
 				float4 SrcValue = SrcTexture[Pixel];
 				LocalBuffer[0][ i ] = SrcValue.xy;
 				LocalBuffer[1][ i ] = SrcValue.zw;
+			}
+			else
+			{
+				LocalBuffer[0][ i ] = 0.0;
+				LocalBuffer[1][ i ] = 0.0;
 			}
 		}
 	}
@@ -203,7 +223,7 @@ void CopyDataLocalToDstWindow(in Complex LocalBuffer[2][RADIX], bool bIsHorizont
 		
 		uint2 Pixel = uint2(Loc + ROIRect.x, ScanIdx + ROIRect.y);
 
-		UNROLL
+		UNROLL_N(RADIX)
 		for (uint r = 0; r < RADIX && Pixel.x < ROIRect.z; ++r, Pixel.x += Stride)
 		{
 			float4 DstValue;
@@ -217,7 +237,7 @@ void CopyDataLocalToDstWindow(in Complex LocalBuffer[2][RADIX], bool bIsHorizont
 	{
 		uint2 Pixel = uint2(ScanIdx + ROIRect.x, Loc + ROIRect.y);
 
-		UNROLL
+		UNROLL_N(RADIX)
 		for (uint r = 0; r < RADIX && Pixel.y < ROIRect.w; ++r, Pixel.y += Stride)
 		{
 			float4 DstValue;

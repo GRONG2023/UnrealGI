@@ -6,12 +6,13 @@
 
 #include "Common.ush"
 #include "DeferredShadingCommon.ush"
-#include "DynamicLightingCommon.ush"
+#include "DynamicLightingCommon.ush" 
 
 /** 1 if the light has a valid shadowmap channel. */
-float HasValidChannel;
+float bHasValidChannel;
 
-void OverlapDirectionalPixelMain(
+#if RADIAL_ATTENUATION == 0
+void OverlapPixelMain(
 	float2 InUV : TEXCOORD0,
 	float3 ScreenVector : TEXCOORD1,
 	out float4 OutColor : SV_Target0
@@ -27,15 +28,17 @@ void OverlapDirectionalPixelMain(
 		// Output minor complexity to visualize overlap
 		OutColor.rgb = .04f;
 
-		if (HasValidChannel < 1)
+		if (bHasValidChannel < 1)
 		{
 			// Output a huge amount of complexity to make it clear that this light is an error
 			OutColor.rgb = .4f;
 		}
 	}
 }
+#endif
 
-void OverlapRadialPixelMain(
+#if RADIAL_ATTENUATION == 1
+void OverlapPixelMain(
 	float4 InScreenPosition : TEXCOORD0,
 	in float4 SvPosition : SV_Position,		// after all interpolators
 	out float4 OutColor : SV_Target0
@@ -51,27 +54,20 @@ void OverlapRadialPixelMain(
 	BRANCH if( GBuffer.ShadingModelID > 0 )
 #endif
 {
-		float3 WorldPosition = SvPositionToWorld(SvPosition);
+		float3 TranslatedWorldPosition = SvPositionToTranslatedWorld(SvPosition);
 
-		float3 ToLight = DeferredLightUniforms.Direction;
+		float3 ToLight = DeferredLightUniforms.TranslatedWorldPosition - TranslatedWorldPosition;
 
-		#if RADIAL_ATTENUATION
-			ToLight = DeferredLightUniforms.Position - WorldPosition;
-		#endif
+		float SpotFalloff = SpotAttenuation(normalize(ToLight), -DeferredLightUniforms.Direction, DeferredLightUniforms.SpotAngles);
 
-		float SpotFalloff = 1;
-		#if RADIAL_ATTENUATION
-			SpotFalloff = SpotAttenuation(normalize(ToLight), -DeferredLightUniforms.Direction, DeferredLightUniforms.SpotAngles);
-		#endif
-
-		float RadialAttenuationRatio = length(WorldPosition - DeferredLightUniforms.Position) * DeferredLightUniforms.InvRadius;
+		float RadialAttenuationRatio = length(TranslatedWorldPosition - DeferredLightUniforms.TranslatedWorldPosition) * DeferredLightUniforms.InvRadius;
 
 		if (RadialAttenuationRatio < 1 && SpotFalloff > .0001f)
 		{
 			// Output minor complexity to visualize overlap
 			OutColor.rgb = .04f;
 
-			if (HasValidChannel < 1)
+			if (bHasValidChannel < 1)
 			{
 				// Output a huge amount of complexity to make it clear that this light is an error
 				OutColor.rgb = .4f;
@@ -79,3 +75,4 @@ void OverlapRadialPixelMain(
 		}
 	}
 }
+#endif 

@@ -7,8 +7,11 @@
 #pragma once
 
 #include "/Engine/Public/Platform.ush"
+
+#include "PackUnpack.ush"
+
 // These types are used for material translator generated code, or any functions the translated code can call
-#if PIXELSHADER
+#if PIXELSHADER && !FORCE_MATERIAL_FLOAT_FULL_PRECISION
 	#define MaterialFloat half
 	#define MaterialFloat2 half2
 	#define MaterialFloat3 half3
@@ -28,57 +31,74 @@
 	#define MaterialFloat4x3 float4x3 
 #endif
 
-#if POST_PROCESS_ALPHA
-#define SceneColorLayout float4
-#define CastFloat4ToSceneColorLayout(x) (x)
-#define SetSceneColorLayoutToFloat4(dest,value) dest = (value)
-#else
-#define SceneColorLayout float3
-#define CastFloat4ToSceneColorLayout(x) ((x).rgb)
-#define SetSceneColorLayoutToFloat4(dest,value) dest.rgb = (value).rgb
+#ifndef COMPUTE_SHADED
+#define COMPUTE_SHADED 0
 #endif
 
-#define SUPPORTS_TEXTURE_EXTERNAL		(COMPILER_GLSL_ES3_1 || COMPILER_VULKAN)
+struct FloatDeriv
+{
+	float Value;
+	float Ddx;
+	float Ddy;
+};
 
-#if !SUPPORTS_TEXTURE_EXTERNAL
-#define TextureExternal Texture2D
-#endif
+struct FloatDeriv2
+{
+	float2 Value;
+	float2 Ddx;
+	float2 Ddy;
+};
 
-#ifndef REGISTER
-	#if COMPILER_HLSLCC
-		#define REGISTER(x)
-	#else
-		#define REGISTER(x)		: register(x)
-	#endif
-#endif
+struct FloatDeriv3
+{
+	float3 Value;
+	float3 Ddx;
+	float3 Ddy;
+};
 
-#ifndef SUPPORTS_TEXTURECUBE_ARRAY
-#define SUPPORTS_TEXTURECUBE_ARRAY (FEATURE_LEVEL >= FEATURE_LEVEL_SM5)
-#endif
+struct FloatDeriv4
+{
+	float4 Value;
+	float4 Ddx;
+	float4 Ddy;
+};
 
-#if SUPPORTS_TEXTURECUBE_ARRAY == 0
-	// Define TextureCubeArray to something which will compile so we can use it in uniform buffers
-	#define TextureCubeArray TextureCube
-#endif
+FloatDeriv ConstructFloatDeriv(float InValue, float InDdx, float InDdy)
+{
+	FloatDeriv Ret;
+	Ret.Value = InValue;
+	Ret.Ddx = InDdx;
+	Ret.Ddy = InDdy;
+	return Ret;
+}
 
-// Generated file that contains uniform buffer declarations needed by the shader being compiled 
-#include "/Engine/Generated/GeneratedUniformBuffers.ush" 
+FloatDeriv2 ConstructFloatDeriv2(float2 InValue, float2 InDdx, float2 InDdy)
+{
+	FloatDeriv2 Ret;
+	Ret.Value = InValue;
+	Ret.Ddx = InDdx;
+	Ret.Ddy = InDdy;
+	return Ret;
+}
 
-// uniform buffers specifics
-#include "CommonViewUniformBuffer.ush"
+FloatDeriv3 ConstructFloatDeriv3(float3 InValue, float3 InDdx, float3 InDdy)
+{
+	FloatDeriv3 Ret;
+	Ret.Value = InValue;
+	Ret.Ddx = InDdx;
+	Ret.Ddy = InDdy;
+	return Ret;
+}
 
-#include "InstancedStereo.ush"
+FloatDeriv4 ConstructFloatDeriv4(float4 InValue, float4 InDdx, float4 InDdy)
+{
+	FloatDeriv4 Ret;
+	Ret.Value = InValue;
+	Ret.Ddx = InDdx;
+	Ret.Ddy = InDdy;
+	return Ret;
+}
 
-#include "Definitions.usf"
-
-#define METAL_TESSELLATION_PROFILE ((METAL_PROFILE || METAL_SM5_PROFILE) && USING_TESSELLATION)
-
-#ifndef VELOCITY_ENCODE_DEPTH
-#define VELOCITY_ENCODE_DEPTH 1
-#endif
-
-// Using SV_ClipDistance has overhead (15% slower base pass in triangle bound test scene on PS4) so projects have to opt-in
-#define USE_GLOBAL_CLIP_PLANE (PLATFORM_SUPPORTS_GLOBAL_CLIP_PLANE && PROJECT_ALLOW_GLOBAL_CLIP_PLANE && !MATERIAL_DOMAIN_POSTPROCESS && !MATERIAL_DOMAIN_UI)
 
 #define POSITIVE_INFINITY (asfloat(0x7F800000))
 #define NEGATIVE_INFINITY (asfloat(0xFF800000))
@@ -95,7 +115,42 @@
 
 const static MaterialFloat PI = 3.1415926535897932f;
 const static float MaxHalfFloat = 65504.0f;
+const static float Max11BitsFloat = 65024.0f;
 const static float Max10BitsFloat = 64512.0f;
+const static float3 Max111110BitsFloat3 = float3(Max11BitsFloat, Max11BitsFloat, Max10BitsFloat);
+
+#if POST_PROCESS_ALPHA
+#define SceneColorLayout float4
+#define CastFloat4ToSceneColorLayout(x) (x)
+#define SetSceneColorLayoutToFloat4(dest,value) dest = (value)
+#else
+#define SceneColorLayout float3
+#define CastFloat4ToSceneColorLayout(x) ((x).rgb)
+#define SetSceneColorLayoutToFloat4(dest,value) dest.rgb = (value).rgb
+#endif
+
+#define SUPPORTS_TEXTURE_EXTERNAL		(COMPILER_GLSL_ES3_1)
+
+#if !SUPPORTS_TEXTURE_EXTERNAL
+#define TextureExternal Texture2D
+#endif
+
+#ifndef REGISTER
+	#if COMPILER_HLSLCC
+		#define REGISTER(x)
+	#else
+		#define REGISTER(x)		: register(x)
+	#endif
+#endif
+
+#ifndef SUPPORTS_TEXTURECUBE_ARRAY
+#define SUPPORTS_TEXTURECUBE_ARRAY 1
+#endif
+
+#if SUPPORTS_TEXTURECUBE_ARRAY == 0
+	// Define TextureCubeArray to something which will compile so we can use it in uniform buffers
+	#define TextureCubeArray TextureCube
+#endif
 
 // Control MIP level used for material texture fetches. By default only raytracing 
 // shaders (i.e., !PIXELSHADER) use manual MIP level selection. A material shader 
@@ -104,6 +159,9 @@ const static float Max10BitsFloat = 64512.0f;
 // * USE_FORCE_TEXTURE_MIP : enable/disable manual MIP level selection
 // * FORCED_TEXTURE_MIP    : force a specific MIP level
 //
+#if COMPUTE_SHADED && !defined(USE_FORCE_TEXTURE_MIP)
+	#define USE_FORCE_TEXTURE_MIP 0
+#endif
 #if !PIXELSHADER && !defined(USE_FORCE_TEXTURE_MIP)
 	#define USE_FORCE_TEXTURE_MIP 1
 #endif
@@ -112,6 +170,83 @@ const static float Max10BitsFloat = 64512.0f;
 #endif
 #ifndef FORCED_TEXTURE_MIP
 	#define FORCED_TEXTURE_MIP 0.0f
+#endif
+
+// Add definition of types used by generated uniform buffers
+#include "GeneratedUniformBufferTypes.ush"
+
+// Generated file that contains uniform buffer declarations needed by the shader being compiled 
+#include "/Engine/Generated/GeneratedUniformBuffers.ush" 
+
+// uniform buffers specifics
+#include "CommonViewUniformBuffer.ush"
+
+// In HLSL, fmod is implemented as 'Lhs - trunc(Lhs / Rhs) * Rhs'
+// In some cases, using floor rather than trunc is better
+float FmodFloor(float Lhs, float Rhs)
+{
+	return Lhs - floor(Lhs / Rhs) * Rhs;
+}
+
+float2 FmodFloor(float2 Lhs, float2 Rhs)
+{
+	return Lhs - floor(Lhs / Rhs) * Rhs;
+}
+
+float3 FmodFloor(float3 Lhs, float3 Rhs)
+{
+	return Lhs - floor(Lhs / Rhs) * Rhs;
+}
+
+float4 FmodFloor(float4 Lhs, float4 Rhs)
+{
+	return Lhs - floor(Lhs / Rhs) * Rhs;
+}
+
+float VectorSum(float V) { return V; }
+float VectorSum(float2 V) { return V.x + V.y; }
+float VectorSum(float3 V) { return V.x + V.y + V.z; }
+float VectorSum(float4 V) { return V.x + V.y + V.z + V.w; }
+
+#include "LargeWorldCoordinates.ush"
+
+#include "InstancedStereo.ush"
+
+#include "Definitions.usf"
+
+#include "AssertionMacros.ush"
+
+#ifndef VELOCITY_ENCODE_DEPTH
+#define VELOCITY_ENCODE_DEPTH 1
+#endif
+
+#if FEATURE_LEVEL >= FEATURE_LEVEL_SM5
+	#define VELOCITY_ENCODE_GAMMA 1
+#else
+	#define VELOCITY_ENCODE_GAMMA 0
+#endif
+
+#if COMPILER_GLSL_ES3_1
+	#define ENCODED_VELOCITY_TYPE uint4
+#else
+	#define ENCODED_VELOCITY_TYPE float4
+#endif
+
+//Tie Editor features to platform support and the COMPILE_SHADERS_FOR_DEVELOPMENT which is set via CVAR.
+#define USE_EDITOR_SHADERS (PLATFORM_SUPPORTS_EDITOR_SHADERS && USE_DEVELOPMENT_SHADERS)
+
+// Using SV_ClipDistance has overhead (15% slower base pass in triangle bound test scene on PS4) so projects have to opt-in
+#define USE_GLOBAL_CLIP_PLANE (PROJECT_ALLOW_GLOBAL_CLIP_PLANE && !MATERIAL_DOMAIN_POSTPROCESS && !MATERIAL_DOMAIN_UI)
+
+#if RAYHITGROUPSHADER || RAYMISSHADER || RAYCALLABLESHADER
+
+// These built-ins are not available in ray tracing
+// Define dummy versions so that ray-tracing materials will at least compile
+#define clip(x)
+#define ddx(x) 0
+#define ddy(x) 0
+#define fwidth(x) 0
+
 #endif
 
 #ifndef USE_RAYTRACED_TEXTURE_RAYCONE_LOD
@@ -153,6 +288,14 @@ MaterialFloat4 Texture2DSample(Texture2D Tex, SamplerState Sampler, float2 UV)
 	return Tex.SampleLevel(Sampler, UV, ComputeRayConeLod(Tex) + GlobalTextureMipBias);
 #else
 	return Tex.Sample(Sampler, UV);
+#endif
+}
+MaterialFloat4 Texture2DSample(Texture2D Tex, SamplerState Sampler, FloatDeriv2 UV)
+{
+#if USE_FORCE_TEXTURE_MIP
+	return Tex.SampleLevel(Sampler, UV.Value, ComputeRayConeLod(Tex) + GlobalTextureMipBias);
+#else
+	return Tex.SampleGrad(Sampler, UV.Value, UV.Ddx, UV.Ddy);
 #endif
 }
 MaterialFloat Texture2DSample_A8(Texture2D Tex, SamplerState Sampler, float2 UV)
@@ -223,6 +366,10 @@ MaterialFloat4 Texture3DSampleGrad(Texture3D Tex, SamplerState Sampler, float3 U
 {
 	return Tex.SampleGrad(Sampler, UV, DDX, DDY);
 }
+MaterialFloat4 Texture2DArraySampleLevel(Texture2DArray Tex, SamplerState Sampler, float3 UV, MaterialFloat Mip)
+{
+	return Tex.SampleLevel(Sampler, UV, Mip);
+}
 MaterialFloat4 TextureCubeSampleLevel(TextureCube Tex, SamplerState Sampler, float3 UV, MaterialFloat Mip)
 {
 	return Tex.SampleLevel(Sampler, UV, Mip);
@@ -269,12 +416,16 @@ MaterialFloat4 TextureExternalSampleLevel(TextureExternal Tex, SamplerState Samp
 // to workaround we always sample top mip level
 MaterialFloat4 Texture1DSample_Decal(Texture1D Tex, SamplerState Sampler, float UV)
 {
+#if METAL_PROFILE || COMPILER_GLSL_ES3_1	
+	return Texture1DSampleLevel(Tex, Sampler, UV, 0);
+#else
 	return Texture1DSample(Tex, Sampler, UV);
+#endif
 }
 MaterialFloat4 Texture2DSample_Decal(Texture2D Tex, SamplerState Sampler, float2 UV)
 {
 #if METAL_PROFILE || COMPILER_GLSL_ES3_1
-	return Texture2DSampleGrad(Tex, Sampler, UV, 0.f, 0.f);
+	return Texture2DSampleLevel(Tex, Sampler, UV, 0);
 #else
 	return Texture2DSample(Tex, Sampler, UV);
 #endif
@@ -282,15 +433,23 @@ MaterialFloat4 Texture2DSample_Decal(Texture2D Tex, SamplerState Sampler, float2
 MaterialFloat4 Texture3DSample_Decal(Texture3D Tex, SamplerState Sampler, float3 UV)
 {
 #if METAL_PROFILE || COMPILER_GLSL_ES3_1
-	return Texture3DSampleGrad(Tex, Sampler, UV, 0.f, 0.f);
+	return Texture3DSampleLevel(Tex, Sampler, UV, 0);
 #else
 	return Texture3DSample(Tex, Sampler, UV);
+#endif
+}
+MaterialFloat4 Texture2DArraySample_Decal(Texture2DArray Tex, SamplerState Sampler, float3 UV)
+{
+#if METAL_PROFILE || COMPILER_GLSL_ES3_1
+	return Texture2DArraySampleLevel(Tex, Sampler, UV, 0);
+#else
+	return Texture2DArraySample(Tex, Sampler, UV);
 #endif
 }
 MaterialFloat4 TextureCubeSample_Decal(TextureCube Tex, SamplerState Sampler, float3 UV)
 {
 #if METAL_PROFILE || COMPILER_GLSL_ES3_1
-	return TextureCubeSampleGrad(Tex, Sampler, UV, 0.f, 0.f);
+	return TextureCubeSampleLevel(Tex, Sampler, UV, 0);
 #else
 	return TextureCubeSample(Tex, Sampler, UV);
 #endif
@@ -298,16 +457,12 @@ MaterialFloat4 TextureCubeSample_Decal(TextureCube Tex, SamplerState Sampler, fl
 MaterialFloat4 TextureExternalSample_Decal(TextureExternal Tex, SamplerState Sampler, float2 UV)
 {
 #if METAL_PROFILE || COMPILER_GLSL_ES3_1
-	return TextureExternalSampleGrad(Tex, Sampler, UV, 0.f, 0.f);
+	return TextureExternalSampleLevel(Tex, Sampler, UV, 0);
 #else
 	return TextureExternalSample(Tex, Sampler, UV);
 #endif
 }
 
-MaterialFloat4 Texture2DArraySampleLevel(Texture2DArray Tex, SamplerState Sampler, float3 UV, MaterialFloat Mip)
-{
-	return Tex.SampleLevel(Sampler, UV, Mip);
-}
 MaterialFloat4 Texture2DArraySampleBias(Texture2DArray Tex, SamplerState Sampler, float3 UV, MaterialFloat MipBias)
 {
 #if USE_FORCE_TEXTURE_MIP
@@ -385,11 +540,36 @@ float4 PseudoVolumeTexture(Texture2D Tex, SamplerState TexSampler, float3 inPos,
 }
 
 #if FEATURE_LEVEL >= FEATURE_LEVEL_SM5 // Cubemap arrays are not supported in SM4 feature level
-	MaterialFloat4 TextureCubeArraySampleLevel(TextureCubeArray Tex, SamplerState Sampler, float3 UV, float ArrayIndex, MaterialFloat Mip)
-	{
-		return Tex.SampleLevel(Sampler, float4(UV, ArrayIndex), Mip);
-	}
+MaterialFloat4 TextureCubeArraySample(TextureCubeArray Tex, SamplerState Sampler, float4 UV)
+{
+	return Tex.Sample(Sampler, UV);
+}
+
+MaterialFloat4 TextureCubeArraySampleLevel(TextureCubeArray Tex, SamplerState Sampler, float4 UV, MaterialFloat Mip)
+{
+	return Tex.SampleLevel(Sampler, UV, Mip);
+}
+
+MaterialFloat4 TextureCubeArraySampleBias(TextureCubeArray Tex, SamplerState Sampler, float4 UV, MaterialFloat MipBias)
+{
+#if USE_FORCE_TEXTURE_MIP
+	return Tex.SampleLevel(Sampler, UV, 0);
+#else
+	return Tex.SampleBias(Sampler, UV, MipBias);
 #endif
+}
+
+MaterialFloat4 TextureCubeArraySampleGrad(TextureCubeArray Tex, SamplerState Sampler, float4 UV, MaterialFloat3 DDX, MaterialFloat3 DDY)
+{
+	return Tex.SampleGrad(Sampler, UV, DDX, DDY);
+}
+
+// OVerload with explicit array parameter, used by some non-material shader code
+MaterialFloat4 TextureCubeArraySampleLevel(TextureCubeArray Tex, SamplerState Sampler, float3 UV, float ArrayIndex, MaterialFloat Mip)
+{
+	return TextureCubeArraySampleLevel(Tex, Sampler, float4(UV, ArrayIndex), Mip);
+}
+#endif // FEATURE_LEVEL >= FEATURE_LEVEL_SM5
 
 // TANGENTTOWORLD0 is the first row of the tangent to world matrix, w might be needed for padding and is not used yet.
 // TANGENTTOWORLD2 is the last row of the tangent to world matrix, determinant of tangent basis in w
@@ -415,17 +595,9 @@ float4 PseudoVolumeTexture(Texture2D Tex, SamplerState TexSampler, float3 inPos,
 #endif
 
 #else
-
 	#define TANGENTTOWORLD0					TEXCOORD10
 	#define TANGENTTOWORLD2					TEXCOORD11
-
-	// TangentToWorld0 is float4 only to match D3D11
-#if METAL_PROFILE || COMPILER_GLSL_ES3_1 || VULKAN_PROFILE
-		//@todo-rco: FIXME!
-		#define TANGENTTOWORLD_INTERPOLATOR_BLOCK	float4 TangentToWorld0 : TANGENTTOWORLD0; float4	TangentToWorld2	: TANGENTTOWORLD2;
-#else
-	#define TANGENTTOWORLD_INTERPOLATOR_BLOCK	MaterialFloat4 TangentToWorld0 : TANGENTTOWORLD0; MaterialFloat4	TangentToWorld2	: TANGENTTOWORLD2;
-#endif
+	#define TANGENTTOWORLD_INTERPOLATOR_BLOCK	half4 TangentToWorld0 : TANGENTTOWORLD0; half4 TangentToWorld2 : TANGENTTOWORLD2;
 #endif
 
 MaterialFloat Luminance( MaterialFloat3 LinearColor )
@@ -433,15 +605,15 @@ MaterialFloat Luminance( MaterialFloat3 LinearColor )
 	return dot( LinearColor, MaterialFloat3( 0.3, 0.59, 0.11 ) );
 }
 
-MaterialFloat length2(MaterialFloat2 v)
+float length2(float2 v)
 {
 	return dot(v, v);
 }
-MaterialFloat length2(MaterialFloat3 v)
+float length2(float3 v)
 {
 	return dot(v, v);
 }
-MaterialFloat length2(MaterialFloat4 v)
+float length2(float4 v)
 {
 	return dot(v, v);
 }
@@ -473,23 +645,6 @@ uint3 Mod(uint3 a, uint3 b)
 #endif
 }
 
-MaterialFloat UnClampedPow(MaterialFloat X, MaterialFloat Y)
-{
-	return pow(X, INVARIANT(Y));
-}
-MaterialFloat2 UnClampedPow(MaterialFloat2 X, MaterialFloat2 Y)
-{
-	return pow(X, INVARIANT(Y));
-}
-MaterialFloat3 UnClampedPow(MaterialFloat3 X, MaterialFloat3 Y)
-{
-	return pow(X, INVARIANT(Y));
-}
-MaterialFloat4 UnClampedPow(MaterialFloat4 X, MaterialFloat4 Y)
-{
-	return pow(X, INVARIANT(Y));
-}
-
 #define POW_CLAMP 0.000001f
 
 // Clamp the base, so it's never <= 0.0f (INF/NaN).
@@ -510,10 +665,11 @@ MaterialFloat4 ClampedPow(MaterialFloat4 X,MaterialFloat4 Y)
 	return pow(max(abs(X),MaterialFloat4(POW_CLAMP,POW_CLAMP,POW_CLAMP,POW_CLAMP)),Y);
 } 
 
-/* Pow function that will return 0 if Base is <=0. This ensures that no compiler expands pow into exp(Exponent * log(Base)) with Base=0 */
+// Pow function that will return 0 if Base is <= 0 (or small enough to yield a floating point special).
+// This is done to prevent floating point specials when compilers expands pow into exp(Exponent * log(Base)).
 MaterialFloat PositiveClampedPow(MaterialFloat Base, MaterialFloat Exponent)
 {
-	return (Base <= 0.0f) ? 0.0f : pow(Base, Exponent);
+	return (Base <= 2.980233e-8f) ? 0.0f : pow(Base, Exponent);
 }
 MaterialFloat2 PositiveClampedPow(MaterialFloat2 Base, MaterialFloat2 Exponent)
 {
@@ -633,21 +789,9 @@ MaterialFloat PhongShadingPow(MaterialFloat X, MaterialFloat Y)
 	#define uint4	int4
 #endif
 
-// Optional VertexID - used by tessellation to uniquely identify control points.
-#if USING_TESSELLATION && DISPLACEMENT_ANTICRACK
-	#define OPTIONAL_VertexID			uint VertexID : SV_VertexID,
-	#define OPTIONAL_VertexID_PARAM		VertexID,
-	#define OPTIONAL_VertexID_VS_To_DS	uint VertexID : VS_To_DS_VertexID;
-	#define OutputVertexID( Out ) Out.VertexID = VertexID
-#else // #if USING_TESSELLATION && DISPLACEMENT_ANTICRACK
-	#define OPTIONAL_VertexID
-	#define OPTIONAL_VertexID_PARAM
-	#define OPTIONAL_VertexID_VS_To_DS
-	#define OutputVertexID( Out )
-#endif // #if USING_TESSELLATION && DISPLACEMENT_ANTICRACK
 
 // Helper macro used to interpolate the given member
-#define TESSELLATION_INTERPOLATE_MEMBER(member) O.member = a.member * aInterp + b.member * bInterp
+#define INTERPOLATE_MEMBER(member) O.member = a.member * aInterp + b.member * bInterp
 
 
 #if FEATURE_LEVEL >= FEATURE_LEVEL_SM4
@@ -670,109 +814,94 @@ float ConvertTangentUnormToSnorm8(float Input)
 {
 	int IntVal = int(round(Input * 255.0f));
 	//negate
-	IntVal = (IntVal > 127) ? (IntVal | 0xFFFFFF80) : IntVal;
+	IntVal = select(IntVal > 127, IntVal | 0xFFFFFF80, IntVal);
 	return clamp(IntVal / 127.0f, -1, 1);
 }
-
 float2 ConvertTangentUnormToSnorm8(float2 Input)
 {
 	int2 IntVal = int2(round(Input * 255.0f));
 	//negate
-	IntVal = (IntVal > 127) ? (IntVal | 0xFFFFFF80) : IntVal;
+	IntVal = select(IntVal > 127, IntVal | 0xFFFFFF80, IntVal);
 	return clamp(IntVal / 127.0f, -1, 1);
 }
-
 float3 ConvertTangentUnormToSnorm8(float3 Input)
 {
 	int3 IntVal = int3(round(Input * 255.0f));
-	IntVal = (IntVal > 127) ? (IntVal | 0xFFFFFF80) : IntVal;
+	IntVal = select(IntVal > 127, IntVal | 0xFFFFFF80, IntVal);
 	return clamp(IntVal / 127.0f, -1, 1);
 }
-
 float4 ConvertTangentUnormToSnorm8(float4 Input)
 {
 	int4 IntVal = int4(round(Input * 255.0f));
 	//negate
-	IntVal = (IntVal > 127) ? (IntVal | 0xFFFFFF80) : IntVal;
+	IntVal = select(IntVal > 127, IntVal | 0xFFFFFF80, IntVal);
 	return clamp(IntVal / 127.0f, -1, 1);
 }
-
 float ConvertTangentUnormToSnorm16(float Input)
 {
 	int IntVal = int(round(Input * 65535.0f));
 	//negate
-	IntVal = (IntVal > 32767) ? (IntVal | 0xFFFF8000) : IntVal;
+	IntVal = select(IntVal > 32767, IntVal | 0xFFFF8000, IntVal);
 	return clamp(IntVal / 32767.0f, -1, 1);
 }
-
 float2 ConvertTangentUnormToSnorm16(float2 Input)
 {
 	int2 IntVal = int2(round(Input * 65535.0f));
 	//negate
-	IntVal = (IntVal > 32767) ? (IntVal | 0xFFFFFF80) : IntVal;
+	IntVal = select(IntVal > 32767, IntVal | 0xFFFFFF80, IntVal);
 	return clamp(IntVal / 32767.0f, -1, 1);
 }
-
 float3 ConvertTangentUnormToSnorm16(float3 Input)
 {
 	int3 IntVal = int3(round(Input * 65535.0f));
-	IntVal = (IntVal > 32767) ? (IntVal | 0xFFFFFF80) : IntVal;
+	IntVal = select(IntVal > 32767, IntVal | 0xFFFFFF80, IntVal);
 	return clamp(IntVal / 32767.0f, -1, 1);
 }
-
 float4 ConvertTangentUnormToSnorm16(float4 Input)
 {
 	int4 IntVal = int4(round(Input * 65535.0f));
 	//negate
-	IntVal = (IntVal > 32767) ? (IntVal | 0xFFFFFF80) : IntVal;
+	IntVal = select(IntVal > 32767, IntVal | 0xFFFFFF80, IntVal);
 	return clamp(IntVal / 32767.0f, -1, 1);
 }
-
 float ConvertTangentSnormToUnorm8(float Input)
 {
-	float Res = Input >= 0.0f ? Input * 127 : ((Input + 1.0) * 127) + 128;
+	float Res = select(Input >= 0.0f, Input * 127, ((Input + 1.0) * 127) + 128);
 	return clamp(Res / 255, 0.0f, 0.99f);
 }
-
 float2 ConvertTangentSnormToUnorm8(float2 Input)
 {
-	float2 Res = Input >= 0.0f ? Input * 127 : ((Input + 1.0) * 127) + 128;
+	float2 Res = select(Input >= 0.0f, Input * 127, ((Input + 1.0) * 127) + 128);
 	return clamp(Res / 255, 0.0f, 0.99f);
 }
-
 float3 ConvertTangentSnormToUnorm8(float3 Input)
 {
-	float3 Res = Input >= 0.0f ? Input * 127 : ((Input + 1.0) * 127) + 128;
+	float3 Res = select(Input >= 0.0f, Input * 127, ((Input + 1.0) * 127) + 128);
 	return clamp(Res / 255, 0.0f, 0.99f);
 }
-
 float4 ConvertTangentSnormToUnorm8(float4 Input)
 {
-	float4 Res = Input >= 0.0f ? Input * 127 : ((Input + 1.0) * 127) + 128;
+	float4 Res = select(Input >= 0.0f, Input * 127, ((Input + 1.0) * 127) + 128);
 	return clamp(Res / 255, 0.0f, 0.99f);
 }
-
 float ConvertTangentSnormToUnorm16(float Input)
 {
-	float Res = Input >= 0.0f ? Input * 32767 : ((Input + 1.0) * 32767) + 32768;
+	float Res = select(Input >= 0.0f, Input * 32767, ((Input + 1.0) * 32767) + 32768);
 	return clamp(Res / 65535, 0.0f, 0.99f);
 }
-
 float2 ConvertTangentSnormToUnorm16(float2 Input)
 {
-	float2 Res = Input >= 0.0f ? Input * 32767 : ((Input + 1.0) * 32767) + 32768;
+	float2 Res = select(Input >= 0.0f, Input * 32767, ((Input + 1.0) * 32767) + 32768);
 	return clamp(Res / 65535, 0.0f, 0.99f);
 }
-
 float3 ConvertTangentSnormToUnorm16(float3 Input)
 {
-	float3 Res = Input >= 0.0f ? Input * 32767 : ((Input + 1.0) * 32767) + 32768;
+	float3 Res = select(Input >= 0.0f, Input * 32767, ((Input + 1.0) * 32767) + 32768);
 	return clamp(Res / 65535, 0.0f, 0.99f);
 }
-
 float4 ConvertTangentSnormToUnorm16(float4 Input)
 {
-	float4 Res = Input >= 0.0f ? Input * 32767 : ((Input + 1.0) * 32767) + 32768;
+	float4 Res = select(Input >= 0.0f, Input * 32767, ((Input + 1.0) * 32767) + 32768);
 	return clamp(Res / 65535, 0.0f, 0.99f);
 }
 
@@ -935,6 +1064,18 @@ MaterialFloat4 EncodeLightAttenuation(MaterialFloat4 InColor)
 	return sqrt(InColor);
 }
 
+/** Converts value stored in the light attenuation buffer into a linear light attenuation value. */
+MaterialFloat DecodeLightAttenuation(MaterialFloat InColor)
+{
+	return Square(InColor);
+}
+
+/** Converts value stored in the light attenuation buffer into a linear light attenuation value. */
+MaterialFloat4 DecodeLightAttenuation(MaterialFloat4 InColor)
+{
+	return Square(InColor);
+}
+
 // Like RGBM but this can be interpolated.
 MaterialFloat4 RGBTEncode(MaterialFloat3 Color)
 {
@@ -1013,15 +1154,13 @@ MaterialFloat3 RGBTDecode8BPC(MaterialFloat4 RGBT, MaterialFloat Range)
   * This gets a bit from a write mask texture created with FRTWriteMaskDecodeCS. Only supprted on some platforms.
   */
 #if PLATFORM_SUPPORTS_RENDERTARGET_WRITE_MASK
-uint DecodeRTWriteMask(float2 ScreenPos, Texture2D<uint> RTWriteMaskTexture, uint NumEncodedTextures)
+uint DecodeRTWriteMask(uint2 PixelPos, Texture2D<uint> RTWriteMaskTexture, uint NumEncodedTextures)
 {
-	uint2 InPos = uint2(ScreenPos);
-
-	uint2 TileIndex = InPos >> 3;
-	uint2 TileOffset = (InPos >> 2) & 1;
+	uint2 TileIndex = PixelPos >> 3;
+	uint2 TileOffset = (PixelPos >> 2) & 1;
 
 	uint Shift = (TileOffset.y * 2 + TileOffset.x) * NumEncodedTextures;
-	uint Mask = ~((~0) << NumEncodedTextures);
+	uint Mask = ~((~0u) << NumEncodedTextures);
 
 	return (RTWriteMaskTexture.Load(uint3(TileIndex, 0)) >> Shift) & Mask;
 }
@@ -1040,7 +1179,7 @@ float2 CalcScreenUVFromOffsetFraction(float4 ScreenPosition, float2 OffsetFracti
 
 float4 GetPerPixelLightAttenuation(float2 UV)
 {
-	return Square(Texture2DSampleLevel(LightAttenuationTexture, LightAttenuationTextureSampler, UV, 0));
+	return DecodeLightAttenuation(Texture2DSampleLevel(LightAttenuationTexture, LightAttenuationTextureSampler, UV, 0));
 }
 
 // also see ConvertToDeviceZ()
@@ -1052,27 +1191,124 @@ float ConvertFromDeviceZ(float DeviceZ)
 	return DeviceZ * View.InvDeviceZToWorldZTransform[0] + View.InvDeviceZToWorldZTransform[1] + 1.0f / (DeviceZ * View.InvDeviceZToWorldZTransform[2] - View.InvDeviceZToWorldZTransform[3]);
 }
 
+// Returns whether or not the given projection matrix is orthographic
+bool IsOrthoProjection(float4x4 ViewToClip)
+{
+	return ViewToClip._44 >= 1.0f;
+}
+
+// Return whether View has ortho or perspective projection
+bool IsOrthoProjection(ViewState InView)
+{
+	return IsOrthoProjection(InView.ViewToClip);
+}
+
+
+// Returns whether or not the default view is orthographic
+bool IsOrthoProjection()
+{
+	return IsOrthoProjection(View.ViewToClip);
+}
+
+// Returns whether or not the given projection matrix is orthographic via float
+float IsOrthoProjectionFloat()
+{
+	return select(IsOrthoProjection(), 1.0f, 0.0f);
+}
+
 // inverse operation of ConvertFromDeviceZ()
 // @param SceneDepth (linear in world units, W)
 // @return DeviceZ (Z/W)
 float ConvertToDeviceZ(float SceneDepth)
 {
 	FLATTEN
-	if (View.ViewToClip[3][3] < 1.0f)
-	{
-		// Perspective
-		return 1.0f / ((SceneDepth + View.InvDeviceZToWorldZTransform[3]) * View.InvDeviceZToWorldZTransform[2]);
-	}
-	else
+	if (IsOrthoProjection())
 	{
 		// Ortho
 		return SceneDepth * View.ViewToClip[2][2] + View.ViewToClip[3][2];
 	}
+	else
+	{
+		// Perspective
+		return 1.0f / ((SceneDepth + View.InvDeviceZToWorldZTransform[3]) * View.InvDeviceZToWorldZTransform[2]);
+	}
+}
+
+float3 GetCameraVector(float3 Position, float3 CameraPosition)
+{
+	return select(IsOrthoProjection(), View.ViewForward, normalize(Position - CameraPosition));
+}
+
+float3 GetCameraVectorFromWorldPosition(float3 WorldPosition)
+{
+	return GetCameraVector(WorldPosition, DFHackToFloat(PrimaryView.WorldCameraOrigin));
+}
+
+float3 GetCameraVectorFromTranslatedWorldPosition(float3 TranslatedWorldPosition)
+{
+	return GetCameraVector(TranslatedWorldPosition, PrimaryView.TranslatedWorldCameraOrigin);
+}
+
+float GetDistanceToCameraFromViewVector(float3 DistanceVector)
+{
+	float DistanceToCamera = length(DistanceVector);
+	if (IsOrthoProjection())
+	{
+		/**
+		* Position to camera length is not the correct value here, ortho projection needs the distance
+		* as the view forward "plane" to the position instead. This length is recalculated here.
+		*/
+		DistanceToCamera *= DistanceToCamera / dot(DistanceVector, View.ViewForward);
+	}
+	return DistanceToCamera;
+}
+
+float GetDistanceToCameraFromViewVectorSqr(float3 DistanceVector)
+{
+	if(IsOrthoProjection())
+	{
+		float Distance = GetDistanceToCameraFromViewVector(DistanceVector);
+		return Distance * Distance;
+	}
+	return dot(DistanceVector, DistanceVector);
 }
 
 float2 ScreenPositionToBufferUV(float4 ScreenPosition)
 {
 	return float2(ScreenPosition.xy / ScreenPosition.w * ResolvedView.ScreenPositionScaleBias.xy + ResolvedView.ScreenPositionScaleBias.wz);
+}
+
+float3 ScreenVectorFromScreenRect(float4 Position)
+{
+	//Screen rect does not include scene depth. Perspective projection requires ScreenToTranslated world matrix
+	//Ortho Screen does not need the calculation as the screenvector is always the camera direction, so uses ViewForward
+
+	return select(IsOrthoProjection(), View.ViewForward, mul(Position,View.ScreenToTranslatedWorld).xyz);
+}
+
+// Returns the screen position for projection matrix calculations depending on the type of projection the view is using
+float2 GetScreenPositionForProjectionType(float2 ScreenPosition, float SceneDepth)
+{
+	// For perspective projection matrix, the scene depth is required as part of the clip to view calculations
+	// For orthogonal projection matrix, scene depth should not be used
+	return select(IsOrthoProjection(), ScreenPosition, ScreenPosition * SceneDepth);
+}
+
+float ConvertGivenDepthRadiusForProjectionType(float Radius, float SceneDepth, bool bForceOrthoView = false)
+{
+	return select(IsOrthoProjection() || bForceOrthoView, Radius, Radius * SceneDepth);
+}
+
+float GetDepthPixelRadiusForProjectionType(float SceneDepth)
+{
+	return View.WorldDepthToPixelWorldRadius.x * SceneDepth + View.WorldDepthToPixelWorldRadius.y;
+}
+
+// In many locations we calculate screen ray length using scene depth, this does not work for Ortho
+// This code moves that calculation to the view buffer and reduces the SceneDepth option to 1 MAD
+float2 GetScreenRayLengthMultiplierForProjectionType(float SceneDepth)
+{
+	return View.ScreenRayLengthMultiplier.xy * SceneDepth + View.ScreenRayLengthMultiplier.zw;
 }
 
 float2 SvPositionToBufferUV(float4 SvPosition)
@@ -1097,12 +1333,13 @@ float3 SvPositionToResolvedTranslatedWorld(float4 SvPosition)
 }
 
 // prefer to use SvPositionToTranslatedWorld() for better quality
-float3 SvPositionToWorld(float4 SvPosition)
+FDFVector3 SvPositionToWorld(float4 SvPosition)
 {
-	return SvPositionToTranslatedWorld(SvPosition) - View.PreViewTranslation;
+	float3 TranslatedWorldPosition = SvPositionToTranslatedWorld(SvPosition);
+	return DFFastSubtract(TranslatedWorldPosition, PrimaryView.PreViewTranslation);
 }
 
-// investigate: doesn't work for usage with View.ScreenToWorld, see SvPositionToScreenPosition2()
+// investigate: doesn't work for usage with PrimaryView.ScreenToWorld, see SvPositionToScreenPosition2()
 float4 SvPositionToScreenPosition(float4 SvPosition)
 {
 	// todo: is already in .w or needs to be reconstructed like this:
@@ -1129,12 +1366,26 @@ float4 SvPositionToResolvedScreenPosition(float4 SvPosition)
 	return float4(NDCPos.xyz, 1) * SvPosition.w;
 }
 
+void SvPositionToResolvedScreenPositionDeriv(float4 SvPosition, float2 PPZ_DDX_DDY, float2 W_DDX_DDY, inout float4 ScreenPosition, inout float4 ScreenPositionDDX, inout float4 ScreenPositionDDY)
+{
+	float2 PixelPos = SvPosition.xy - ResolvedView.ViewRectMin.xy;
+
+	// NDC (NormalizedDeviceCoordinates, after the perspective divide)
+	float4 NDCPos = float4((PixelPos * ResolvedView.ViewSizeAndInvSize.zw - 0.5f) * float2(2, -2), SvPosition.z, 1.0f);
+	float4 NDCPosDDX = float4(ResolvedView.ViewSizeAndInvSize.z * 2.0f, 0.0f, PPZ_DDX_DDY.x, 0.0f);
+	float4 NDCPosDDY = float4(ResolvedView.ViewSizeAndInvSize.w * 2.0f, 0.0f, PPZ_DDX_DDY.y, 0.0f);
+
+	ScreenPosition = NDCPos * SvPosition.w;
+	ScreenPositionDDX = NDCPos * W_DDX_DDY.x + NDCPosDDX * SvPosition.w;
+	ScreenPositionDDY = NDCPos * W_DDX_DDY.y + NDCPosDDY * SvPosition.w;
+}
+
 float2 SvPositionToViewportUV(float4 SvPosition)
 {
 	// can be optimized from 2SUB+2MUL to 2MAD
-	float2 PixelPos = SvPosition.xy - View.ViewRectMin.xy;	
+	float2 PixelPos = SvPosition.xy - ResolvedView.ViewRectMin.xy;	
 
-	return PixelPos.xy * View.ViewSizeAndInvSize.zw;
+	return PixelPos.xy * ResolvedView.ViewSizeAndInvSize.zw;
 }
 
 float2 BufferUVToViewportUV(float2 BufferUV)
@@ -1168,7 +1419,7 @@ float3 ScreenToViewPos(float2 ViewportUV, float SceneDepth)
 
 	ProjViewPos.x =  ViewportUV.x * View.ScreenToViewSpace.x  + View.ScreenToViewSpace.z;
 	ProjViewPos.y =  ViewportUV.y * View.ScreenToViewSpace.y  + View.ScreenToViewSpace.w;
-	return float3(ProjViewPos * SceneDepth, SceneDepth);
+	return float3(GetScreenPositionForProjectionType(ProjViewPos, SceneDepth), SceneDepth);
 }
 
 // ----------------------------
@@ -1205,6 +1456,8 @@ MaterialFloat4 UnpackNormalMap( MaterialFloat4 TextureSample )
 {
 	#if DXT5_NORMALMAPS
 		MaterialFloat2 NormalXY = TextureSample.ag;
+	#elif LA_NORMALMAPS
+		MaterialFloat2 NormalXY = TextureSample.ra;
 	#else
 		MaterialFloat2 NormalXY = TextureSample.rg;
 	#endif
@@ -1327,6 +1580,18 @@ MaterialFloat MaterialExpressionNoise(float3 Position, float Scale, int Quality,
 	return lerp(OutputMin, OutputMax, Out);
 }
 
+MaterialFloat MaterialExpressionNoise(FDFVector3 LWCPosition, float Scale, int Quality, int Function, bool bTurbulence, uint Levels, float OutputMin, float OutputMax, float LevelScale, float FilterWidth, bool bTiling, float RepeatSize)
+{
+	const float TileSize = 65536;
+	float3 Position = abs(TileSize * DFFracDemote(DFDivideByPow2(LWCPosition, TileSize))); // Mirror and repeat every TileSize
+	return MaterialExpressionNoise(Position, Scale, Quality, Function, bTurbulence, Levels, OutputMin, OutputMax, LevelScale, FilterWidth, bTiling, RepeatSize);
+}
+
+MaterialFloat MaterialExpressionNoise(FLWCVector3 LWCPosition, float Scale, int Quality, int Function, bool bTurbulence, uint Levels, float OutputMin, float OutputMax, float LevelScale, float FilterWidth, bool bTiling, float RepeatSize)
+{
+	float3 Position = LWCNormalizeTile(LWCPosition).Offset;
+	return MaterialExpressionNoise(Position, Scale, Quality, Function, bTurbulence, Levels, OutputMin, OutputMax, LevelScale, FilterWidth, bTiling, RepeatSize);
+}
 
 // Material node for noise functions returning a vector value
 // @param LevelScale usually 2 but higher values allow efficient use of few levels
@@ -1397,8 +1662,8 @@ float2 LineBoxIntersect(float3 RayOrigin, float3 RayEnd, float3 BoxMin, float3 B
 /** Computes distance from an AABB to a point in space. */
 MaterialFloat ComputeDistanceFromBoxToPoint(MaterialFloat3 Mins, MaterialFloat3 Maxs, MaterialFloat3 InPoint)
 {
-	MaterialFloat3 DistancesToMin = InPoint < Mins ? abs(InPoint - Mins) : 0;
-	MaterialFloat3 DistancesToMax = InPoint > Maxs ? abs(InPoint - Maxs) : 0;
+	MaterialFloat3 DistancesToMin = select(InPoint < Mins, abs(InPoint - Mins), MaterialFloat(0.0));
+	MaterialFloat3 DistancesToMax = select(InPoint > Maxs, abs(InPoint - Maxs), MaterialFloat(0.0));
 
 	//@todo - this is actually incorrect, it gives manhattan distance
 	MaterialFloat Distance = dot(DistancesToMin, 1);
@@ -1512,7 +1777,7 @@ void GenerateCoordinateSystem(float3 ZAxis, out float3 XAxis, out float3 YAxis)
 }
 
 // Define passthrough implementations of EvaluateAttributeAtSample for non-D3D11 platforms.
-#if !SM5_PROFILE
+#if !(SM6_PROFILE || SM5_PROFILE)
 	float EvaluateAttributeAtSample(float Attribute,uint SampleIndex) { return Attribute; }
 	float2 EvaluateAttributeAtSample(float2 Attribute,uint SampleIndex) { return Attribute; }
 	float3 EvaluateAttributeAtSample(float3 Attribute,uint SampleIndex) { return Attribute; }
@@ -1522,52 +1787,81 @@ void GenerateCoordinateSystem(float3 ZAxis, out float3 XAxis, out float3 YAxis)
 /** Output of the screen vertex shader. */
 struct FScreenVertexOutput
 {
-#if METAL_PROFILE || COMPILER_GLSL_ES3_1
-	//@todo-rco: FIXME!
 	noperspective float2 UV : TEXCOORD0;
-#else
-	noperspective MaterialFloat2 UV : TEXCOORD0;
-#endif
 	float4 Position : SV_POSITION;
 };
+
+/** Whether HasPixelAnimation is encoded in the velocity texture. Matches VelocityEncodeHasPixelAnimation() */
+#define VELOCITY_ENCODE_HAS_PIXEL_ANIMATION VELOCITY_ENCODE_DEPTH
 
 // for velocity rendering, motionblur and temporal AA
 // velocity needs to support -2..2 screen space range for x and y
 // texture is 16bit 0..1 range per channel
-float4 EncodeVelocityToTexture(float3 V)
+ENCODED_VELOCITY_TYPE EncodeVelocityToTexture(float3 V, bool bHasPixelAnimation)
 {
+	#if VELOCITY_ENCODE_GAMMA
+		V.xy = sign(V.xy) * sqrt(abs(V.xy)) * (2.0 / sqrt(2.0));
+	#endif
+
 	// 0.499f is a value smaller than 0.5f to avoid using the full range to use the clear color (0,0) as special value
 	// 0.5f to allow for a range of -2..2 instead of -1..1 for really fast motions for temporal AA
 	float4 EncodedV;
 	EncodedV.xy = V.xy * (0.499f * 0.5f) + 32767.0f / 65535.0f;
 
-#if VELOCITY_ENCODE_DEPTH
-	uint Vz = asuint(V.z);
+	#if VELOCITY_ENCODE_DEPTH
+		uint Vz = asuint(V.z);
 
-	EncodedV.z = saturate(float((Vz >> 16) & 0xFFFF) * rcp(65535.0f) + (0.1 / 65535.0f));
-	EncodedV.w = saturate(float((Vz >>  0) & 0xFFFF) * rcp(65535.0f) + (0.1 / 65535.0f));
+		EncodedV.z = saturate(float((Vz >> 16) & 0xFFFF) * rcp(65535.0f) + (0.1 / 65535.0f));
+		EncodedV.w = saturate(float(((Vz >>  0) & 0xFFFE) | uint(bHasPixelAnimation)) * rcp(65535.0f) + (0.1 / 65535.0f));
+	#else
+		EncodedV.zw = 0.0;
+	#endif
 
-	return EncodedV;
+#if COMPILER_GLSL_ES3_1
+	return uint4(EncodedV * 65535.0 + 0.5f);
 #else
-	return float4(EncodedV.x, EncodedV.y, 0, 0);
+	return EncodedV;
 #endif
 }
-// see EncodeVelocityToTexture()
-float3 DecodeVelocityFromTexture(float4 EncodedV)
+
+ENCODED_VELOCITY_TYPE EncodeVelocityToTexture(float3 V)
 {
+	return EncodeVelocityToTexture(V, /* bHasPixelAnimation = */ false);
+}
+
+// see EncodeVelocityToTexture()
+float3 DecodeVelocityFromTexture(ENCODED_VELOCITY_TYPE InEncodedV)
+{
+#if COMPILER_GLSL_ES3_1
+	float4 EncodedV = InEncodedV / 65535.0f;
+#else
+	float4 EncodedV = InEncodedV;
+#endif
 	const float InvDiv = 1.0f / (0.499f * 0.5f);
 
 	float3 V;
 	V.xy = EncodedV.xy * InvDiv - 32767.0f / 65535.0f * InvDiv;
 
-#if VELOCITY_ENCODE_DEPTH
-	V.z = asfloat((uint(round(EncodedV.z * 65535.0f)) << 16) | uint(round(EncodedV.w * 65535.0f)));
+	#if VELOCITY_ENCODE_DEPTH
+		V.z = asfloat((uint(round(EncodedV.z * 65535.0f)) << 16) | (uint(round(EncodedV.w * 65535.0f)) & 0xFFFE));
+	#else
+		V.z = 0.0;
+	#endif
+
+	#if VELOCITY_ENCODE_GAMMA
+		V.xy = (V.xy * abs(V.xy)) * 0.5;
+	#endif
 
 	return V;
-#else
-	return float3 (V.x, V.y, 0);
-#endif
 }
+
+/** Returns whether the opaque material drawing velocity had the UMaterial::bHasPixelAnimation, which means the geometric velocity might not accurately represent how the pixel moves. */
+#if VELOCITY_ENCODE_HAS_PIXEL_ANIMATION
+bool DecodeHasPixelAnimationFromVelocityTexture(ENCODED_VELOCITY_TYPE EncodedV)
+{
+	return (uint(round(EncodedV.w * 65535.0f)) & 0x1) != 0x0;
+}
+#endif
 
 // Used for the Global Illumination in the GIReplace material expression
 bool GetGIReplaceState()
@@ -1579,9 +1873,38 @@ bool GetGIReplaceState()
 #endif
 }
 
+// Used for the Nanite path in the NaniteReplace material expression
+bool GetNaniteReplaceState()
+{
+#if IS_NANITE_PASS
+	return true;
+#else
+	return false;
+#endif
+}
+
 bool GetRayTracingQualitySwitch()
 {
-#if RAYHITGROUPSHADER
+#if (RAYHITGROUPSHADER || RAYMISSSHADER || RAYCALLABLESHADER || LUMEN_CARD_CAPTURE) && !PATH_TRACING
+	return true;
+#else
+	return false;
+#endif
+}
+
+#if !PATH_TRACING
+// Default implementations for non-path traced shaders
+// The actual implementations used for the path tracer exist in PathTracingShaderUtils.h to minimize cruft in Common.ush
+bool GetPathTracingQualitySwitch() { return false;  }
+bool GetPathTracingIsShadow() { return false; }
+bool GetPathTracingIsIndirectDiffuse() { return false; }
+bool GetPathTracingIsIndirectSpecular() { return false; }
+bool GetPathTracingIsIndirectVolume() { return false; }
+#endif
+
+bool GetLightmassReplaceState()
+{
+#if (RAYHITGROUPSHADER || RAYMISSSHADER || RAYCALLABLESHADER) && PATH_TRACING && SIMPLIFIED_MATERIAL_SHADER
 	return true;
 #else
 	return false;
@@ -1599,17 +1922,16 @@ bool GetRuntimeVirtualTextureOutputSwitch()
 #endif
 }
 
-#if FEATURE_LEVEL >= FEATURE_LEVEL_SM4
 struct FWriteToSliceGeometryOutput
 {
 	FScreenVertexOutput Vertex;
 	uint LayerIndex : SV_RenderTargetArrayIndex;
 };
-#endif
 
 // Helper macro to globally ignore requests for non-offset world positions in materials when lower than shader model 4. We do this
 // because we are using an extra interpolator for this second world position, and in < ES31 there may not be enough
-#define USE_WORLD_POSITION_EXCLUDING_SHADER_OFFSETS	(NEEDS_WORLD_POSITION_EXCLUDING_SHADER_OFFSETS && FEATURE_LEVEL >= FEATURE_LEVEL_ES3_1)
+// NOTE: Forced on in development shaders because the Out-Of-Bounds Pixels visualizer uses it
+#define USE_WORLD_POSITION_EXCLUDING_SHADER_OFFSETS	((NEEDS_WORLD_POSITION_EXCLUDING_SHADER_OFFSETS || USE_DEVELOPMENT_SHADERS) && FEATURE_LEVEL >= FEATURE_LEVEL_ES3_1)
 
 /** Used for calculating vertex positions and UVs when drawing with DrawRectangle */
 void DrawRectangle(
@@ -1676,11 +1998,11 @@ booltype IsPositiveFinite(type In) \
 }\
 type MakeFinite(type In) \
 {\
-    return !IsFinite(In)? 0 : In; \
+    return select(!IsFinite(In), 0.0, In); \
 }\
 type MakePositiveFinite(type In) \
 {\
-    return !IsPositiveFinite(In)? 0 : In; \
+    return select(!IsPositiveFinite(In), 0.0, In); \
 }
 
 IsAndMakeFinite_Def(float,  bool)
@@ -1688,28 +2010,34 @@ IsAndMakeFinite_Def(float2, bool2)
 IsAndMakeFinite_Def(float3, bool3)
 IsAndMakeFinite_Def(float4, bool4)
 
+// NOTE: The raytraced implementation of the ShadowPassSwitch node is kept in RayTracingShaderUtils.ush as it needs to access per ray information.
+#if RAYHITGROUPSHADER == 0
 // Experimental way to allow adjusting the OpacityMask for shadow map rendering of masked materials.
-// Can be accessed with a Custom material node. If this turns out to be very useful we can expose as MaterialFunction
+// This is exposed via the ShadowPassSwitch material node. This can also be accessed with a Custom
+// material node. If this turns out to be very useful we can expose as MaterialFunction
 // and potentially expose other queries as well (e.g. SkeletalMesh, HitProxy, ).
 // @return 0:no, 1:yes
 bool GetShadowReplaceState()
 {
-#ifdef SHADOW_DEPTH_SHADER
+#if SHADOW_DEPTH_SHADER
 	return true;
 #else
 	return false;
 #endif
 }
 
+float IsShadowDepthShader()
+{
+	return GetShadowReplaceState() ? 1.0f : 0.0f;
+}
+
+#endif // RAYHITGROUPSHADER == 0
+
 bool GetReflectionCapturePassSwitchState()
 {
 	return View.RenderingReflectionCaptureMask > 0.0f;
 }
 
-float IsShadowDepthShader()
-{
-	return GetShadowReplaceState() ? 1.0f : 0.0f;
-}
 
 #define TERRAIN_ZSCALE (1.0f/128.0f)
 
@@ -1729,25 +2057,87 @@ float DecodePackedHeight(float2 PackedHeight)
 	return DecodeHeightValue(DecodePackedTwoChannelValue(PackedHeight));
 }
 
-/** Reverses all the 32 bits. */
-uint ReverseBits32( uint bits )
-{
-#if SM5_PROFILE || COMPILER_METAL
-	return reversebits( bits );
-#else
-	bits = ( bits << 16) | ( bits >> 16);
-	bits = ( (bits & 0x00ff00ff) << 8 ) | ( (bits & 0xff00ff00) >> 8 );
-	bits = ( (bits & 0x0f0f0f0f) << 4 ) | ( (bits & 0xf0f0f0f0) >> 4 );
-	bits = ( (bits & 0x33333333) << 2 ) | ( (bits & 0xcccccccc) >> 2 );
-	bits = ( (bits & 0x55555555) << 1 ) | ( (bits & 0xaaaaaaaa) >> 1 );
-	return bits;
-#endif
-}
-
 /** Reverses all the <BitCount> lowest significant bits. */
 uint ReverseBitsN(uint Bitfield, const uint BitCount)
 {
-	return ReverseBits32(Bitfield) >> (32 - BitCount);
+	return reversebits(Bitfield) >> (32 - BitCount);
+}
+
+// Remap 2D array index to flattened 1D array index
+inline uint Flatten2D(uint2 Coord, uint2 Dim)
+{
+	return Coord.x + Coord.y * Dim.x;
+}
+
+// Remap flattened array index to 2D array index
+inline uint2 Unflatten2D(uint Index, uint2 Dim)
+{
+	return uint2(Index % Dim.x, Index / Dim.x);
+}
+
+uint2 ZOrder2D(uint Index, const uint SizeLog2)
+{
+	uint2 Coord = 0; 
+
+	UNROLL
+	for (uint i = 0; i < SizeLog2; i++)
+	{
+		Coord.x |= ((Index >> (2 * i + 0)) & 0x1) << i;
+		Coord.y |= ((Index >> (2 * i + 1)) & 0x1) << i;
+	}
+
+	return Coord;
+}
+
+uint3 ZOrder3D(uint Index, const uint SizeLog2)
+{
+    uint3 Coord = 0;
+    
+    UNROLL
+    for (uint i = 0; i < SizeLog2; i++)
+    {
+        Coord.x |= ((Index >> (3 * i + 0)) & 0x1) << i;
+        Coord.y |= ((Index >> (3 * i + 1)) & 0x1) << i;
+        Coord.z |= ((Index >> (3 * i + 2)) & 0x1) << i;
+    }
+
+    return Coord;
+}
+
+uint ZOrder3DEncode(uint3 Coord, const uint SizeLog2)
+{
+    uint Index = 0;
+    
+    UNROLL
+    for (uint i = 0; i < SizeLog2; i++)
+    {
+        Index |= ((Coord.x >> i) & 0x1) << (3 * i + 0);
+        Index |= ((Coord.y >> i) & 0x1) << (3 * i + 1);
+        Index |= ((Coord.z >> i) & 0x1) << (3 * i + 2);
+    }
+
+    return Index;
+}
+
+uint DivideAndRoundUp(uint Dividend, uint Divisor)
+{
+	return (Dividend + Divisor - 1) / Divisor;
+}
+
+// Optimised for power of two because it relies on a division done using bit shift
+uint DivideAndRoundUp(uint Dividend, uint Divisor, uint DivisorAsBitShift)
+{
+	return (Dividend + Divisor - 1) >> DivisorAsBitShift;
+}
+
+float UNorm16ToF32(uint UNorm)
+{
+	return (UNorm & 0xFFFFu) / 65535.0f;
+}
+
+float SNorm16ToF32(uint SNorm)
+{
+	return UNorm16ToF32(SNorm) * 2.0f - 1.0f;
 }
 
 // see PixelShaderOutputCommon
@@ -1767,6 +2157,10 @@ struct FPixelShaderOut
 {
 	// [0..7], only usable if PIXELSHADEROUTPUT_MRT0, PIXELSHADEROUTPUT_MRT1, ... is 1
 	float4 MRT[8];
+	
+	// Explicit uint output specific to Substrate.
+	uint SubstrateOutput[3];
+	SUBSTRATE_TOP_LAYER_TYPE SubstrateTopLayerData;
 
 	// Pixel Shader OutCoverage, only usable if PIXELSHADEROUTPUT_COVERAGE is 1
 	uint Coverage;
@@ -1775,6 +2169,17 @@ struct FPixelShaderOut
 	float Depth;
 };
 
+
+#define SwapGeneric(T) void Swap(inout T A, inout T B) { T Temp = A; A = B; B = Temp; }
+SwapGeneric(uint)
+SwapGeneric(uint2)
+SwapGeneric(uint3)
+SwapGeneric(uint4)
+
+SwapGeneric(float)
+SwapGeneric(float2)
+SwapGeneric(float3)
+SwapGeneric(float4)
 
 // ---------------------------------------------------- Global samplers.
 

@@ -6,7 +6,8 @@ void Main(
 	in float4 SvPosition: SV_Position
 	, in uint2 Resolution : DISPATCH_RESOLUTION
 	, in uint TotalNodeCount : DISPATCH_NODE_COUNT
-	#if HAIR_MATERIAL_DEBUG_OR_EMISSIVE_OUTPUT
+	, in uint InPrimitiveId : PRIMITIVE_ID
+	#if HAIR_MATERIAL_EMISSIVE_OUTPUT
 	, out float4 OutColor0 : SV_Target0
 	#endif
 	)
@@ -19,19 +20,21 @@ void Main(
 	float3 Emissive = 0;
 	if (SampleIndex < TotalNodeCount)
 	{
-		const FNodeVis InNode = MaterialPassParameters.NodeVis[SampleIndex];
-		
-		const uint PackedSamplePixelCoord = MaterialPassParameters.NodeCoord[SampleIndex];
-		const float2 SamplePixelCoord = float2(PackedSamplePixelCoord & 0xFFFF, (PackedSamplePixelCoord>>16) & 0xFFFF) + float2(0.5f, 0.5f);
+		const FHairVis InNode = UnpackHairVis(MaterialPassParameters.NodeVis[SampleIndex]);
+		const float2 SamplePixelCoord = float2(MaterialPassParameters.NodeCoord[SampleIndex]) + float2(0.5f, 0.5f);
 
 		float SampleDepth = InNode.Depth;
 		uint SampleCoverage8bit = InNode.Coverage8bit;
-		uint SamplePrimitiveId = InNode.PrimitiveId;
+		uint SampleControlPointId = InNode.ControlPointId;
 		uint SampleMaterialId = InNode.MaterialId;
 
 		if (SampleMaterialId == MaterialPass_MaterialId)
 		{
-			FEvaluateOutput Out = Evaluate(SamplePixelCoord, SampleDepth, SamplePrimitiveId, SampleCoverage8bit, MaterialPass_PrimitiveId, MaterialPassParameters.bUpdateSampleCoverage > 0);
+			FEvaluateOutput Out = (FEvaluateOutput)0;
+			if (SampleDepth > 0)
+			{
+				Out = Evaluate(SamplePixelCoord, SampleDepth, SampleControlPointId, SampleCoverage8bit, InPrimitiveId, MaterialPassParameters.bUpdateSampleCoverage > 0, MaterialPassParameters.bInterpolationEnabled);
+			}
 
 			// Note: Use the syntax _ over the syntax . as on certain platform the UAV buffers are 
 			// stored within a static const struct preventing doing a write operation
@@ -47,15 +50,8 @@ void Main(
 		}
 	}
 
-	#if HAIR_MATERIAL_DEBUG_OR_EMISSIVE_OUTPUT
-	if (MaterialPassParameters.bOutputEmissive > 0)
-	{
-		OutColor0 = float4(Emissive,1);
-	}
-	else
-	{	
-		OutColor0 = bIsValid ? float4(0, 1, 0, 1) : float4(1, 0, 0, 1);
-	}
+	#if HAIR_MATERIAL_EMISSIVE_OUTPUT
+	OutColor0 = float4(Emissive, 1);
 	#endif
 }
 

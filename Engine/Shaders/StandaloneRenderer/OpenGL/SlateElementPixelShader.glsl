@@ -18,6 +18,10 @@ precision highp float;
 #define ST_GrayscaleFont	2
 #define ST_ColorFont		3
 #define ST_Line				4
+#define ST_Custom			5
+#define ST_RoundedBox       7
+
+#define USE_LEGACY_DISABLED_EFFECT 0
 
 /** Display gamma x:gamma curve adjustment, y:inverse gamma (1/GEngine->DisplayGamma) */
 uniform vec2 GammaValues = vec2(1, 1/2.2);
@@ -26,13 +30,22 @@ uniform vec2 GammaValues = vec2(1, 1/2.2);
 uniform bool EffectsDisabled;
 uniform bool IgnoreTextureAlpha;
 
-uniform vec4 MarginUVs;
+uniform vec4 ShaderParams;
+uniform vec4 ShaderParams2;
 uniform int ShaderType;
 uniform sampler2D ElementTexture;
+
+#if PLATFORM_MAC
+// GL_TEXTURE_RECTANGLE_ARB support, used by the web surface on macOS
+uniform bool UseTextureRectangle;
+uniform sampler2DRect ElementRectTexture;
+uniform vec2 Size;
+#endif
 
 varying vec4 Position;
 varying vec4 TexCoords;
 varying vec4 Color;
+varying vec4 SecondaryColor;
 
 vec3 maxWithScalar(float test, vec3 values)
 {
@@ -155,13 +168,23 @@ vec4 GetDefaultElementColor()
 {
 	vec4 OutColor = Color;
 
-	vec4 TextureColor = texture2D(ElementTexture, TexCoords.xy*TexCoords.zw);
+	vec4 TextureColor;
+#if PLATFORM_MAC
+	if ( UseTextureRectangle )
+	{
+		TextureColor = texture2DRect(ElementRectTexture, TexCoords.xy*TexCoords.zw*Size).bgra;
+	}
+	else
+#endif
+	{
+		TextureColor = texture2D(ElementTexture, TexCoords.xy*TexCoords.zw);
+	}
+	
 	if( IgnoreTextureAlpha )
 	{
 		TextureColor.a = 1.0;
 	}
 	OutColor *= TextureColor;
-
 	return OutColor;
 }
 
@@ -181,14 +204,14 @@ vec4 GetBorderElementColor()
 	
 		if( InTexCoords.z > 0.0 )
 		{
-			MinUV = vec2(MarginUVs.x,0.0);
-			MaxUV = vec2(MarginUVs.y,1.0);
+			MinUV = vec2(ShaderParams.x,0.0);
+			MaxUV = vec2(ShaderParams.y,1.0);
 			InTexCoords.w = 1.0;
 		}
 		else
 		{
-			MinUV = vec2(0.0,MarginUVs.z);
-			MaxUV = vec2(1.0,MarginUVs.w);
+			MinUV = vec2(0.0,ShaderParams.z);
+			MaxUV = vec2(1.0,ShaderParams.w);
 			InTexCoords.z = 1.0;
 		}
 
@@ -205,41 +228,89 @@ vec4 GetBorderElementColor()
 	}
 		
 	OutColor *= TextureColor;
-
 	return OutColor;
 }
 
-vec4 GetSplineElementColor()
+float GetRoundedBoxDistance(vec2 pos, vec2 center, float radius, float inset)
 {
-	float LineWidth = MarginUVs.x;
-	float FilterWidthScale = MarginUVs.y;
+	// distance from center
+    pos = abs(pos - center); 
 
-	float Gradient = TexCoords.x;
-	vec2 GradientDerivative = vec2(abs(dFdx(Gradient)), abs(dFdy(Gradient)));
-	float PixelSizeInUV = sqrt(dot(GradientDerivative, GradientDerivative));
-	
-	float HalfLineWidthUV = 0.5f*PixelSizeInUV * LineWidth;	
-	float HalfFilterWidthUV = FilterWidthScale * PixelSizeInUV;
-	float DistanceToLineCenter = abs(0.5 - Gradient);
-	float LineCoverage = smoothstep(HalfLineWidthUV+HalfFilterWidthUV, HalfLineWidthUV-HalfFilterWidthUV, DistanceToLineCenter);
+    // distance from the inner corner
+    pos = pos - (center - vec2(radius + inset, radius + inset));
 
-	if (LineCoverage <= 0.0)
-	{
-		discard;
-	}
+    // use distance to nearest edge when not in quadrant with radius
+    // this handles an edge case when radius is very close to thickness
+    // otherwise we're in the quadrant with the radius, 
+    // just use the analytic signed distance function
+    return mix( length(pos) - radius,
+    			max(pos.x - radius, pos.y - radius), 
+    			float(pos.x <= 0 || pos.y <=0) );
+}
 
-	vec4 InColor = Color;
-	InColor.a *= LineCoverage;
-	return InColor;
+vec4 GetRoundedBoxElementColor()
+{
+	vec2 size = ShaderParams.zw;
+	vec2 pos = size * TexCoords.xy;
+	vec2 center = size / 2.0;
+
+	//X = Top Left, Y = Top Right, Z = Bottom Right, W = Bottom Left */
+	vec4 cornerRadii = ShaderParams2;
+
+	// figure out which radius to use based on which quadrant we're in
+	vec2 quadrant = step(TexCoords.xy, vec2(.5,.5));
+
+	float left = mix(cornerRadii.y, cornerRadii.x, quadrant.x);
+	float right = mix(cornerRadii.z, cornerRadii.w, quadrant.x);
+	float radius = mix(right, left, quadrant.y);
+
+	float thickness = ShaderParams.y; 
+
+	// Compute the distances internal and external to the border outline
+	float dext = GetRoundedBoxDistance(pos, center, radius, 0.0);
+	float din  = GetRoundedBoxDistance(pos, center, max(radius - thickness, 0), thickness);
+
+	// Compute the border intensity and fill intensity with a smooth transition
+	float spread = 0.5;
+	float bi = smoothstep(spread, -spread, dext);
+	float fi = smoothstep(spread, -spread, din);
+
+	// alpha blend the external color 
+	vec4 fill = GetDefaultElementColor();
+	vec4 border = SecondaryColor;
+	vec4 OutColor = mix(border, fill, float(thickness > radius));
+	OutColor.a = 0.0;
+
+	// blend in the border and fill colors
+	OutColor = mix(OutColor, border, bi);
+	OutColor = mix(OutColor, fill, fi);
+	return OutColor;
+}
+
+vec4 GetLineSegmentElementColor()
+{
+	vec2 Gradient = TexCoords.xy;
+
+	vec2 OutsideFilterUV = vec2(1.0, 1.0);
+	vec2 InsideFilterUV = vec2(ShaderParams.x, 0.0);
+	vec2 LineCoverage = smoothstep(OutsideFilterUV, InsideFilterUV, abs(Gradient));
+
+	vec4 OutColor = Color;
+	OutColor.a *= LineCoverage.x * LineCoverage.y;
+	return OutColor;
 }
 
 void main()
 {
 	vec4 OutColor;
 
-	if( ShaderType == ST_Default )
+	if( ShaderType == ST_Default || ShaderType == ST_Custom )
 	{
 		OutColor = GetDefaultElementColor();
+	}
+	else if( ShaderType == ST_RoundedBox )
+	{
+		OutColor = GetRoundedBoxElementColor();
 	}
 	else if( ShaderType == ST_Border )
 	{
@@ -255,7 +326,7 @@ void main()
 	}
 	else
 	{
-		OutColor = GetSplineElementColor();
+		OutColor = GetLineSegmentElementColor();
 	}
 	
 	// gamma correct
@@ -263,6 +334,7 @@ void main()
 	
 	if( EffectsDisabled )
 	{
+	#if USE_LEGACY_DISABLED_EFFECT
 		//desaturate
 		vec3 LumCoeffs = vec3( 0.3, 0.59, .11 );
 		float Lum = dot( LumCoeffs, OutColor.rgb );
@@ -271,6 +343,9 @@ void main()
 		vec3 Grayish = vec3(0.4, 0.4, 0.4);
 	
 		OutColor.rgb = mix( OutColor.rgb, Grayish, clamp( distance( OutColor.rgb, Grayish ), 0.0, 0.8)  );
+	#else
+		OutColor.a *= .45f;
+	#endif
 	}
 
 	gl_FragColor = OutColor.bgra;

@@ -35,6 +35,7 @@ SamplerState HigherMipTextureSampler;
 SamplerState HigherAlphaMipTextureSampler;
 #endif
 
+float4 PrevBufferBilinearUVMinMax;
 float4 PrevScreenPositionScaleBias;
 float2 ViewportUVToHZBBufferUV;
 float2 ReducedSceneColorSize;
@@ -43,6 +44,7 @@ float2 HigherMipBufferBilinearMax;
 float PrevSceneColorPreExposureCorrection;
 float MinimumLuminance;
 float HigherMipDownScaleFactor;
+float SkyDistance;
 
 RWTexture2D<float4>	ReducedSceneColorOutput_0;
 RWTexture2D<float4>	ReducedSceneColorOutput_1;
@@ -61,11 +63,12 @@ groupshared float SharedFurthestDepth[GROUP_PIXEL_COUNT];
 
 float3 ComputeTranslatedWorldPosition(float2 ScreenPosition, float WorldDepth, bool bIsPrevFrame)
 {
-	float4 ClipPosition = float4(ScreenPosition * (View.ViewToClip[3][3] < 1.0f ? WorldDepth : 1.0f), WorldDepth, 1);
+	float4 ClipPosition = float4(GetScreenPositionForProjectionType(ScreenPosition, WorldDepth), WorldDepth, 1);
 
 	if (bIsPrevFrame)
 	{
-		return mul(ClipPosition, View.PrevScreenToTranslatedWorld).xyz + (View.PreViewTranslation.xyz - View.PrevPreViewTranslation.xyz);
+		float3 PreViewTranslationOffset = DFFastLocalSubtractDemote(PrimaryView.PreViewTranslation, PrimaryView.PrevPreViewTranslation);
+		return mul(ClipPosition, View.PrevScreenToTranslatedWorld).xyz + PreViewTranslationOffset;
 	}
 	
 	return mul(ClipPosition, View.ScreenToTranslatedWorld).xyz;
@@ -101,9 +104,7 @@ void MainCS(
 				WorldDepth = ConvertFromDeviceZ(HZBDeviceZ);
 			}
 
-			float WorldDepthToPixelWorldRadius = GetTanHalfFieldOfView().x * View.ViewSizeAndInvSize.z * 100;
-
-			float WorldBluringRadius = WorldDepthToPixelWorldRadius * WorldDepth;
+			float WorldBluringRadius = GetDepthPixelRadiusForProjectionType(WorldDepth) * 100.0f;
 			float InvSquareWorldBluringRadius = rcp(WorldBluringRadius * WorldBluringRadius);
 
 			PrevColor = 0.0;
@@ -125,7 +126,7 @@ void MainCS(
 
 				float4 SampleColor = float4(
 					HigherMipTexture.SampleLevel(HigherMipTextureSampler, SampleUV, 0).rgb,
-					Texture2DSample_A8(HigherAlphaMipTexture,HigherAlphaMipTextureSampler, SampleUV));
+					HigherAlphaMipTexture.SampleLevel(HigherAlphaMipTextureSampler, SampleUV, 0).r);
 
 				PrevColor += SampleColor * SampleWeight;
 			}
@@ -147,7 +148,7 @@ void MainCS(
 		float4 PrevClip = mul(ThisClip, View.ClipToPrevClip);
 		float2 PrevScreen = PrevClip.xy / PrevClip.w;
 
-		bool bIsSky = WorldDepth > 100 * 1000;
+		bool bIsSky = WorldDepth > SkyDistance && SkyDistance > 0.0;
 
 		float4 EncodedVelocity = GBufferVelocityTexture.SampleLevel(GBufferVelocityTextureSampler, SceneBufferUV, 0);
 		if (EncodedVelocity.x > 0.0)
@@ -164,9 +165,7 @@ void MainCS(
 
 			float NoV = dot(View.TranslatedWorldCameraOrigin - normalize(RefWorldPosition), GetGBufferDataFromSceneTextures(SceneBufferUV).WorldNormal);
 				
-			float WorldDepthToPixelWorldRadius = GetTanHalfFieldOfView().x * View.ViewSizeAndInvSize.z * 100; // / max(NoV, 0.01);
-
-			float WorldBluringRadius = WorldDepthToPixelWorldRadius * WorldDepth;
+			float WorldBluringRadius = GetDepthPixelRadiusForProjectionType(WorldDepth) * 100.0f;
 			float InvSquareWorldBluringRadius = rcp(WorldBluringRadius * WorldBluringRadius);
 
 			//PrevColor = 0.0;
@@ -175,7 +174,7 @@ void MainCS(
 			//for (uint i = 0; i < 4; i++)
 			{
 				float2 SampleUV = PrevFrameUV; // + View.BufferSizeAndInvSize.zw * (float2(i % 2, i / 2) - 0.5);
-				SampleUV = clamp(SampleUV, View.BufferBilinearUVMinMax.xy, View.BufferBilinearUVMinMax.zw);
+				SampleUV = clamp(SampleUV, PrevBufferBilinearUVMinMax.xy, PrevBufferBilinearUVMinMax.zw);
 
 				float PrevDeviceZ = PrevSceneDepth.SampleLevel(PrevSceneDepthSampler, SampleUV, 0).r;
 
@@ -196,17 +195,15 @@ void MainCS(
 
 		PrevColor = -min(-PrevColor, 0.0);
 
-		#if CONFIG_COLOR_TILE_CLASSIFICATION
+
+		// Ignore sky contribution because in skylight
+		if (bIsSky)
 		{
-			if (bIsSky)
-				PrevColor = 0;
+			PrevColor = 0;
 		}
-		#endif
 
 		// Correct scene color exposure.
-		#if USE_PREEXPOSURE
-			PrevColor.rgb *= PrevSceneColorPreExposureCorrection;
-		#endif
+		PrevColor.rgb *= PrevSceneColorPreExposureCorrection;
 
 		// Apply vignette to the color.
 		{
@@ -255,7 +252,7 @@ void MainCS(
 		UNROLL
 		for (uint MipLevel = 1; MipLevel < 3; MipLevel++)
 		{
-			const uint ReductionAmount = 1 << MipLevel;
+			const uint ReductionAmount = 1u << MipLevel;
 			const uint NumberPixelInMip = GROUP_PIXEL_COUNT / (ReductionAmount * ReductionAmount);
 			
 			if (GroupThreadIndex < NumberPixelInMip)
@@ -287,9 +284,7 @@ void MainCS(
 					}
 				}
 
-				float WorldDepthToPixelWorldRadius = GetTanHalfFieldOfView().x * View.ViewSizeAndInvSize.z * 100;
-
-				float WorldBluringRadius = WorldDepthToPixelWorldRadius * FurthestDepth;
+				float WorldBluringRadius = GetDepthPixelRadiusForProjectionType(FurthestDepth) * 100.0f;
 				float InvSquareWorldBluringRadius = rcp(WorldBluringRadius * WorldBluringRadius);
 
 				#endif

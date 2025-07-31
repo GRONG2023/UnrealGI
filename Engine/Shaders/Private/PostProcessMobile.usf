@@ -9,7 +9,11 @@
 #include "PostprocessHistogramCommon.ush"
 #include "ScreenPass.ush"
 
+#if USE_MULTI_VIEW_ID_SV
+Texture2DArray SceneColorTexture;
+#else
 Texture2D SceneColorTexture;
+#endif
 SamplerState SceneColorSampler;
 
 Texture2D LastFrameSceneColorTexture;
@@ -67,6 +71,7 @@ float2 Circle(float Start, float Points, float Point)
 	return float2(sin(Rad), cos(Rad));
 }
 
+float BloomMaxBrightness;
 float BloomThreshold;
 
 half FocusDistFar()
@@ -131,6 +136,15 @@ half2 SunConstDepthMaskScaleBias()
 	return half2(Scale,-DepthMin * Scale);
 }
 
+float4 SampleSceneColor(float2 SceneUV, float ArrayIndex)
+{
+#if USE_MULTI_VIEW_ID_SV
+	return Texture2DArraySample(SceneColorTexture, SceneColorSampler, float3(SceneUV.xy, ArrayIndex));
+#else
+	return Texture2DSample(SceneColorTexture, SceneColorSampler, SceneUV);
+#endif
+}
+
 //
 // Convert depth in alpha into combined circle of confusion and sun intensity.
 //
@@ -139,33 +153,42 @@ half2 SunConstDepthMaskScaleBias()
 
 void SunMaskPS_Mobile(
 	float4 InUVPos : TEXCOORD0,
-	out half OutSunShaftAndDof : SV_Target0
-#if !MOBILE_USEDEPTHTEXTURE
-	, out half4 OutColor : SV_Target1
+#if USE_MULTI_VIEW_ID_SV
+	in uint MultiViewId : SV_ViewID,
+#endif
+	out HALF_TYPE OutSunShaftAndDof : SV_Target0
+#if MOBILE_USESUN && METAL_MSAA_HDR_DECODE
+	, out HALF4_TYPE OutColor : SV_Target1
 #endif
 	)
 {
-	half4 SceneColor = SceneColorTexture.Sample(SceneColorSampler, InUVPos.xy);
+	#if !USE_MULTI_VIEW_ID_SV
+		uint MultiViewId = 0;
+	#endif
 
-	#if MOBILE_USEDEPTHTEXTURE
+	half4 SceneColor = SampleSceneColor(InUVPos.xy,MultiViewId);
+
+	#if MOBILE_USEDEPTHTEXTURE 
 		half InDepth = ConvertFromDeviceZ(Texture2DSampleLevel(MobileSceneTextures.SceneDepthTexture, MobileSceneTextures.SceneDepthTextureSampler, InUVPos.xy, 0).r);
 	#else
-		#if MOBILE_DEFERRED_SHADING
-			half InDepth = ConvertFromDeviceZ(Texture2DSampleLevel(MobileSceneTextures.SceneDepthAuxTexture, MobileSceneTextures.SceneDepthAuxTextureSampler, InUVPos.xy, 0).r);
-		#else
-			half InDepth = ConvertFromDeviceZ(SceneColor.a);
-		#endif
+		half InDepth = ConvertFromDeviceZ(Texture2DSampleLevel(MobileSceneTextures.SceneDepthAuxTexture, MobileSceneTextures.SceneDepthAuxTextureSampler, InUVPos.xy, 0).r);
 	#endif
 	
 	#if MOBILE_USESUN
 
 		#if METAL_MSAA_HDR_DECODE
 			SceneColor.rgb *= rcp(SceneColor.r*(-0.299) + SceneColor.g*(-0.587) + SceneColor.b*(-0.114) + 1.0);
+			OutColor = SceneColor;
 		#endif
 
 		half2 DepthMaskScaleBias = SunConstDepthMaskScaleBias();
 		half FarAmount = saturate(InDepth * DepthMaskScaleBias.x + DepthMaskScaleBias.y);
 		half3 SunAmount = SceneColor.rgb * SunColorApertureDiv2.rgb;
+
+		float SunLuminance = max(Luminance(SunAmount), 6.10352e-5);
+		float AdjustedLuminance = clamp(SunLuminance - BloomThreshold, 0.0f, BloomMaxBrightness);
+		SunAmount = SunAmount / SunLuminance * AdjustedLuminance * 2.0f;
+
 	
 		half2 Pos = InUVPos.zw * 0.5 + 0.5;
 		half EdgeMask = 1.0f - Pos.x * (1.0f - Pos.x) * Pos.y * (1.0f - Pos.y) * 8.0f;
@@ -181,10 +204,6 @@ void SunMaskPS_Mobile(
 	#if MOBILE_USEDOF
 		OutSunShaftAndDof += Coc2(InDepth);
 	#endif
-
-	#if !MOBILE_USEDEPTHTEXTURE
-		OutColor = SceneColor;
-	#endif
 }
 
 #endif
@@ -195,7 +214,7 @@ void SunMaskPS_Mobile(
 
 void PreTonemapMSAA_Mobile(
 	float4 InUVPos : TEXCOORD0,
-	out half4 OutColor : SV_Target0
+	out HALF4_TYPE OutColor : SV_Target0
 	)
 {
 #if (METAL_PROFILE && !MAC)
@@ -210,7 +229,7 @@ SamplerState InputSampler;
 
 void MSAADecodeAndCopyRectPS(
 	noperspective float4 UVAndScreenPos : TEXCOORD0,
-	out half4 OutColor : SV_Target0
+	out HALF4_TYPE OutColor : SV_Target0
 	)
 {
 #if (METAL_PROFILE && !MAC)
@@ -240,24 +259,44 @@ void BloomVS_Mobile(
 	OutTexCoords[3] = TransformedUV + BufferSizeAndInvSize.zw * float2( 1,  1);
 }
 
+
+
+float Luma4(float3 Color)
+{
+	return (Color.g * 2.0) + (Color.r + Color.b);
+}
+
+float HdrWeight4(float3 Color)
+{
+	return rcp(Luma4(Color) + 4.0);
+}
+
+float HdrWeightInv4(float3 Color)
+{
+	return 4.0 * rcp(1.0 - Luma4(Color));
+}
+
 void BloomPS_Mobile(
 	float2 InUVs[4] : TEXCOORD0
+#if USE_MULTI_VIEW_ID_SV
+	, in uint MultiViewId : SV_ViewID
+#endif
 #if MOBILE_USEBLOOM
 
-	, out half4 OutColor : SV_Target0
+	, out HALF4_TYPE OutColor : SV_Target0
 
 	#if MOBILE_USEDOF || MOBILE_USESUN
 
-		,out half OutSunShaftAndDof : SV_Target1
+		,out HALF_TYPE OutSunShaftAndDof : SV_Target1
 
 		#if MOBILE_USEEYEADAPTATION
-			, out half OutEyeAdaptation : SV_Target2
+			, out HALF_TYPE OutEyeAdaptation : SV_Target2
 		#endif
 
 	#else
 
 		#if MOBILE_USEEYEADAPTATION
-			, out half OutEyeAdaptation : SV_Target1
+			, out HALF_TYPE OutEyeAdaptation : SV_Target1
 		#endif
 
 	#endif
@@ -267,16 +306,16 @@ void BloomPS_Mobile(
 
 	#if MOBILE_USEDOF || MOBILE_USESUN
 
-		, out half OutSunShaftAndDof : SV_Target0
+		, out HALF_TYPE OutSunShaftAndDof : SV_Target0
 
 		#if MOBILE_USEEYEADAPTATION
-			, out half OutEyeAdaptation : SV_Target1
+			, out HALF_TYPE OutEyeAdaptation : SV_Target1
 		#endif
 
 	#else
 
 		#if MOBILE_USEEYEADAPTATION
-			, out half OutEyeAdaptation : SV_Target0
+			, out HALF_TYPE OutEyeAdaptation : SV_Target0
 		#endif
 
 	#endif
@@ -286,27 +325,25 @@ void BloomPS_Mobile(
 {
 	half3 AverageColor = 0.0f;
 
-#if USE_PREEXPOSURE
-	const float OneOverPreExposure = View.OneOverPreExposure;
-	const float PreExposure = View.PreExposure;
-#else
-	const float OneOverPreExposure = 1.0f;
-	const float PreExposure = View.PreExposure;
-#endif
-
 #if MOBILE_USEBLOOM || MOBILE_USESUN || MOBILE_USEEYEADAPTATION
-	half4 C0 = SceneColorTexture.Sample(SceneColorSampler, InUVs[0]);
-	half4 C1 = SceneColorTexture.Sample(SceneColorSampler, InUVs[1]);
-	half4 C2 = SceneColorTexture.Sample(SceneColorSampler, InUVs[2]);
-	half4 C3 = SceneColorTexture.Sample(SceneColorSampler, InUVs[3]);
 
-	C0.rgb = C0;
-	C1.rgb = C1;
-	C2.rgb = C2;
-	C3.rgb = C3;
+#if !USE_MULTI_VIEW_ID_SV
+	uint MultiViewId = 0;
+#endif
+	
+	float4 C0 = SampleSceneColor(InUVs[0],MultiViewId);
+	float4 C1 = SampleSceneColor(InUVs[1],MultiViewId);
+	float4 C2 = SampleSceneColor(InUVs[2],MultiViewId);
+	float4 C3 = SampleSceneColor(InUVs[3],MultiViewId);
+
+	C0 *= HdrWeight4(C0);
+	C1 *= HdrWeight4(C1);
+	C2 *= HdrWeight4(C2);
+	C3 *= HdrWeight4(C3);
 
 	// Output color is average.
 	AverageColor.rgb = (C0.rgb * 0.25) + (C1.rgb * 0.25) + (C2.rgb * 0.25) + (C3.rgb * 0.25);
+	AverageColor.rgb *= HdrWeightInv4(AverageColor);
 
 	#if METAL_MSAA_HDR_DECODE
 		// This should really happen before the average, instead doing after average as optimization.
@@ -314,7 +351,7 @@ void BloomPS_Mobile(
 	#endif
 
 	// Try to kill negatives and NaNs here
-	AverageColor.rgb = max(AverageColor.rgb, 0) * OneOverPreExposure;
+	AverageColor.rgb = max(AverageColor.rgb, 0);
 
 	
 	#if MOBILE_USEBLOOM || MOBILE_USESUN
@@ -328,8 +365,6 @@ void BloomPS_Mobile(
 		OutColor.rgb = AverageColor;
 		OutColor.rgb *= Amount;
 		OutColor.a = 0;
-
-		OutColor = OutColor * PreExposure;
 	#endif
 #endif
 
@@ -365,10 +400,17 @@ void BloomPS_Mobile(
 #endif
 
 #if MOBILE_USESUN
+#if MOBILE_USEDOF
 	half Sun0 = max(0.0, A0-1.0);
 	half Sun1 = max(0.0, A1-1.0);
 	half Sun2 = max(0.0, A2-1.0);
 	half Sun3 = max(0.0, A3-1.0);
+#else
+	half Sun0 = A0;
+	half Sun1 = A1;
+	half Sun2 = A2;
+	half Sun3 = A3;
+#endif
 
 	// Take average of sun intensity and adjust by bloom threshold.
 	Amount *= 0.25;
@@ -376,10 +418,14 @@ void BloomPS_Mobile(
 #endif
 
 #if MOBILE_USEEYEADAPTATION
-
-	const half Intensity = max(dot(AverageColor, half3(1.0f, 1.0f, 1.0f) / 3.0f), EyeAdaptation_LuminanceMin);
+	float Intensity = dot(AverageColor * View.OneOverPreExposure, float3(1.0f, 1.0f, 1.0f) / 3.0f);
+	if (Intensity == 0.0)
+	{
+		// Override intensity for black pixels to MidGray. This behaviour is controlled by the cvar "r.EyeAdaptation.BlackHistogramBucketInfluence"
+		Intensity = (0.18 - EyeAdaptation_BlackHistogramBucketInfluence);
+	}
+	Intensity = max(Intensity, EyeAdaptation_LuminanceMin);
 	const float LogIntensity = clamp(log2(Intensity), -10.0f, 20.0f);
-
 	// Store log intensity in the alpha channel: scale to 0,1 range.
 	OutEyeAdaptation = EyeAdaptation_HistogramScale * LogIntensity + EyeAdaptation_HistogramBias;
 #endif
@@ -428,7 +474,7 @@ void BloomDownVS_Mobile(
 
 void BloomDownPS_Mobile(
 	float4 InUVs[8] : TEXCOORD0,
-	out half4 OutColor : SV_Target0
+	out HALF4_TYPE OutColor : SV_Target0
 	)
 {
 	half4 N0 = BloomDownSourceTexture.Sample(BloomDownSourceSampler, InUVs[0].xy).rgba;
@@ -517,7 +563,7 @@ float4 BloomTintB;
 
 void BloomUpPS_Mobile(
 	float4 InUVs[8] : TEXCOORD0,
-	out half4 OutColor : SV_Target0
+	out HALF4_TYPE OutColor : SV_Target0
 	)
 {
 	half3 A0 = BloomUpSourceATexture.Sample(BloomUpSourceASampler, InUVs[0].xy).rgb;
@@ -592,7 +638,7 @@ void DofNearVS_Mobile(
 void DofNearPS_Mobile(
 	float2 InUVs2 : TEXCOORD0,
 	float4 InUVs[4] : TEXCOORD1,
-	out half OutColor : SV_Target0
+	out HALF_TYPE OutColor : SV_Target0
 	)
 {
 	half N0 = SunShaftAndDofTexture.Sample(SunShaftAndDofSampler, InUVs2).r;
@@ -662,7 +708,10 @@ void DofDownVS_Mobile(
 
 void DofDownPS_Mobile(
 	float2 InUVs[5] : TEXCOORD0,
-	out half4 OutColor : SV_Target0
+#if USE_MULTI_VIEW_ID_SV
+	in uint MultiViewId : SV_ViewID,
+#endif
+	out HALF4_TYPE OutColor : SV_Target0
 	)
 {
 	// This shader needs float precision to work.
@@ -670,10 +719,14 @@ void DofDownPS_Mobile(
 	// Fetch near diolation and scale to (0 to 16384.0) range.
 	float N = DofNearTexture.Sample(DofNearSampler, InUVs[0]).r * 16384.0;
 
-	float4 A = SceneColorTexture.Sample(SceneColorSampler, InUVs[1]);
-	float4 B = SceneColorTexture.Sample(SceneColorSampler, InUVs[2]);
-	float4 C = SceneColorTexture.Sample(SceneColorSampler, InUVs[3]);
-	float4 D = SceneColorTexture.Sample(SceneColorSampler, InUVs[4]);
+#if !USE_MULTI_VIEW_ID_SV
+	uint MultiViewId = 0;
+#endif
+	
+	float4 A = SampleSceneColor(InUVs[1],MultiViewId);
+	float4 B = SampleSceneColor(InUVs[2],MultiViewId);
+	float4 C = SampleSceneColor(InUVs[3],MultiViewId);
+	float4 D = SampleSceneColor(InUVs[4],MultiViewId);
 
 	A.a = SunShaftAndDofTexture.Sample(SunShaftAndDofSampler, InUVs[1]).r;
 	B.a = SunShaftAndDofTexture.Sample(SunShaftAndDofSampler, InUVs[2]).r;
@@ -797,7 +850,7 @@ void DofBlurVS_Mobile(
 
 void DofBlurPS_Mobile(
 	float2 InUVs[5] : TEXCOORD0,
-	out half4 OutColor : SV_Target0
+	out HALF4_TYPE OutColor : SV_Target0
 	)
 {
 	// Near diolation size is copied into alpha for the tonemapper pass.
@@ -852,15 +905,23 @@ void IntegrateDOFVS_Mobile(
 void IntegrateDOFPS_Mobile(
 	in float4 TexCoords : TEXCOORD0,
 	in float2 FineDofGrain : TEXCOORD1,
-	out half4 OutColor : SV_Target0
+#if USE_MULTI_VIEW_ID_SV
+	in uint MultiViewId : SV_ViewID,
+#endif
+	out HALF4_TYPE OutColor : SV_Target0
 )
 {
-	half4 SceneColor = Texture2DSample(SceneColorTexture, SceneColorSampler, TexCoords.xy);
-
-	half4 DofFine = Texture2DSample(SceneColorTexture, SceneColorSampler, FineDofGrain.xy);
+	#if !USE_MULTI_VIEW_ID_SV
+		uint MultiViewId = 0;;
+	#endif
+	
+	half4 SceneColor = SampleSceneColor(TexCoords.xy,MultiViewId);
+	half4 DofFine = SampleSceneColor(FineDofGrain.xy,MultiViewId);
+	
 	half4 Dof = Texture2DSample(DofBlurTexture, DofBlurSampler, TexCoords.zw);
 	half DofCoc = Texture2DSample(SunShaftAndDofTexture, SunShaftAndDofSampler, TexCoords.xy).r;
 	// Convert alpha back into circle of confusion.
+	OutColor.a = SceneColor.a;
 	SceneColor.a = max(Dof.a, abs(DofCoc * 2.0 - 1.0));
 	// Convert circle of confusion into blend factors.		
 	half2 ScaleBias = CocBlendScaleBias(); // Constant.
@@ -871,7 +932,6 @@ void IntegrateDOFPS_Mobile(
 	OutColor.rgb = lerp(SceneColor.rgb, DofFine.rgb, DofAmountFine);
 	// Blend in coarse DOF.
 	OutColor.rgb = lerp(OutColor.rgb, Dof.rgb, DofAmount);
-	OutColor.a = SceneColor.a;
 }
 
 //
@@ -959,7 +1019,7 @@ half SunUnBias(half A)
 
 void SunAlphaPS_Mobile(
 	float2 InUVs[8] : TEXCOORD0,
-	out half OutColor : SV_Target0
+	out HALF_TYPE OutColor : SV_Target0
 	)
 {
 	OutColor = 
@@ -1006,7 +1066,7 @@ void SunBlurVS_Mobile(
 
 void SunBlurPS_Mobile(
 	float2 InUVs[8] : TEXCOORD0,
-	out half OutColor : SV_Target0
+	out HALF4_TYPE OutColor : SV_Target0
 	)
 {
 	OutColor = 
@@ -1076,7 +1136,7 @@ float4 BloomDirtMaskTint;
 void SunMergePS_Mobile(
 	float4 InUVVignette : TEXCOORD0,
 	float4 InUVs[7] : TEXCOORD1,
-	out half4 OutColor : SV_Target0
+	out HALF4_TYPE OutColor : SV_Target0
 	)
 {
 	#if MOBILE_USEBLOOM
@@ -1136,109 +1196,9 @@ void SunMergePS_Mobile(
 #undef SUN_P5
 #undef SUN_P6
 
-//
-// Average results of bloom/sunshaft/vignette for 2 frames (used for temporal AA).
-//
-
-void SunAvgPS_Mobile(
-	float4 InUV : TEXCOORD0,
-	out half4 OutColor : SV_Target0
-	)
-{
-	OutColor = 
-		SunMergeTexture.Sample(SunMergeSampler, InUV.xy).rgba * 0.5 +
-		LastFrameSunMergeTexture.Sample(LastFrameSunMergeSampler, InUV.xy).rgba * 0.5;
-}
-
-
-
-//
-// Ultra simple temporal antialiasing shader which works without motion vectors.
-//
-
-float AaBlendAmount;
-
-void AaVS_Mobile(
-	in float4 InPosition : ATTRIBUTE0,
-	in float2 InTexCoord : ATTRIBUTE1,
-	out float2 OutUV[6] : TEXCOORD0,
-	out float4 OutPosition : SV_POSITION
-	)
-{
-	DrawRectangle(InPosition, InTexCoord, OutPosition, InTexCoord);
-
-	// AA texture coordinates.
-	float AaX = View.TemporalAAParams.x;
-	// Y is flipped here in comparison with the coords in SceneVisibility (GL -y flip).
-	float2 Aa1 = float2(0.5,-0.0);
-	float2 Aa2 = float2(-0.0,0.5);
-	if(abs(AaX) == 0.0) Aa1 = float2(-0.0,0.5);
-	if(abs(AaX) == 0.0) Aa2 = float2(0.5,-0.0);
-	OutUV[0] = InTexCoord.xy + (Aa1 + float2(-0.75, 0.0)) * BufferSizeAndInvSize.zw;
-	OutUV[1] = InTexCoord.xy + (Aa1 + float2( 0.0,-0.75)) * BufferSizeAndInvSize.zw;
-	OutUV[2] = InTexCoord.xy + Aa1 * BufferSizeAndInvSize.zw;
-	OutUV[3] = InTexCoord.xy + (Aa1 + float2( 0.0, 0.75)) * BufferSizeAndInvSize.zw;
-	OutUV[4] = InTexCoord.xy + (Aa1 + float2( 0.75, 0.0)) * BufferSizeAndInvSize.zw;
-	OutUV[5] = InTexCoord.xy + Aa2 * BufferSizeAndInvSize.zw;
-}
-
-void AaPS_Mobile(
-	float2 UV[6] : TEXCOORD0,
-	out half4 OutColor : SV_Target0
-	)
-{
-	//   N
-	// w M E            P = previous middle
-	//   S
-	half4 ColorN = SceneColorTexture.Sample(SceneColorSampler, UV[0].xy);
-	half4 ColorW = SceneColorTexture.Sample(SceneColorSampler, UV[1].xy);
-	half4 ColorM = SceneColorTexture.Sample(SceneColorSampler, UV[2].xy);
-	half4 ColorE = SceneColorTexture.Sample(SceneColorSampler, UV[3].xy);
-	half4 ColorS = SceneColorTexture.Sample(SceneColorSampler, UV[4].xy);
-	half4 ColorP = LastFrameSceneColorTexture.Sample(LastFrameSceneColorSampler, UV[5].xy);
-
-	half LumaN = ColorN.g;
-	half LumaW = ColorW.g;
-	half LumaM = ColorM.g;
-	half LumaE = ColorE.g;
-	half LumaS = ColorS.g;
-	half LumaP = ColorP.g;
-
-	half LumaMin = min(LumaM, min(min(LumaN, LumaS), min(LumaW, LumaE)));
-	half LumaMax = max(LumaM, max(max(LumaN, LumaS), max(LumaW, LumaE)));
-
-	// Using circle of confusion size in alpha to increase the blend between two frames.
-	// Depth of field would flicker otherwise.
-	half BlendAmount = saturate(min(ColorM.a, ColorP.a) * 4.0); 
-	BlendAmount = max(BlendAmount * 0.5, AaBlendAmount);
-
-	// BlendAmount = 0.5 -> Full ghosting (average of two frames).
-	// BlendAmount = 0.0 -> No ghosting but lots of flicker.
-	LumaMin = min(LumaM, LumaP) * BlendAmount + LumaMin * (1.0 - BlendAmount);
-	LumaMax = max(LumaM, LumaP) * BlendAmount + LumaMax * (1.0 - BlendAmount);
-
-	half LumaT = LumaM * 0.5 + LumaP * 0.5;
-
-	LumaT = max(LumaT, LumaMin);
-	LumaT = min(LumaT, LumaMax);
-	
-#if METAL_PROFILE
-	// avoid division by zero 
-	// normally saturate should kill NaNs, but Metal fast math does not do it
-	// this can be fixed by instructing cross-compiler to use precise math for saturate
-	half LumaD = LumaP - LumaM;
-	half BlendFinal = saturate((LumaT - LumaM) * (abs(LumaD) < 0.001 ? 1000.0 : rcp(LumaD)));
-#else
-	half BlendFinal = saturate((LumaT - LumaM) * rcp(LumaP - LumaM));
-#endif
-			
-	OutColor.rgb = lerp(ColorM.rgb, ColorP.rgb, BlendFinal);
-	OutColor.a = 0;
-}
-
 // EyeAdaptation
 
-Buffer<float4> EyeAdaptationBuffer;
+StructuredBuffer<float4> EyeAdaptationBuffer;
 
 static const float FLOAT_PRECISION = 1e+5;
 
@@ -1388,12 +1348,13 @@ float4 BasicEyeAdaptation_Mobile()
 }
 
 #if BASIC_EYEADAPTATION_COMPUTE_SHADER
-RWBuffer<float4> OutputBuffer;
+RWStructuredBuffer<float4> OutputBuffer;
 
 [numthreads(1, 1, 1)]
 void BasicEyeAdaptationCS_Mobile()
 {
 	OutputBuffer[0] = BasicEyeAdaptation_Mobile();
+	OutputBuffer[1] = float4(1.0f, 0.0f, 0.0f, 0.0f);
 }
 
 #endif
@@ -1466,13 +1427,13 @@ void Histogram_MainCS(
 				ScreenWeight = AdaptationWeightTexture(BufferUV);
 
 				// Map the normalized histogram position into texels.
-				fBucket = LogLuminance * HistogramSizeMinusOne;// * 0.9999f;
+				fBucket = LogLuminance * HistogramSizeMinusOne;
 
 				// Find two discrete buckets that straddle the continuous histogram position.
 				Bucket0 = (uint)(fBucket);
 				Bucket1 = Bucket0 + 1;
 
-//				Bucket0 = min(Bucket0, HistogramSizeMinusOne);
+				Bucket0 = min(Bucket0, HistogramSizeMinusOne);
 				Bucket1 = min(Bucket1, HistogramSizeMinusOne);
 
 				// Weighted blend between the two buckets.
@@ -1483,10 +1444,11 @@ void Histogram_MainCS(
 				// case is so the black background pixels in the editor have no effect. But if we have cases where
 				// pixel values can actually be black, we want to set EyeAdaptation_LastHistogramBucketInfluence=1.0.
 				// This value is controlled by the cvar "r.EyeAdaptation.BlackHistogramBucketInfluence"
-				if (Bucket0 == 0)
-				{
-					Weight0 *= EyeAdaptation_BlackHistogramBucketInfluence;
-				}
+				// THIS IS DONE in a Bloom setup, black pixels will set intencity to 0.18
+				//if (Bucket0 == 0)
+				//{
+				//	Weight0 *= EyeAdaptation_BlackHistogramBucketInfluence;
+				//}
 
 				// Accumulate the weight to the nearby history buckets.
 #if IOS // The IOS A8 and lower devices seems don't support using a float4 array as a two dimension array, separate the operations to two steps.
@@ -1605,7 +1567,7 @@ float ComputeEyeAdaptationExposure_Mobile()
 	return LumAve;
 }
 
-RWBuffer<float4> OutputBuffer;
+RWStructuredBuffer<float4> OutputBuffer;
 
 [numthreads(1, 1, 1)]
 void HistogramEyeAdaptationCS(uint2 DispatchThreadId : SV_DispatchThreadID)
@@ -1641,5 +1603,6 @@ void HistogramEyeAdaptationCS(uint2 DispatchThreadId : SV_DispatchThreadID)
 	OutColor.w = MiddleGreyExposureCompensation;
 
 	OutputBuffer[0] = OutColor;
+	OutputBuffer[1] = float4(1.0f, 0.0f, 0.0f, 0.0f);
 }
 #endif

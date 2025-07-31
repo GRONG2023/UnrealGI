@@ -4,7 +4,7 @@
 
 #include "../PathTracing/Utilities/PathTracingRandomSequence.ush"
 #include "../MonteCarlo.ush"
-#include "../LightShaderParameters.ush"
+#include "../LightData.ush"
 #include "RayTracingCommon.ush"
 
 // Adapted from "A Low Distortion Map Between Disk and Square." Improved based
@@ -33,7 +33,7 @@ float2 ToConcentricMap(float2 RectangularCoords)
 
 void GenerateDirectionalLightOcclusionRay(
 	FLightShaderParameters LightParameters,
-	float3 WorldPosition,
+	float3 TranslatedWorldPosition,
 	float3 WorldNormal,
 	float2 RandSample,
 	out float3 RayOrigin,
@@ -50,7 +50,7 @@ void GenerateDirectionalLightOcclusionRay(
 	float3 LightDirection = LightParameters.Direction;
 	float3 N = LightDirection;
 	float3 dPdu = float3(1, 0, 0);
-	if (dot(N, dPdu) != 0)
+	if (abs(dot(N, dPdu)) != 1)
 	{
 		dPdu = cross(N, dPdu);
 	}
@@ -61,7 +61,7 @@ void GenerateDirectionalLightOcclusionRay(
 	float3 dPdv = cross(dPdu, N);
 	LightDirection += dPdu * DiskUV.x + dPdv * DiskUV.y;
 	
-    RayOrigin = WorldPosition;
+    RayOrigin = TranslatedWorldPosition;
     RayDirection = normalize(LightDirection);
 	RayTMin = 0.0;
 	RayTMax = 1.0e27;

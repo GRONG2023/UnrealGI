@@ -1,3 +1,5 @@
+// Copyright Epic Games, Inc. All Rights Reserved.
+
 /*=============================================================================
 	VolumetricFogVoxelization.usf
 =============================================================================*/
@@ -10,6 +12,11 @@
 
 #include "Common.ush"
 
+#if SUBSTRATE_ENABLED && !MATERIAL_IS_SUBSTRATE
+#undef SUBSTRATE_ENABLED
+#define SUBSTRATE_ENABLED 0
+#endif
+
 #define SceneTexturesStruct VoxelizeVolumePass.SceneTextures 
 
 #include "/Engine/Generated/Material.ush"
@@ -20,6 +27,46 @@
 #define VolumetricFog VoxelizeVolumePass.VolumetricFog
 
 uint VoxelizationPassIndex;
+
+float SampleExtinctionCoefficients(in FPixelMaterialInputs PixelMaterialInputs)
+{
+	float Extinction = 0.0f;
+#if SUBSTRATE_ENABLED
+	FSubstrateBSDF BSDF = PixelMaterialInputs.FrontMaterial.InlinedBSDF;
+	Extinction = VOLUMETRICFOGCLOUD_EXTINCTION(BSDF).r;
+#else
+	#if !MATERIAL_SHADINGMODEL_UNLIT
+	Extinction = GetMaterialSubsurfaceDataRaw(PixelMaterialInputs).r;
+	#endif
+#endif
+	return clamp(Extinction, 0.0f, 65000.0f);
+}
+
+float3 SampleEmissive(in FPixelMaterialInputs PixelMaterialInputs)
+{
+	float3 EmissiveColor = 0.0f;
+#if SUBSTRATE_ENABLED
+	FSubstrateBSDF BSDF = PixelMaterialInputs.FrontMaterial.InlinedBSDF;
+	EmissiveColor = BSDF_GETEMISSIVE(BSDF);
+#else
+	EmissiveColor = GetMaterialEmissiveRaw(PixelMaterialInputs);
+#endif
+	return clamp(EmissiveColor, 0.0f, 65000.0f);
+}
+
+float3 SampleAlbedo(in FPixelMaterialInputs PixelMaterialInputs, in ViewState InputView)
+{
+	float3 Albedo = 0.0f;
+#if SUBSTRATE_ENABLED
+	FSubstrateBSDF BSDF = PixelMaterialInputs.FrontMaterial.InlinedBSDF;
+	Albedo = VOLUMETRICFOGCLOUD_ALBEDO(BSDF);
+#else
+	#if !MATERIAL_SHADINGMODEL_UNLIT
+	Albedo = GetMaterialBaseColor(PixelMaterialInputs);
+	#endif
+#endif
+	return saturate(Albedo)* InputView.DiffuseOverrideParameter.w + InputView.DiffuseOverrideParameter.xyz;
+}
 
 struct FVoxelizeVolumePrimitiveVSToGS
 {
@@ -65,14 +112,14 @@ void VoxelizeGS(triangle FVoxelizeVolumePrimitiveVSToGS Inputs[3], inout Triangl
 	ResolvedView = ResolveView();
 #endif
 
-	int GridSizeZ = VolumetricFog.GridSize.z;
+	int GridSizeZ = VolumetricFog.ViewGridSize.z;
 	float4 PrimitiveVolumeBounds = VertexFactoryGetTranslatedPrimitiveVolumeBounds(Inputs[0].FactoryInterpolants);
 	float3 ViewSpacePrimitiveVolumeOrigin = mul(float4(PrimitiveVolumeBounds.xyz, 1), ResolvedView.TranslatedWorldToView).xyz;
 
 	uint PrimitiveId = VertexFactoryGetPrimitiveId(Inputs[0].FactoryInterpolants);
 	float3 LocalObjectBoundsMin = GetPrimitiveData(PrimitiveId).LocalObjectBoundsMin;
 	float3 LocalObjectBoundsMax = GetPrimitiveData(PrimitiveId).LocalObjectBoundsMax;
-	float4x4 LocalToWorld = GetPrimitiveData(PrimitiveId).LocalToWorld;
+	float4x4 LocalToWorld = DFHackToFloat(GetPrimitiveData(PrimitiveId).LocalToWorld);
 
 	float QuadDepth = ViewSpacePrimitiveVolumeOrigin.z;
 
@@ -110,7 +157,7 @@ void VoxelizeGS(triangle FVoxelizeVolumePrimitiveVSToGS Inputs[3], inout Triangl
 			float3 BoxVertexMask = float3((BoxVertex >> 0) & 1, (BoxVertex >> 1) & 1, (BoxVertex >> 2) & 1);
 			float3 BoxVertexLocalPosition = LocalObjectBoundsMin + (LocalObjectBoundsMax - LocalObjectBoundsMin) * BoxVertexMask;
 			float3 BoxVertexPosition = mul(float4(BoxVertexLocalPosition, 1), LocalToWorld).xyz;
-			float3 ViewSpaceBoxVertex = mul(float4(BoxVertexPosition + ResolvedView.PreViewTranslation, 1), ResolvedView.TranslatedWorldToView).xyz;
+			float3 ViewSpaceBoxVertex = mul(float4(BoxVertexPosition + DFHackToFloat(ResolvedView.PreViewTranslation), 1), ResolvedView.TranslatedWorldToView).xyz;
 			ViewSpaceBoundingBoxMin = min(ViewSpaceBoundingBoxMin, ViewSpaceBoxVertex.xy);
 			ViewSpaceBoundingBoxMax = max(ViewSpaceBoundingBoxMax, ViewSpaceBoxVertex.xy);
 		}
@@ -213,14 +260,14 @@ void VoxelizeVS(
 #endif
 }
 
-float ComputeVolumeShapeMasking(float3 WorldPosition, uint PrimitiveId, FVertexFactoryInterpolantsVSToPS FactoryInterpolants)
+float ComputeVolumeShapeMasking(float3 TranslatedWorldPosition, uint PrimitiveId, FVertexFactoryInterpolantsVSToPS FactoryInterpolants)
 {
 	float ValidRegionMask = 1;
 
 #if VOXELIZE_SHAPE_MODE == PRIMITIVE_SPHERE_MODE
 
 	float4 PrimitiveVolumeBounds = VertexFactoryGetTranslatedPrimitiveVolumeBounds(FactoryInterpolants);
-	float3 ConnectingVector = PrimitiveVolumeBounds.xyz - ResolvedView.PreViewTranslation - WorldPosition;
+	float3 ConnectingVector = PrimitiveVolumeBounds.xyz - TranslatedWorldPosition;
 
 	FLATTEN
 	if (dot(ConnectingVector, ConnectingVector) > PrimitiveVolumeBounds.w * PrimitiveVolumeBounds.w)
@@ -232,9 +279,10 @@ float ComputeVolumeShapeMasking(float3 WorldPosition, uint PrimitiveId, FVertexF
 
 	float3 LocalObjectBoundsMin = GetPrimitiveData(PrimitiveId).LocalObjectBoundsMin;
 	float3 LocalObjectBoundsMax = GetPrimitiveData(PrimitiveId).LocalObjectBoundsMax;
-	float4x4 LocalToWorld = GetPrimitiveData(PrimitiveId).LocalToWorld;
+	float4x4 LocalToWorld = DFHackToFloat(GetPrimitiveData(PrimitiveId).LocalToWorld);
 
-	float3 LocalPosition = mul(float4(WorldPosition, 1), GetPrimitiveData(PrimitiveId).WorldToLocal).xyz;
+	float4x4 TranslatedWorldToLocal = DFFastToTranslatedWorld(GetPrimitiveData(PrimitiveId).WorldToLocal, ResolvedView.PreViewTranslation);
+	float3 LocalPosition = mul(float4(TranslatedWorldPosition, 1), TranslatedWorldToLocal).xyz;
 
 	FLATTEN
 	if (any((LocalPosition < LocalObjectBoundsMin || LocalPosition > LocalObjectBoundsMax)))
@@ -265,25 +313,19 @@ void VoxelizePS(
 	FCloudLayerParameters CloudLayerParams = GetCloudLayerParams(
 		VoxelizeVolumePass.RenderVolumetricCloudParametersCloudLayerCenterKm, VoxelizeVolumePass.RenderVolumetricCloudParametersPlanetRadiusKm,
 		VoxelizeVolumePass.RenderVolumetricCloudParametersBottomRadiusKm, VoxelizeVolumePass.RenderVolumetricCloudParametersTopRadiusKm);
-	const float NotShadowSample = 0.0f;
-	float4 ScreenPosition = SvPositionToResolvedScreenPosition(SvPosition);
-	float3 TranslatedWorldPosition = SvPositionToResolvedTranslatedWorld(SvPosition);
-	float3 AbsoluteWorldPosition = TranslatedWorldPosition.xyz - ResolvedView.PreViewTranslation.xyz;
-	UpdateMaterialCloudParam(MaterialParameters, AbsoluteWorldPosition, ResolvedView, CloudLayerParams, NotShadowSample);
+	float3 TranslatedWorldPosition = SvPositionToTranslatedWorld(SvPosition);
+	UpdateMaterialCloudParam(MaterialParameters, TranslatedWorldPosition, ResolvedView, CloudLayerParams, TRACING_SHADOW_DISTANCE_OFF, SPACE_SKIPPING_SLICE_DEPTH_OFF);
 #endif
+
+	// Scale rendered position to account for frustum difference between fog voxelization and rendered scene
+	float4 AdjustedSvPosition = SvPosition * float4(VoxelizeVolumePass.ClipRatio, 1, 1);
 
 	FPixelMaterialInputs PixelMaterialInputs;
-	CalcMaterialParameters(MaterialParameters, PixelMaterialInputs, SvPosition, true);
+	CalcMaterialParameters(MaterialParameters, PixelMaterialInputs, AdjustedSvPosition, true);
 
-	float3 EmissiveColor = clamp(GetMaterialEmissiveRaw(PixelMaterialInputs), 0.0f, 65000.0f);
-
-	float3 Albedo = 0;
-	float Extinction = 0;
-
-#if !MATERIAL_SHADINGMODEL_UNLIT
-	Albedo = GetMaterialBaseColor(PixelMaterialInputs) * View.DiffuseOverrideParameter.w + View.DiffuseOverrideParameter.xyz;
-	Extinction = clamp(GetMaterialSubsurfaceDataRaw(PixelMaterialInputs).r, 0.0f, 65000.0f);
-#endif
+	float3 EmissiveColor = SampleEmissive(PixelMaterialInputs);
+	float3 Albedo = SampleAlbedo(PixelMaterialInputs, ResolvedView);
+	float Extinction = SampleExtinctionCoefficients(PixelMaterialInputs);
 
 	float3 Scattering = Albedo * Extinction;
 	float Absorption = max(Extinction - Luminance(Scattering), 0.0f);
@@ -295,7 +337,7 @@ void VoxelizePS(
 	float Scale = UnitScale * SliceFadeAlpha * SliceFadeAlpha * SliceFadeAlpha;
 
 	// Would be faster to branch around the whole material evaluation, but that would cause divergent flow control for gradient operations
-	Scale *= ComputeVolumeShapeMasking(MaterialParameters.AbsoluteWorldPosition, MaterialParameters.PrimitiveId, Interpolants.FactoryInterpolants);
+	Scale *= ComputeVolumeShapeMasking(MaterialParameters.WorldPosition_CamRelative, MaterialParameters.PrimitiveId, Interpolants.FactoryInterpolants);
 
 	OutVBufferA = float4(Scattering * Scale, Absorption * Scale);
 	OutVBufferB = float4(EmissiveColor * Scale, 0);

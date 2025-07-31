@@ -4,6 +4,13 @@
 	DynamicLightingCommon.usf: Contains functions shared by dynamic light shaders.
 =============================================================================*/
 
+#include "LargeWorldCoordinates.ush"
+
+float3 GetDeferredLightTranslatedWorldPosition()
+{
+	return DeferredLightUniforms.TranslatedWorldPosition;
+}
+
 /** 
  * Returns a radial attenuation factor for a point light.  
  * WorldLightVector is the vector from the position being shaded to the light, divided by the radius of the light. 
@@ -15,10 +22,10 @@ float RadialAttenuationMask(float3 WorldLightVector)
 }
 float RadialAttenuation(float3 WorldLightVector, half FalloffExponent)
 {
-	// UE3 (fast, but now we not use the default of 2 which looks quite bad):
+	// Old (fast, but now we not use the default of 2 which looks quite bad):
 	return pow(RadialAttenuationMask(WorldLightVector), FalloffExponent);
 
-	// new UE4 (more physically correct but slower and has a more noticable cutoff ring in the dark):
+	// New (more physically correct but slower and has a more noticable cutoff ring in the dark):
 	// AttenFunc(x) = 1 / (x * x + 1)
 	// derived: InvAttenFunc(y) = sqrtf(1 / y - 1)
 	// FalloffExponent is ignored
@@ -57,13 +64,13 @@ float SpotAttenuation(float3 L, float3 SpotDirection, float2 SpotAngles)
 }
 
 /** Calculates radial and spot attenuation. */
-float CalcLightAttenuation(float3 WorldPosition, out float3 WorldLightVector)
+float CalcLightAttenuation(float3 TranslatedWorldPosition, out float3 WorldLightVector)
 {
 	WorldLightVector = DeferredLightUniforms.Direction;
 	float DistanceAttenuation = 1;
 
 #if RADIAL_ATTENUATION
-	WorldLightVector = DeferredLightUniforms.Position - WorldPosition;
+	WorldLightVector = GetDeferredLightTranslatedWorldPosition() - TranslatedWorldPosition;
 	float DistanceSqr = dot( WorldLightVector, WorldLightVector );
 
 	// TODO Line segment falloff
@@ -73,10 +80,10 @@ float CalcLightAttenuation(float3 WorldPosition, out float3 WorldLightVector)
 	
 	float LightRadiusMask = Square( saturate( 1 - Square( DistanceSqr * DeferredLightUniforms.InvRadius * DeferredLightUniforms.InvRadius ) ) );
 	DistanceAttenuation *= LightRadiusMask;
-	
-#if !INVERSE_SQUARED_FALLOFF
-	DistanceAttenuation = RadialAttenuation(WorldLightVector * DeferredLightUniforms.InvRadius, DeferredLightUniforms.FalloffExponent);
-#endif
+	if (DeferredLightUniforms.FalloffExponent > 0.f)
+	{
+		DistanceAttenuation = RadialAttenuation(WorldLightVector * DeferredLightUniforms.InvRadius, DeferredLightUniforms.FalloffExponent);
+	}
 #endif
 
 	float SpotFalloff = 1;
@@ -87,25 +94,25 @@ float CalcLightAttenuation(float3 WorldPosition, out float3 WorldLightVector)
 	return SpotFalloff * DistanceAttenuation;
 }
 
-float3 GetNormalizedLightVector(float3 WorldPosition)
+float3 GetNormalizedLightVector(float3 TranslatedWorldPosition)
 {
 	// assumed to be normalized
 	float3 Ret = DeferredLightUniforms.Direction;
 
 	#if RADIAL_ATTENUATION
-		Ret = normalize(DeferredLightUniforms.Position - WorldPosition);
+		Ret = normalize(GetDeferredLightTranslatedWorldPosition() - TranslatedWorldPosition);
 	#endif
 
 	return Ret;
 }
 
-float GetLightInfluenceMask(float3 WorldPosition)
+float GetLightInfluenceMask(float3 TranslatedWorldPosition)
 {
 	float LightMask = 1;
 
 	if (DeferredLightUniforms.InvRadius > 0)
 	{
-		float3 ToLight = DeferredLightUniforms.Position - WorldPosition;
+		float3 ToLight = GetDeferredLightTranslatedWorldPosition() - TranslatedWorldPosition;
 		float DistanceSqr = dot(ToLight, ToLight);
 		float3 L = ToLight * rsqrt(DistanceSqr);
 

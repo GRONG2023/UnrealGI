@@ -1,9 +1,5 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-/*=============================================================================
-	ReflectionEnvironmentShared
-=============================================================================*/
-
 #pragma once
 
 #if (FEATURE_LEVEL <= FEATURE_LEVEL_ES3_1)
@@ -11,6 +7,11 @@
 #else
 #define SkyIrradianceEnvironmentMap		View.SkyIrradianceEnvironmentMap
 #endif
+
+float GetSkyLightCubemapBrightness()
+{
+	return SkyIrradianceEnvironmentMap[7].x; // Refer to FSceneRenderer::UpdateSkyIrradianceGpuBuffer for more details.
+}
 
 #define REFLECTION_CAPTURE_ROUGHEST_MIP 1
 #define REFLECTION_CAPTURE_ROUGHNESS_MIP_SCALE 1.2
@@ -40,7 +41,7 @@ float3 GetSkyLightReflection(float3 ReflectionVector, float Roughness, out float
 	float AbsoluteSpecularMip = ComputeReflectionCaptureMipFromRoughness(Roughness, ReflectionStruct.SkyLightParameters.x);
 	float3 Reflection = TextureCubeSampleLevel(ReflectionStruct.SkyLightCubemap, ReflectionStruct.SkyLightCubemapSampler, ReflectionVector, AbsoluteSpecularMip).rgb;
 
-	OutSkyAverageBrightness = ReflectionStruct.SkyLightCubemapBrightness * Luminance( View.SkyLightColor.rgb );
+	OutSkyAverageBrightness = GetSkyLightCubemapBrightness() * Luminance(View.SkyLightColor.rgb);
 	return Reflection * View.SkyLightColor.rgb;
 }
 
@@ -117,22 +118,22 @@ float3 GetSkySHDiffuseSimple(float3 Normal)
 
 
 // Point lobe in off-specular peak direction
-float3 GetOffSpecularPeakReflectionDir(float3 Normal, float3 ReflectionVector, float Roughness)
+half3 GetOffSpecularPeakReflectionDir(half3 Normal, half3 ReflectionVector, half Roughness)
 {
-	float a = Square(Roughness);
+	half a = Roughness * Roughness;
 	return lerp( Normal, ReflectionVector, (1 - a) * ( sqrt(1 - a) + a ) );	
 }
 
-float GetSpecularOcclusion(float NoV, float RoughnessSq, float AO)
+half GetSpecularOcclusion(half NoV, half RoughnessSq, half AO)
 {
 	return saturate( pow( NoV + AO, RoughnessSq ) - 1 + AO );
 }
 
-float3 GetLookupVectorForBoxCapture(float3 ReflectionVector, float3 WorldPosition, float4 BoxCapturePositionAndRadius, float4x4 BoxTransform, float4 BoxScales, float3 LocalCaptureOffset, out float DistanceAlpha)
+float3 GetLookupVectorForBoxCapture(float3 ReflectionVector, float3 WorldPosition, float4 BoxCapturePositionAndRadius, float4x4 RelativeWorldToBox, float4 BoxScales, float3 LocalCaptureOffset, out float DistanceAlpha)
 {
 	// Transform the ray into the local space of the box, where it is an AABB with mins at -1 and maxs at 1
-	float3 LocalRayStart		= mul(float4(WorldPosition, 1), BoxTransform).xyz;
-	float3 LocalRayDirection	= mul(float4(ReflectionVector,  0), BoxTransform).xyz;
+	float3 LocalRayStart		= mul(float4(WorldPosition - BoxCapturePositionAndRadius.xyz, 1), RelativeWorldToBox).xyz;
+	float3 LocalRayDirection	= mul(float4(ReflectionVector,  0), RelativeWorldToBox).xyz;
 
 	float3 InvRayDir = rcp(LocalRayDirection);
 	
@@ -195,18 +196,34 @@ float3 GetLookupVectorForSphereCapture(float3 ReflectionVector, float3 WorldPosi
 	return ProjectedCaptureVector;
 }
 
-float ComputeMixingWeight(float IndirectIrradiance, float AverageBrightness, float Roughness)
+half ComputeMixingWeight(half IndirectIrradiance, half AverageBrightness, half Roughness)
 {
 	// Mirror surfaces should have no mixing, so they match reflections from other sources (SSR, planar reflections)
-	float MixingAlpha = smoothstep(0, 1, saturate(Roughness * View.ReflectionEnvironmentRoughnessMixingScaleBiasAndLargestWeight.x + View.ReflectionEnvironmentRoughnessMixingScaleBiasAndLargestWeight.y));
+	half MixingAlpha = smoothstep(0, 1, saturate(Roughness * View.ReflectionEnvironmentRoughnessMixingScaleBiasAndLargestWeight.x + View.ReflectionEnvironmentRoughnessMixingScaleBiasAndLargestWeight.y));
 
 	// We have high frequency directional data but low frequency spatial data in the envmap.
 	// We have high frequency spatial data but low frequency directional data in the lightmap.
 	// So, we combine the two for the best of both. This is done by removing the low spatial frequencies from the envmap and replacing them with the lightmap data.
 	// This is only done with luma so as to not get odd color shifting.
-	float MixingWeight = IndirectIrradiance / max(AverageBrightness, .0001f);
+	half MixingWeight = IndirectIrradiance / max(AverageBrightness, .0001f);
 
 	MixingWeight = min(MixingWeight, View.ReflectionEnvironmentRoughnessMixingScaleBiasAndLargestWeight.z);
 
 	return lerp(1.0f, MixingWeight, MixingAlpha);
 }
+
+#if ES3_1_PROFILE
+#define GetReflectionPositionAndRadius(CaptureIndex) ReflectionCaptureES31.PositionHighAndRadius[CaptureIndex]
+#define GetReflectionCaptureProperties(CaptureIndex) ReflectionCaptureES31.CaptureProperties[CaptureIndex]
+#define GetReflectionCaptureOffsetAndAverageBrightness(CaptureIndex) ReflectionCaptureES31.CaptureOffsetAndAverageBrightness[CaptureIndex]
+#define GetReflectionBoxTransform(CaptureIndex) ReflectionCaptureES31.BoxTransform[CaptureIndex]
+#define GetReflectionBoxScales(CaptureIndex) ReflectionCaptureES31.BoxScales[CaptureIndex]
+#define GetReflectionPositionLow(CaptureIndex) ReflectionCaptureES31.PositionLow[CaptureIndex]
+#else
+#define GetReflectionPositionAndRadius(CaptureIndex) ReflectionCaptureSM5.PositionHighAndRadius[CaptureIndex]
+#define GetReflectionCaptureProperties(CaptureIndex) ReflectionCaptureSM5.CaptureProperties[CaptureIndex]
+#define GetReflectionCaptureOffsetAndAverageBrightness(CaptureIndex) ReflectionCaptureSM5.CaptureOffsetAndAverageBrightness[CaptureIndex]
+#define GetReflectionBoxTransform(CaptureIndex) ReflectionCaptureSM5.BoxTransform[CaptureIndex]
+#define GetReflectionBoxScales(CaptureIndex) ReflectionCaptureSM5.BoxScales[CaptureIndex]
+#define GetReflectionPositionLow(CaptureIndex) ReflectionCaptureSM5.PositionLow[CaptureIndex]
+#endif

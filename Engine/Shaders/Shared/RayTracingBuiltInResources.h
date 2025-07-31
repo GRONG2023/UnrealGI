@@ -8,15 +8,13 @@
 
 #pragma once
 
-#ifndef RAYTRACINGBUILTINRESOURCES_USH_INCLUDED
-#define RAYTRACINGBUILTINRESOURCES_USH_INCLUDED // Workarround for UE-66460
-
 #include "RayTracingDefinitions.h"
+#include "HLSLReservedSpaces.h"
 
 #if defined(__cplusplus)
 	#define INCLUDED_FROM_CPP_CODE  1
 	#define INCLUDED_FROM_HLSL_CODE 0
-#elif defined(SM5_PROFILE)
+#elif defined(SM5_PROFILE) || defined(VULKAN_PROFILE_SM6)
 	// #dxr_todo: we should use a built-in macro to detect if this shader is compiled using DXC (depends on https://github.com/Microsoft/DirectXShaderCompiler/issues/1686)
 	#define INCLUDED_FROM_CPP_CODE  0
 	#define INCLUDED_FROM_HLSL_CODE 1
@@ -41,12 +39,17 @@ struct FHitGroupSystemRootConstants
 	// Offset into HitGroupSystemIndexBuffer
 	UINT_TYPE IndexBufferOffsetInBytes;
 
+	// First primitive of the segment (as set in FRayTracingGeometrySegment)
+	UINT_TYPE FirstPrimitive;
+
 	// User-provided constant assigned to the hit group
 	UINT_TYPE UserData;
 
 	// Index of the first geometry instance that belongs to the current batch.
 	// Can be used to emulate SV_InstanceID in ray tracing shaders.
 	UINT_TYPE BaseInstanceIndex;
+
+	UINT_TYPE Pad0;
 
 	// Helper functions
 
@@ -72,26 +75,19 @@ struct FHitGroupSystemRootConstants
 #define RAY_TRACING_SYSTEM_VERTEXBUFFER_REGISTER 1
 #define RAY_TRACING_SYSTEM_ROOTCONSTANT_REGISTER 0
 
-#if INCLUDED_FROM_HLSL_CODE
+#ifndef OVERRIDE_RAY_TRACING_HIT_GROUP_SYSTEM_RESOURCES
+#define OVERRIDE_RAY_TRACING_HIT_GROUP_SYSTEM_RESOURCES 0
+#endif
 
-#ifndef OVERRIDE_RAYTRACINGBUILTINSHADERS_USH
-	#define RT_CONCATENATE2(a, b) a##b
-	#define RT_CONCATENATE(a, b) RT_CONCATENATE2(a, b)
-	#define RT_REGISTER(InType, InIndex, InSpace) register(RT_CONCATENATE(InType, InIndex), RT_CONCATENATE(space, InSpace))
+#if INCLUDED_FROM_HLSL_CODE && !OVERRIDE_RAY_TRACING_HIT_GROUP_SYSTEM_RESOURCES
 	// Built-in local root parameters that are always bound to all hit shaders
-	ByteAddressBuffer									HitGroupSystemIndexBuffer   : RT_REGISTER(t, RAY_TRACING_SYSTEM_INDEXBUFFER_REGISTER,  RAY_TRACING_REGISTER_SPACE_SYSTEM);
-	ByteAddressBuffer									HitGroupSystemVertexBuffer  : RT_REGISTER(t, RAY_TRACING_SYSTEM_VERTEXBUFFER_REGISTER, RAY_TRACING_REGISTER_SPACE_SYSTEM);
-	ConstantBuffer<FHitGroupSystemRootConstants>		HitGroupSystemRootConstants : RT_REGISTER(b, RAY_TRACING_SYSTEM_ROOTCONSTANT_REGISTER, RAY_TRACING_REGISTER_SPACE_SYSTEM);
-	#undef RT_REGISTER
-	#undef RT_CONCATENATE
-	#undef RT_CONCATENATE2
-#endif // !OVERRIDE_RAYTRACINGBUILTINSHADERS_USH
-
-#endif // INCLUDED_FROM_HLSL_CODE
+	ByteAddressBuffer									HitGroupSystemIndexBuffer   : UE_HLSL_REGISTER(t, RAY_TRACING_SYSTEM_INDEXBUFFER_REGISTER,  UE_HLSL_SPACE_RAY_TRACING_SYSTEM);
+	ByteAddressBuffer									HitGroupSystemVertexBuffer  : UE_HLSL_REGISTER(t, RAY_TRACING_SYSTEM_VERTEXBUFFER_REGISTER, UE_HLSL_SPACE_RAY_TRACING_SYSTEM);
+	ConstantBuffer<FHitGroupSystemRootConstants>		HitGroupSystemRootConstants : UE_HLSL_REGISTER(b, RAY_TRACING_SYSTEM_ROOTCONSTANT_REGISTER, UE_HLSL_SPACE_RAY_TRACING_SYSTEM);
+#endif
 
 
 #undef INCLUDED_FROM_CPP_CODE
 #undef INCLUDED_FROM_HLSL_CODE
 #undef UINT_TYPE
 
-#endif // RAYTRACINGBUILTINRESOURCES_USH_INCLUDED // Workarround for UE-66460

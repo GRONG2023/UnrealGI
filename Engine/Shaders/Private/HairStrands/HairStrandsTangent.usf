@@ -1,30 +1,22 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "../Common.ush"
+#include "../MonteCarlo.ush"
+#include "HairStrandsPack.ush"
+#include "HairStrandsClusterCommon.ush"
 
-uint VertexCount;
-uint DispatchCountX;
+#if SHADER_TANGENT
+uint PointCount;
 
-Buffer<uint4>  	 PositionBuffer;
+ByteAddressBuffer PositionBuffer;
 RWBuffer<float4> OutputTangentBuffer;
 
-uint			HairStrandsVF_bIsCullingEnable;
-
-// These number need to match HairStrandsClusterCulling.usf
-#define GROUP_COUNT_X 16
+uint			HairStrandsVF_bCullingEnable;
 
 #if PERMUTATION_CULLING == 1
 Buffer<uint>	HairStrandsVF_CullingIndirectBuffer;
 Buffer<uint>	HairStrandsVF_CullingIndexBuffer;
 Buffer<uint>	IndirectBufferArgs;
-#endif
-
-#if PERMUTATION_GROUP_SIZE == 0
-	#define GROUP_SIZE 64
-#elif PERMUTATION_GROUP_SIZE == 1
-	#define GROUP_SIZE 32
-#else
-	#error Unknown group size	
 #endif
 
 float4 PackNormal(float3 V, uint A)
@@ -33,81 +25,68 @@ float4 PackNormal(float3 V, uint A)
 }
 
 [numthreads(GROUP_SIZE, 1, 1)]
-void MainCS(uint2 DispatchThreadId : SV_DispatchThreadID)
+void MainCS(uint DispatchThreadId : SV_DispatchThreadID)
 {
-	const int MaxVertexCount = int(VertexCount);
-	int IndexCurr = DispatchThreadId.x + DispatchThreadId.y * DispatchCountX * GROUP_SIZE;
-	int IndexPrev = clamp(IndexCurr-1, 0, MaxVertexCount-1);
-	int IndexNext = clamp(IndexCurr+1, 0, MaxVertexCount-1);
-	bool bValid = IndexCurr < MaxVertexCount;
+	const int MaxPointCount = int(PointCount);
+	int IndexCurr = DispatchThreadId;
+	int IndexPrev = clamp(IndexCurr-1, 0, MaxPointCount-1);
+	int IndexNext = clamp(IndexCurr+1, 0, MaxPointCount-1);
+
+	bool bPrevValid = (IndexCurr-1) >= 0;
+	bool bNextValid = (IndexCurr+1) < MaxPointCount;
+
+	bool bValid = IndexCurr < MaxPointCount;
 #if PERMUTATION_CULLING
-	if (HairStrandsVF_bIsCullingEnable)
+	if (HairStrandsVF_bCullingEnable)
 	{
-		const int FetchIndex = DispatchThreadId.x + DispatchThreadId.y * GROUP_SIZE * GROUP_COUNT_X;
-		const int VertexCountAfterCulling = clamp((int)HairStrandsVF_CullingIndirectBuffer[3], 0, MaxVertexCount);
+		const int FetchIndex = DispatchThreadId;
+		const int PointCountAfterCulling = clamp((int)HairStrandsVF_CullingIndirectBuffer[3], 0, MaxPointCount);
 		bValid = false;
-		if (FetchIndex < VertexCountAfterCulling)
+		if (FetchIndex < PointCountAfterCulling)
 		{
-			const int FetchIndexPrev = clamp(FetchIndex-1, 0, VertexCountAfterCulling-1);
-			const int FetchIndexCurr = clamp(FetchIndex  , 0, VertexCountAfterCulling-1);
-			const int FetchIndexNext = clamp(FetchIndex+1, 0, VertexCountAfterCulling-1);
+			const int FetchIndexPrev = clamp(FetchIndex-1, 0, PointCountAfterCulling-1);
+			const int FetchIndexCurr = clamp(FetchIndex  , 0, PointCountAfterCulling-1);
+			const int FetchIndexNext = clamp(FetchIndex+1, 0, PointCountAfterCulling-1);
 
 			IndexPrev = HairStrandsVF_CullingIndexBuffer[FetchIndexPrev];
 			IndexCurr = HairStrandsVF_CullingIndexBuffer[FetchIndexCurr];
 			IndexNext = HairStrandsVF_CullingIndexBuffer[FetchIndexNext];
+
+			bPrevValid = FetchIndex-1 >= 0;
+			bNextValid = FetchIndex+1 < PointCountAfterCulling;
 
 			bValid = true;
 		}
 	}
 #endif
 
-	if (IndexCurr < MaxVertexCount)
+	if (IndexCurr < MaxPointCount)
 	{
-		const uint4 DataCurr = PositionBuffer[IndexCurr];
-		const uint4 DataPrev = PositionBuffer[IndexPrev];
-		const uint4 DataNext = PositionBuffer[IndexNext];
-
-		const float3 PCurr = f16tof32(DataCurr.xyz);
-		float3 PPrev = f16tof32(DataPrev.xyz);
-		float3 PNext = f16tof32(DataNext.xyz);
-
-		// For more details about the vertex type, see StrandHairVertexFactor.ush
-		const uint TypeCurr = asuint(DataCurr.a) & 0x3;
-		const uint TypePrev = asuint(DataPrev.a) & 0x3;
-		const uint TypeNext = asuint(DataNext.a) & 0x3;
+		const FHairControlPoint CPCurr = ReadHairControlPoint(PositionBuffer,IndexCurr);
+		const FHairControlPoint CPPrev = ReadHairControlPoint(PositionBuffer,IndexPrev);
+		const FHairControlPoint CPNext = ReadHairControlPoint(PositionBuffer,IndexNext);
 
 		float3 T0 = 0;
-		const bool bIsPrevValid = TypePrev == 0 || TypePrev == 1;
+		const bool bIsPrevValid = bPrevValid && (CPPrev.Type == HAIR_CONTROLPOINT_INSIDE || CPPrev.Type == HAIR_CONTROLPOINT_START);
 		if (bIsPrevValid)
 		{
-			T0 = normalize(PCurr - PPrev);
+			T0 = normalize(CPCurr.Position - CPPrev.Position);
 		}
 
 		float3 T1 = 0;
-		const bool bIsNextValid = TypeNext == 0 || TypeNext == 2;
+		const bool bIsNextValid = bNextValid && (CPNext.Type == HAIR_CONTROLPOINT_INSIDE || CPNext.Type == HAIR_CONTROLPOINT_END);
 		if (bIsNextValid)
 		{
-			T1 = normalize(PNext - PCurr);
+			T1 = normalize(CPNext.Position - CPCurr.Position);
 		}
 
 		const float3 T = normalize(T0 + T1);
 
-		const float Norm2 = dot(T, float3(0,0,-1));
-		float3 Right;
-		if (Norm2 > 0e-3f)
-		{
-			Right = normalize(cross(T, float3(0,0,-1)));
-		}
-		else
-		{
-			Right = normalize(cross(T, float3(0,1,0)));
-		}
+		// TODO: switch to rotation minimizing frames to avoid the discontinuity
+		float3x3 Basis = GetTangentBasis(T);
 
-		// Build ortho basis
-		float3 TangentX = normalize(cross(Right, T));
-		float3 TangentZ = T;
-
-		OutputTangentBuffer[IndexCurr*2]   = PackNormal(TangentX, 0);
-		OutputTangentBuffer[IndexCurr*2+1] = PackNormal(TangentZ, 127);
+		OutputTangentBuffer[IndexCurr*2]   = PackNormal(Basis[0], 0);
+		OutputTangentBuffer[IndexCurr*2+1] = PackNormal(Basis[2], 127);
 	}
 }
+#endif // SHADER_TANGENT

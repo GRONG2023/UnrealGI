@@ -11,23 +11,36 @@
 #include "SHCommon.ush"
 #include "VolumetricLightmapShared.ush"
 #include "ReflectionEnvironmentShared.ush"
+#include "Substrate/Substrate.ush"
+
+#ifdef UPSAMPLE_PASS
+#	include "ShadowFactorsUpsampleCommon.ush"
+#endif
 
 #ifndef THREADGROUP_SIZEX
-#define THREADGROUP_SIZEX 1
+#	define THREADGROUP_SIZEX 1
 #endif
 
 #ifndef THREADGROUP_SIZEY
-#define THREADGROUP_SIZEY 1
+#	define THREADGROUP_SIZEY 1
 #endif
 
 #ifndef LIGHT_SOURCE_MODE
 #define LIGHT_SOURCE_MODE 0
 #endif
 
+// must match CapsuleShadowRendering.cpp
 #define LIGHT_SOURCE_PUNCTUAL 0
 #define LIGHT_SOURCE_FROM_CAPSULE 1
 #define LIGHT_SOURCE_FROM_RECEIVER 2
 
+struct FCapsuleShape
+{
+	float3 TranslatedCenter;
+	float Radius;
+	float3 Orientation;
+	float Length;
+};
 
 // SUPPORT_CAPSULE_SHAPES
 
@@ -39,7 +52,7 @@
 	groupshared uint IntersectingShapeIndices[MAX_INTERSECTING_SHAPES * 2];
 
 	uint NumShadowCapsules;
-	Buffer<float4> ShadowCapsuleShapes;
+	StructuredBuffer<FCapsuleShape> ShadowCapsuleShapes;
 
 
 // SUPPORT_MESH_DISTANCE_FIELDS
@@ -52,11 +65,11 @@
 	groupshared uint IntersectingMeshDistanceFieldIndices[MAX_INTERSECTING_DISTANCE_FIELDS * 2];
 
 	uint NumMeshDistanceFieldCasters;
-	Buffer<uint> MeshDistanceFieldCasterIndices;
+	StructuredBuffer<uint> MeshDistanceFieldCasterIndices;
 
 
 #if LIGHT_SOURCE_MODE == LIGHT_SOURCE_FROM_CAPSULE
-Buffer<float4> LightDirectionData;
+StructuredBuffer<float4> LightDirectionData;
 
 void DecodeLightDirectionW(float LightDirectionW, out float LightAngle, out float MinVisibility)
 {
@@ -86,7 +99,7 @@ float CapsuleSkyAngleScale;
 float CapsuleMinSkyAngle;
 uint NumLightDirectionData;
 
-RWBuffer<float4> RWComputedLightDirectionData;
+RWStructuredBuffer<float4> RWComputedLightDirectionData;
 
 [numthreads(THREADGROUP_SIZEX, 1, 1)]
 void ComputeLightDirectionFromVolumetricLightmapCS(
@@ -192,7 +205,7 @@ bool SphereIntersectSphere(float4 SphereCenterAndRadius, float4 OtherSphereCente
 #if LIGHT_SOURCE_MODE == LIGHT_SOURCE_PUNCTUAL
 /** From point being shaded toward light, for directional lights. */
 float3 LightDirection;
-float4 LightPositionAndInvRadius;
+float4 LightTranslatedPositionAndInvRadius;
 float LightSourceRadius;
 float RayStartOffsetDepthScale;
 float3 LightAngleAndNormalThreshold;
@@ -211,7 +224,7 @@ groupshared uint IntegerTileMaxZ2;
 
 struct FTileCullingData
 {
-	float4 BoundingSphere;
+	float4 TranslatedBoundingSphere;
 #if LIGHT_SOURCE_MODE == LIGHT_SOURCE_PUNCTUAL
 	float3 ConeAxis;
 	float ConeAngleCos;
@@ -358,18 +371,18 @@ void SetupTileCullingData(
 	}
 
 	float3 ViewGroup0Center = (ViewTileMax + ViewTileMin) / 2;
-	TileCullingData0.BoundingSphere.xyz = mul(float4(ViewGroup0Center, 1), View.ViewToTranslatedWorld).xyz - View.PreViewTranslation;
-	TileCullingData0.BoundingSphere.w = length(ViewGroup0Center - ViewTileMax);
+	TileCullingData0.TranslatedBoundingSphere.xyz = mul(float4(ViewGroup0Center, 1), View.ViewToTranslatedWorld).xyz;
+	TileCullingData0.TranslatedBoundingSphere.w = length(ViewGroup0Center - ViewTileMax);
 
 	float3 ViewGroup1Center = (ViewTileMax2 + ViewTileMin2) / 2;
-	TileCullingData1.BoundingSphere.xyz = mul(float4(ViewGroup1Center, 1), View.ViewToTranslatedWorld).xyz - View.PreViewTranslation;
-	TileCullingData1.BoundingSphere.w = length(ViewGroup1Center - ViewTileMax2);
+	TileCullingData1.TranslatedBoundingSphere.xyz = mul(float4(ViewGroup1Center, 1), View.ViewToTranslatedWorld).xyz;
+	TileCullingData1.TranslatedBoundingSphere.w = length(ViewGroup1Center - ViewTileMax);
 
 #if LIGHT_SOURCE_MODE == LIGHT_SOURCE_PUNCTUAL
 	#if POINT_LIGHT
-		float3 LightVector0 = LightPositionAndInvRadius.xyz - TileCullingData0.BoundingSphere.xyz;
+		float3 LightVector0 = LightTranslatedPositionAndInvRadius.xyz - TileCullingData0.TranslatedBoundingSphere.xyz;
 		float LightVector0Length = length(LightVector0);
-		float3 LightVector1 = LightPositionAndInvRadius.xyz - TileCullingData1.BoundingSphere.xyz;
+		float3 LightVector1 = LightTranslatedPositionAndInvRadius.xyz - TileCullingData1.TranslatedBoundingSphere.xyz;
 		float LightVector1Length = length(LightVector1);
 		TileCullingData0.ConeAxis = LightVector0 / LightVector0Length;
 		TileCullingData1.ConeAxis = LightVector1 / LightVector1Length;;
@@ -383,8 +396,8 @@ void SetupTileCullingData(
 		TileCullingData1.ConeAngleSin = TileCullingData1.ConeAngleCos * TanLightAngle1;
 
 		// Don't operate on tiles completely outside of the light's influence
-		bool bTileInLightInfluenceBounds = LightVector0Length < 1.0f / LightPositionAndInvRadius.w + TileCullingData0.BoundingSphere.w
-			|| LightVector1Length < 1.0f / LightPositionAndInvRadius.w + TileCullingData1.BoundingSphere.w;
+		bool bTileInLightInfluenceBounds = LightVector0Length < 1.0f / LightTranslatedPositionAndInvRadius.w + TileCullingData0.TranslatedBoundingSphere.w
+			|| LightVector1Length < 1.0f / LightTranslatedPositionAndInvRadius.w + TileCullingData1.TranslatedBoundingSphere.w;
 
 		bTileShouldComputeShadowing = bTileShouldComputeShadowing && bTileInLightInfluenceBounds;
 
@@ -412,12 +425,12 @@ uint CullCapsuleShapesToTile(
 {
 #if LIGHT_SOURCE_MODE == LIGHT_SOURCE_PUNCTUAL
 
-	float3 ConeAxis0 = TileCullingData0.ConeAxis;
-	float ConeAngleCos0 = TileCullingData0.ConeAngleCos;
-	float ConeAngleSin0 = TileCullingData0.ConeAngleSin;
-	float3 ConeAxis1 = TileCullingData1.ConeAxis;
-	float ConeAngleCos1 = TileCullingData1.ConeAngleCos;
-	float ConeAngleSin1 = TileCullingData1.ConeAngleSin;
+	const float3 ConeAxis0 = TileCullingData0.ConeAxis;
+	const float ConeAngleCos0 = TileCullingData0.ConeAngleCos;
+	const float ConeAngleSin0 = TileCullingData0.ConeAngleSin;
+	const float3 ConeAxis1 = TileCullingData1.ConeAxis;
+	const float ConeAngleCos1 = TileCullingData1.ConeAngleCos;
+	const float ConeAngleSin1 = TileCullingData1.ConeAngleSin;
 
 #endif
 
@@ -439,12 +452,13 @@ uint CullCapsuleShapesToTile(
 			float ConeAngleSin1 = ConeAngleSin0;
 
 		#endif
+		
+		FCapsuleShape CapsuleShape = ShadowCapsuleShapes[ShapeIndex];
 
-		float4 SphereCenterAndRadius = ShadowCapsuleShapes[ShapeIndex * 2];
-		float3 TransformedSphereCenter = SphereCenterAndRadius.xyz;
-		float TransformedSphereRadius = SphereCenterAndRadius.w;
-		float3 TransformedTileBoundingSphereCenter0 = TileCullingData0.BoundingSphere.xyz;
-		float3 TransformedTileBoundingSphereCenter1 = TileCullingData1.BoundingSphere.xyz;
+		float3 TransformedSphereTranslatedCenter = CapsuleShape.TranslatedCenter;
+		float TransformedSphereRadius = CapsuleShape.Radius;
+		float3 TransformedTileTranslatedBoundingSphereCenter0 = TileCullingData0.TranslatedBoundingSphere.xyz;
+		float3 TransformedTileTranslatedBoundingSphereCenter1 = TileCullingData1.TranslatedBoundingSphere.xyz;
 
 		#if LIGHT_SOURCE_MODE != LIGHT_SOURCE_FROM_RECEIVER
 			float3 TransformedConeAxis0 = ConeAxis0;
@@ -452,50 +466,42 @@ uint CullCapsuleShapesToTile(
 		#endif
 
 		#if USE_SCALED_SPHERE_INTERSECTION
-			
-			float4 CapsuleCenterAndRadius = SphereCenterAndRadius;
-			float4 CapsuleOrientationAndLength = ShadowCapsuleShapes[ShapeIndex * 2 + 1];
-
 			float3 CapsuleSpaceX;
 			float3 CapsuleSpaceY;
-			float3 CapsuleSpaceZ = CapsuleOrientationAndLength.xyz;
+			float3 CapsuleSpaceZ = CapsuleShape.Orientation;
 			GenerateCoordinateSystem(CapsuleSpaceZ, CapsuleSpaceX, CapsuleSpaceY);
 
 			// Scale required along the capsule's axis to turn it into a sphere (assuming it was originally a scaled sphere instead of a capsule)
-			float CapsuleZScale = CapsuleCenterAndRadius.w / (.5f * CapsuleOrientationAndLength.w + CapsuleCenterAndRadius.w);
+			float CapsuleZScale = CapsuleShape.Radius / (.5f * CapsuleShape.Length + CapsuleShape.Radius);
 			CapsuleSpaceZ *= CapsuleZScale;
 
 			// The capsule is centered at 0 in the scaled sphere space
-			TransformedSphereCenter = 0;
+			TransformedSphereTranslatedCenter = 0;
 
 			// After scaling along the capsule axis it will become a sphere with the original radius
-			TransformedSphereRadius = SphereCenterAndRadius.w;
+			TransformedSphereRadius = CapsuleShape.Radius;
 
 			// Transform the sphere center and cone axis into the scaled sphere space
-			float3 CapsuleCenterToTileCenter0 = TileCullingData0.BoundingSphere.xyz - CapsuleCenterAndRadius.xyz;
-			TransformedTileBoundingSphereCenter0 = float3(dot(CapsuleCenterToTileCenter0, CapsuleSpaceX), dot(CapsuleCenterToTileCenter0, CapsuleSpaceY), dot(CapsuleCenterToTileCenter0, CapsuleSpaceZ));
+			float3 CapsuleCenterToTileCenter0 = TileCullingData0.TranslatedBoundingSphere.xyz - CapsuleShape.TranslatedCenter;
+			TransformedTileTranslatedBoundingSphereCenter0 = float3(dot(CapsuleCenterToTileCenter0, CapsuleSpaceX), dot(CapsuleCenterToTileCenter0, CapsuleSpaceY), dot(CapsuleCenterToTileCenter0, CapsuleSpaceZ));
 			
-			float3 CapsuleCenterToTileCenter1 = TileCullingData1.BoundingSphere.xyz - CapsuleCenterAndRadius.xyz;
-			TransformedTileBoundingSphereCenter1 = float3(dot(CapsuleCenterToTileCenter1, CapsuleSpaceX), dot(CapsuleCenterToTileCenter1, CapsuleSpaceY), dot(CapsuleCenterToTileCenter1, CapsuleSpaceZ));
+			float3 CapsuleCenterToTileCenter1 = TileCullingData1.TranslatedBoundingSphere.xyz - CapsuleShape.TranslatedCenter;
+			TransformedTileTranslatedBoundingSphereCenter1 = float3(dot(CapsuleCenterToTileCenter1, CapsuleSpaceX), dot(CapsuleCenterToTileCenter1, CapsuleSpaceY), dot(CapsuleCenterToTileCenter1, CapsuleSpaceZ));
 
 			#if LIGHT_SOURCE_MODE != LIGHT_SOURCE_FROM_RECEIVER
 				// Renormalize the cone axis as it went through a non-uniformly scaled transform
 				TransformedConeAxis0 = normalize(float3(dot(ConeAxis0, CapsuleSpaceX), dot(ConeAxis0, CapsuleSpaceY), dot(ConeAxis0, CapsuleSpaceZ)));
 				TransformedConeAxis1 = normalize(float3(dot(ConeAxis1, CapsuleSpaceX), dot(ConeAxis1, CapsuleSpaceY), dot(ConeAxis1, CapsuleSpaceZ)));
 			#endif
-
 		#else
-
-			float CapsuleLength = ShadowCapsuleShapes[ShapeIndex * 2 + 1].w;
-
 			// Add half capsule length to bounding sphere
-			TransformedSphereRadius = SphereCenterAndRadius.w + .5f * CapsuleLength;
+			TransformedSphereRadius = CapsuleShape.Radius + .5f * CapsuleShape.Length;
 		#endif
 
 		BRANCH
-		if (SphereIntersectSphere(float4(TransformedSphereCenter, TransformedSphereRadius + MaxOcclusionDistance), float4(TransformedTileBoundingSphereCenter0, TileCullingData0.BoundingSphere.w))
+		if (SphereIntersectSphere(float4(TransformedSphereTranslatedCenter, TransformedSphereRadius + MaxOcclusionDistance), float4(TransformedTileTranslatedBoundingSphereCenter0, TileCullingData0.TranslatedBoundingSphere.w))
 			#if LIGHT_SOURCE_MODE != LIGHT_SOURCE_FROM_RECEIVER
-				&& SphereIntersectConeWithMaxDistance(float4(TransformedSphereCenter, TransformedSphereRadius + TileCullingData0.BoundingSphere.w), TransformedTileBoundingSphereCenter0, TransformedConeAxis0, ConeAngleCos0, ConeAngleSin0, MaxOcclusionDistance)
+				&& SphereIntersectConeWithMaxDistance(float4(TransformedSphereTranslatedCenter, TransformedSphereRadius + TileCullingData0.TranslatedBoundingSphere.w), TransformedTileTranslatedBoundingSphereCenter0, TransformedConeAxis0, ConeAngleCos0, ConeAngleSin0, MaxOcclusionDistance)
 			#endif
 			)
 		{
@@ -507,9 +513,9 @@ uint CullCapsuleShapesToTile(
 		}
 
 		BRANCH
-		if (SphereIntersectSphere(float4(TransformedSphereCenter, TransformedSphereRadius + MaxOcclusionDistance), float4(TransformedTileBoundingSphereCenter1, TileCullingData1.BoundingSphere.w))
+		if (SphereIntersectSphere(float4(TransformedSphereTranslatedCenter, TransformedSphereRadius + MaxOcclusionDistance), float4(TransformedTileTranslatedBoundingSphereCenter1, TileCullingData1.TranslatedBoundingSphere.w))
 			#if LIGHT_SOURCE_MODE != LIGHT_SOURCE_FROM_RECEIVER
-				&& SphereIntersectConeWithMaxDistance(float4(TransformedSphereCenter, TransformedSphereRadius + TileCullingData1.BoundingSphere.w), TransformedTileBoundingSphereCenter1, TransformedConeAxis1, ConeAngleCos1, ConeAngleSin1, MaxOcclusionDistance)
+				&& SphereIntersectConeWithMaxDistance(float4(TransformedSphereTranslatedCenter, TransformedSphereRadius + TileCullingData1.TranslatedBoundingSphere.w), TransformedTileTranslatedBoundingSphereCenter1, TransformedConeAxis1, ConeAngleCos1, ConeAngleSin1, MaxOcclusionDistance)
 			#endif
 			)
 		{
@@ -568,7 +574,7 @@ void ApplyFadeToCapsuleRadius(inout float CapsuleRadius, float3 LightDirection)
 }
 
 float ShadowConeTraceAgainstCulledCapsuleShapes(
-	float3 WorldRayStart, 
+	float3 TranslatedWorldRayStart, 
 	float3 UnitRayDirection,
 	float LightVectorLength,
 	float LightAngle,  
@@ -608,30 +614,29 @@ float ShadowConeTraceAgainstCulledCapsuleShapes(
 			UnitRayDirection = float3(0, 0, 1);
 			LightAngle = .3f;
 		#endif
+			
+		FCapsuleShape CapsuleShape = ShadowCapsuleShapes[ObjectIndex];
 
-		float4 CapsuleCenterAndRadius = ShadowCapsuleShapes[ObjectIndex * 2];
-		ApplyFadeToCapsuleRadius(CapsuleCenterAndRadius.w, UnitRayDirection);
-
-		float4 CapsuleOrientationAndLength = ShadowCapsuleShapes[ObjectIndex * 2 + 1];
+		ApplyFadeToCapsuleRadius(CapsuleShape.Radius, UnitRayDirection);
 
 		float DistanceToShadowSphere;
 		float3 UnitVectorToShadowSphere;
 		float3 UnitRayDirectionInCorrectSpace = UnitRayDirection;
 
 		BRANCH
-		if (CapsuleOrientationAndLength.w > 0)
+		if (CapsuleShape.Length > 0)
 		{
 #if USE_SCALED_SPHERE_INTERSECTION
 
 			float3 CapsuleSpaceX;
 			float3 CapsuleSpaceY;
-			float3 CapsuleSpaceZ = CapsuleOrientationAndLength.xyz;
+			float3 CapsuleSpaceZ = CapsuleShape.Orientation;
 			GenerateCoordinateSystem(CapsuleSpaceZ, CapsuleSpaceX, CapsuleSpaceY);
 
-			float CapsuleZScale = CapsuleCenterAndRadius.w / (.5f * CapsuleOrientationAndLength.w + CapsuleCenterAndRadius.w);
+			float CapsuleZScale = CapsuleShape.Radius / (.5f * CapsuleShape.Length + CapsuleShape.Radius);
 			CapsuleSpaceZ *= CapsuleZScale;
 
-			float3 CapsuleCenterToRayStart = WorldRayStart - CapsuleCenterAndRadius.xyz;
+			float3 CapsuleCenterToRayStart = TranslatedWorldRayStart - CapsuleShape.TranslatedCenter;
 			float3 CapsuleSpaceRayStart = float3(dot(CapsuleCenterToRayStart, CapsuleSpaceX), dot(CapsuleCenterToRayStart, CapsuleSpaceY), dot(CapsuleCenterToRayStart, CapsuleSpaceZ));
 
 			float3 CapsuleSpaceRayDirection = float3(dot(UnitRayDirection, CapsuleSpaceX), dot(UnitRayDirection, CapsuleSpaceY), dot(UnitRayDirection, CapsuleSpaceZ));
@@ -640,10 +645,10 @@ float ShadowConeTraceAgainstCulledCapsuleShapes(
 			UnitVectorToShadowSphere = -CapsuleSpaceRayStart / DistanceToShadowSphere;
 			UnitRayDirectionInCorrectSpace = normalize(CapsuleSpaceRayDirection);
 #else
-			float3 VectorToCapsuleCenter = CapsuleCenterAndRadius.xyz - WorldRayStart;
+			float3 VectorToCapsuleCenter = CapsuleShape.TranslatedCenter - TranslatedWorldRayStart;
 
 			// Closest point on line segment to ray
-			float3 L01 = CapsuleOrientationAndLength.xyz * CapsuleOrientationAndLength.w;
+			float3 L01 = CapsuleShape.Orientation * CapsuleShape.Length;
 			float3 L0 = VectorToCapsuleCenter - 0.5 * L01;
 			float3 L1 = VectorToCapsuleCenter + 0.5 * L01;
 
@@ -652,7 +657,7 @@ float ShadowConeTraceAgainstCulledCapsuleShapes(
 			// Vector that spans L01 perpendicular to the ray
 			float3 PerpendicularSpanningVector = CapsuleOrientationProjectedOntoRay * UnitRayDirection - L01;
 			// Length of PerpendicularSpanningVector using the right triangle formed by L01 and UnitRayDirection * CapsuleOrientationProjectedOntoRay
-			float PerpendicularDistance = Square(CapsuleOrientationAndLength.w) - CapsuleOrientationProjectedOntoRay * CapsuleOrientationProjectedOntoRay;
+			float PerpendicularDistance = Square(CapsuleShape.Length) - CapsuleOrientationProjectedOntoRay * CapsuleOrientationProjectedOntoRay;
 			// Project the vector to a capsule endpoint onto the perpendicular spanning vector, normalized
 			float t = saturate(dot(L0, PerpendicularSpanningVector) / PerpendicularDistance);
 			// Compute the vector to the shadow sphere which best approximates the capsule's shadowing 
@@ -670,17 +675,17 @@ float ShadowConeTraceAgainstCulledCapsuleShapes(
 		}
 		else
 		{
-			DistanceToShadowSphere = length(CapsuleCenterAndRadius.xyz - WorldRayStart);
-			UnitVectorToShadowSphere = (CapsuleCenterAndRadius.xyz - WorldRayStart) / DistanceToShadowSphere;
+			DistanceToShadowSphere = length(CapsuleShape.TranslatedCenter - TranslatedWorldRayStart);
+			UnitVectorToShadowSphere = (CapsuleShape.TranslatedCenter - TranslatedWorldRayStart) / DistanceToShadowSphere;
 		}
 
 		float AngleBetween = acosFast(dot(UnitVectorToShadowSphere, UnitRayDirectionInCorrectSpace));
-		float IntersectionArea = SphericalCapIntersectionAreaFast(LightAngle, atanFastPos(CapsuleCenterAndRadius.w / DistanceToShadowSphere), AngleBetween);
+		float IntersectionArea = SphericalCapIntersectionAreaFast(LightAngle, atanFastPos(CapsuleShape.Radius / DistanceToShadowSphere), AngleBetween);
 		#if POINT_LIGHT
 			// SphericalCapIntersectionAreaFast does not take the relative distance of the two sphere caps into account, which can cause shadows to be cast on the opposite direction
 			// Here we compare DistanceToShadowSphere and LightVectorLength to determine whether a shadow should be cast
 			// To prevent discontinuity, we use the ratio of the distance difference to the capsule's radius as a smooth factor
-			IntersectionArea = lerp(IntersectionArea, 0, saturate((DistanceToShadowSphere - LightVectorLength + CapsuleCenterAndRadius.w) / CapsuleCenterAndRadius.w));
+			IntersectionArea = lerp(IntersectionArea, 0, saturate((DistanceToShadowSphere - LightVectorLength + CapsuleShape.Radius) / CapsuleShape.Radius));
 		#endif
 		float ConeConeIntersection = 1 - saturate(IntersectionArea / AreaOfLight);
 		float DistanceFadeAlpha = saturate(DistanceToShadowSphere * InvMaxOcclusionDistance * 3 - 2);
@@ -702,15 +707,16 @@ float ShadowConeTraceAgainstCulledCapsuleShapes(
 
 bool TileBoundsIntersectDistanceFieldCaster(
 	uint ObjectIndex, 
-	float4 SphereCenterAndRadius, 
-	float4 TileBoundingSphere, 
+	FDFObjectBounds DFObjectBounds, 
+	float4 TileTranslatedBoundingSphere, 
 	float3 TileConeAxis,
 	float TileConeAngleCos,
 	float TileConeAngleSin,
 	float MaxOcclusionDistance)
 {
+	const float3 TranslatedBoundsCenter = DFFastToTranslatedWorld(DFObjectBounds.Center, PrimaryView.PreViewTranslation);
 	BRANCH
-	if (SphereIntersectSphere(float4(SphereCenterAndRadius.xyz, SphereCenterAndRadius.w + MaxOcclusionDistance), TileBoundingSphere)
+	if (SphereIntersectSphere(float4(TranslatedBoundsCenter, DFObjectBounds.SphereRadius + MaxOcclusionDistance), TileTranslatedBoundingSphere)
 #if LIGHT_SOURCE_MODE != LIGHT_SOURCE_FROM_RECEIVER
 		// This 'can object cast on tile bounds' test has to be disabled because the weight used to combine occlusion from multiple objects is computed based on distance to occluder only
 		//&& SphereIntersectConeWithMaxDistance(float4(SphereCenterAndRadius.xyz, SphereCenterAndRadius.w + TileBoundingSphere.w), TileBoundingSphere.xyz, TileConeAxis, TileConeAngleCos, TileConeAngleSin, MaxOcclusionDistance)
@@ -718,20 +724,16 @@ bool TileBoundsIntersectDistanceFieldCaster(
 		)
 	{
 #if USE_DISTANCE_FIELD_FOR_TILE_CULLING
-		float3 LocalPositionExtent = LoadGlobalObjectLocalPositionExtent(ObjectIndex);
-		float4x4 WorldToVolume = LoadGlobalObjectWorldToVolume(ObjectIndex);
-		float4 UVScaleAndVolumeScale = LoadGlobalObjectUVScale(ObjectIndex);
-		float3 UVAdd = LoadGlobalObjectUVAdd(ObjectIndex);
-		float2 DistanceFieldMAD = LoadGlobalObjectDistanceFieldMAD(ObjectIndex);
-		float3 VolumeSamplePosition = mul(float4(TileBoundingSphere.xyz, 1), WorldToVolume).xyz;
-		float3 ClampedSamplePosition = clamp(VolumeSamplePosition, -LocalPositionExtent, LocalPositionExtent);
+		FDFObjectData DFObjectData = LoadDFObjectData(ObjectIndex);
+		float4x4 TranslatedWorldToVolume = DFFastToTranslatedWorld(DFObjectData.WorldToVolume, PrimaryView.PreViewTranslation);
+		float3 VolumeSamplePosition = mul(float4(TileTranslatedBoundingSphere.xyz, 1), TranslatedWorldToVolume).xyz;
+		float3 ClampedSamplePosition = clamp(VolumeSamplePosition, -DFObjectData.VolumePositionExtent, DFObjectData.VolumePositionExtent);
 		float DistanceToClamped = length(ClampedSamplePosition - VolumeSamplePosition);
-		float3 VolumeUV = DistanceFieldVolumePositionToUV(ClampedSamplePosition, UVScaleAndVolumeScale.xyz, UVAdd);
-		float WorldDistanceToOccluder = (SampleMeshDistanceField(VolumeUV, DistanceFieldMAD).x + DistanceToClamped) * UVScaleAndVolumeScale.w;
+		float WorldDistanceToOccluder = (DistanceToMeshSurfaceStandalone(ClampedSamplePosition, DFObjectData) + DistanceToClamped) * DFObjectData.VolumeScale;
 
 		float ErrorTolerance = 1.1f;
 		// The tile can only be affected by the object's shadow if the closest part of the object is less than MaxOcclusionDistance from the tile bounds
-		return WorldDistanceToOccluder - TileBoundingSphere.w < MaxOcclusionDistance * ErrorTolerance;
+		return WorldDistanceToOccluder - TileTranslatedBoundingSphere.w < MaxOcclusionDistance * ErrorTolerance;
 #else
 		return true;
 #endif
@@ -787,11 +789,11 @@ uint CullDistanceFieldCastersToTile(
 
 		#endif
 
-		float4 SphereCenterAndRadius = LoadGlobalObjectPositionAndRadius(ObjectIndex);
-		float EffectiveMaxOcclusionDistance = MaxOcclusionDistance + .5f * SphereCenterAndRadius.w;
+		FDFObjectBounds DFObjectBounds = LoadDFObjectBounds(ObjectIndex);
+		float EffectiveMaxOcclusionDistance = MaxOcclusionDistance + .5f * DFObjectBounds.SphereRadius;
 
 		BRANCH
-		if (TileBoundsIntersectDistanceFieldCaster(ObjectIndex, SphereCenterAndRadius, TileCullingData0.BoundingSphere, ConeAxis0, ConeAngleCos0, ConeAngleSin0, EffectiveMaxOcclusionDistance))
+		if (TileBoundsIntersectDistanceFieldCaster(ObjectIndex, DFObjectBounds, TileCullingData0.TranslatedBoundingSphere, ConeAxis0, ConeAngleCos0, ConeAngleSin0, EffectiveMaxOcclusionDistance))
 		{
 			uint ListIndex;
 			InterlockedAdd(TileNumDistanceFields0, 1U, ListIndex);
@@ -801,7 +803,7 @@ uint CullDistanceFieldCastersToTile(
 		}
 
 		BRANCH
-		if (TileBoundsIntersectDistanceFieldCaster(ObjectIndex, SphereCenterAndRadius, TileCullingData1.BoundingSphere, ConeAxis1, ConeAngleCos1, ConeAngleSin1, EffectiveMaxOcclusionDistance))
+		if (TileBoundsIntersectDistanceFieldCaster(ObjectIndex, DFObjectBounds, TileCullingData1.TranslatedBoundingSphere, ConeAxis1, ConeAngleCos1, ConeAngleSin1, EffectiveMaxOcclusionDistance))
 		{
 			uint ListIndex;
 			InterlockedAdd(TileNumDistanceFields1, 1U, ListIndex);
@@ -817,7 +819,7 @@ uint CullDistanceFieldCastersToTile(
 }
 
 float ShadowConeTraceAgainstCulledDistanceFieldCasters(
-	float3 WorldRayStart, 
+	float3 TranslatedWorldRayStart,
 	float3 UnitRayDirection,
 	float LightAngle,  
 	float MaxOcclusionDistance,
@@ -851,29 +853,32 @@ float ShadowConeTraceAgainstCulledDistanceFieldCasters(
 
 		uint ObjectIndex = MeshDistanceFieldCasterIndices[ListObjectIndex];
 
-		float4 SphereCenterAndRadius = LoadGlobalObjectPositionAndRadius(ObjectIndex);
+		FDFObjectBounds DFObjectBounds = LoadDFObjectBounds(ObjectIndex);
+		FDFObjectData DFObjectData = LoadDFObjectData(ObjectIndex);
+		float4x4 TranslatedWorldToVolume = DFFastToTranslatedWorld(DFObjectData.WorldToVolume, PrimaryView.PreViewTranslation);
 
 		// Increase max occlusion distance based on object size for distance field casters
 		// This improves the solidness of the shadows, since the fadeout distance causes internal structure of objects to become visible
-		float EffectiveMaxOcclusionDistance = MaxOcclusionDistance + .5f * SphereCenterAndRadius.w;
+		float EffectiveMaxOcclusionDistance = MaxOcclusionDistance + .5f * DFObjectBounds.SphereRadius;
 
 		float MaxSphereRadius = TanConeAngle * EffectiveMaxOcclusionDistance;
-		float3 WorldRayEnd = WorldRayStart + UnitRayDirection * EffectiveMaxOcclusionDistance;
+		float3 TranslatedWorldRayEnd = TranslatedWorldRayStart + UnitRayDirection * EffectiveMaxOcclusionDistance;
 
-		float3 LocalPositionExtent = LoadGlobalObjectLocalPositionExtent(ObjectIndex);
-		float4x4 WorldToVolume = LoadGlobalObjectWorldToVolume(ObjectIndex);
-		float4 UVScaleAndVolumeScale = LoadGlobalObjectUVScale(ObjectIndex);
-		float3 UVAdd = LoadGlobalObjectUVAdd(ObjectIndex);
-		float2 DistanceFieldMAD = LoadGlobalObjectDistanceFieldMAD(ObjectIndex);
-
-		float3 VolumeRayStart = mul(float4(WorldRayStart, 1), WorldToVolume).xyz;
-		float3 VolumeRayEnd = mul(float4(WorldRayEnd, 1), WorldToVolume).xyz;
+		float3 VolumeRayStart = mul(float4(TranslatedWorldRayStart, 1), TranslatedWorldToVolume).xyz;
+		float3 VolumeRayEnd = mul(float4(TranslatedWorldRayEnd, 1), TranslatedWorldToVolume).xyz;
 		float3 VolumeRayDirection = VolumeRayEnd - VolumeRayStart;
 		float VolumeRayLength = length(VolumeRayDirection);
 		VolumeRayDirection /= VolumeRayLength;
-		float VolumeMaxSphereRadius = MaxSphereRadius / UVScaleAndVolumeScale.w;
+		float VolumeMaxSphereRadius = MaxSphereRadius / DFObjectData.VolumeScale;
 
 		{
+			FDFAssetData DFAssetData = LoadDFAssetDataHighestResolution(DFObjectData.AssetIndex);
+
+			const float MaxEncodedDistance = DFAssetData.DistanceFieldToVolumeScaleBias.x + DFAssetData.DistanceFieldToVolumeScaleBias.y;
+
+			// Prevent incorrect shadowing when sampling invalid bricks by limiting VolumeMaxSphereRadius to MaxEncodedDistance
+			VolumeMaxSphereRadius = min(VolumeMaxSphereRadius, MaxEncodedDistance);
+
 			float MinTraceVisibility = 1;
 			//@todo - derive from texel size
 			float StartOffset = .02f;
@@ -891,15 +896,14 @@ float ShadowConeTraceAgainstCulledDistanceFieldCasters(
 			for (; StepIndex < MaxSteps; StepIndex++)
 			{
 				float3 SampleVolumePosition = VolumeRayStart + VolumeRayDirection * SampleRayTime;
-				float3 ClampedSamplePosition = clamp(SampleVolumePosition, -LocalPositionExtent, LocalPositionExtent);
+				float3 ClampedSamplePosition = clamp(SampleVolumePosition, -DFObjectData.VolumePositionExtent, DFObjectData.VolumePositionExtent);
 				float DistanceToClamped = length(ClampedSamplePosition - SampleVolumePosition);
-				float3 VolumeUV = DistanceFieldVolumePositionToUV(ClampedSamplePosition, UVScaleAndVolumeScale.xyz, UVAdd);
-				float VolumeDistanceToOccluder = SampleMeshDistanceField(VolumeUV, DistanceFieldMAD).x + DistanceToClamped;
+				float VolumeDistanceToOccluder = SampleSparseMeshSignedDistanceField(ClampedSamplePosition, DFAssetData) + DistanceToClamped;
 
 				float SphereRadius = clamp(TanConeAngle * SampleRayTime, 0, VolumeMaxSphereRadius);
 				float StepVisibility = pow(saturate(VolumeDistanceToOccluder / SphereRadius), OcclusionExponent);
 
-				float OccluderDistanceFraction = (SampleRayTime + VolumeDistanceToOccluder) * UVScaleAndVolumeScale.w / EffectiveMaxOcclusionDistance;
+				float OccluderDistanceFraction = (SampleRayTime + VolumeDistanceToOccluder) * DFObjectData.VolumeScale / EffectiveMaxOcclusionDistance;
 	
 				// Fade out occlusion based on distance to occluder to avoid a discontinuity at the max AO distance
 				//@todo - this introduces banding artifacts because we may be taking large steps through the fade region
@@ -934,12 +938,11 @@ float ShadowConeTraceAgainstCulledDistanceFieldCasters(
 
 			{
 				float3 SampleVolumePosition = VolumeRayStart;
-				float3 ClampedSamplePosition = clamp(SampleVolumePosition, -LocalPositionExtent, LocalPositionExtent);
+				float3 ClampedSamplePosition = clamp(SampleVolumePosition, -DFObjectData.VolumePositionExtent, DFObjectData.VolumePositionExtent);
 				float DistanceToClamped = length(ClampedSamplePosition - SampleVolumePosition);
-				float3 VolumeUV = DistanceFieldVolumePositionToUV(ClampedSamplePosition, UVScaleAndVolumeScale.xyz, UVAdd);
-				float VolumeDistanceToOccluder = SampleMeshDistanceField(VolumeUV, DistanceFieldMAD).x + DistanceToClamped;
+				float VolumeDistanceToOccluder = SampleSparseMeshSignedDistanceField(ClampedSamplePosition, DFAssetData) + DistanceToClamped;
 
-				WeightDistance = VolumeDistanceToOccluder * UVScaleAndVolumeScale.w;
+				WeightDistance = VolumeDistanceToOccluder * DFObjectData.VolumeScale;
 				//WeightDistance = length(SphereCenterAndRadius.xyz - WorldRayStart);
 			}
 
@@ -967,9 +970,17 @@ void ApplySelfShadowingIntensityForDeferred(float2 ScreenUV, inout float Visibil
 	BRANCH
 	if (View.IndirectCapsuleSelfShadowingIntensity < 1)
 	{
+#if SUBSTRATE_ENABLED
+		uint2 PixelPos = View.ViewRectMin.xy + View.ViewSizeAndInvSize.xy * ScreenUV.xy;
+		FSubstrateAddressing SubstrateAddressing = GetSubstratePixelDataByteOffset(PixelPos, uint2(View.BufferSizeAndInvSize.xy), Substrate.MaxBytesPerPixel);
+		FSubstratePixelHeader SubstratePixelHeader = UnpackSubstrateHeaderIn(Substrate.MaterialTextureArray, SubstrateAddressing, Substrate.TopLayerTexture);
+		const bool bHasDynamicIndirectShadowCasterRepresentation = SubstratePixelHeader.HasDynamicIndirectShadowCasterRepresentation();
+#else
 		FGBufferData GBufferData = GetGBufferData(ScreenUV);
+		const bool bHasDynamicIndirectShadowCasterRepresentation = HasDynamicIndirectShadowCasterRepresentation(GBufferData);
+#endif
 		// Reduce self shadowing intensity
-		Visibility = lerp(1, Visibility, HasDynamicIndirectShadowCasterRepresentation(GBufferData) ? View.IndirectCapsuleSelfShadowingIntensity : 1);
+		Visibility = lerp(1, Visibility, bHasDynamicIndirectShadowCasterRepresentation ? View.IndirectCapsuleSelfShadowingIntensity : 1);
 	}
 }
 
@@ -984,7 +995,7 @@ RWTexture2D<float2> RWShadowFactors;
 float MaxOcclusionDistance;
 
 uint2 TileDimensions;
-RWBuffer<uint> RWTileIntersectionCounts;
+RWStructuredBuffer<uint> RWTileIntersectionCounts;
 
 [numthreads(THREADGROUP_SIZEX, THREADGROUP_SIZEY, 1)]
 void CapsuleShadowingCS(
@@ -1005,7 +1016,7 @@ void CapsuleShadowingCS(
 	float SceneDepth = CalcSceneDepth(ScreenUV);
 #endif
 	
-	float3 OpaqueWorldPosition = mul(float4(ScreenPosition * SceneDepth, SceneDepth, 1), View.ScreenToWorld).xyz;
+	const float3 OpaqueTranslatedWorldPosition = mul(float4(GetScreenPositionForProjectionType(ScreenPosition, SceneDepth), SceneDepth, 1), PrimaryView.ScreenToTranslatedWorld).xyz;
 
 	uint CulledDataParameter = 0;
 	bool bTileShouldComputeShadowing = true;
@@ -1037,26 +1048,26 @@ void CapsuleShadowingCS(
 		#if LIGHT_SOURCE_MODE == LIGHT_SOURCE_PUNCTUAL
 			#if POINT_LIGHT
 
-				float3 LightVector = LightPositionAndInvRadius.xyz - OpaqueWorldPosition;
+				float3 LightVector = LightTranslatedPositionAndInvRadius.xyz - OpaqueTranslatedWorldPosition;
 				LightVectorLength = length(LightVector);
-				float3 WorldRayStart = OpaqueWorldPosition + LightVector / LightVectorLength * RayStartOffset;
-				float3 UnitRayDirection = (LightPositionAndInvRadius.xyz - OpaqueWorldPosition) / LightVectorLength;
+				float3 TranslatedWorldRayStart = OpaqueTranslatedWorldPosition + LightVector / LightVectorLength * RayStartOffset;
+				float3 UnitRayDirection = (LightTranslatedPositionAndInvRadius.xyz - OpaqueTranslatedWorldPosition) / LightVectorLength;
 				float LightAngle = atanFastPos(LightSourceRadius / LightVectorLength);
 
 			#else
 
-				float3 WorldRayStart = OpaqueWorldPosition + LightDirection * RayStartOffset;
+				float3 TranslatedWorldRayStart = OpaqueTranslatedWorldPosition + LightDirection * RayStartOffset;
 				float3 UnitRayDirection = LightDirection;
 				float LightAngle = LightAngleAndNormalThreshold.x;
 
 			#endif
 		#elif LIGHT_SOURCE_MODE == LIGHT_SOURCE_FROM_RECEIVER
-			float3 WorldRayStart = OpaqueWorldPosition;
+			float3 TranslatedWorldRayStart = OpaqueTranslatedWorldPosition;
 			float BentNormalLength = length(ReceiverBentNormal);
 			float3 UnitRayDirection = ReceiverBentNormal / max(BentNormalLength, .00001f);
 			float LightAngle = max(BentNormalLength * .5f * PI, PI / 8);
 		#else
-			float3 WorldRayStart = OpaqueWorldPosition;
+			float3 TranslatedWorldRayStart = OpaqueTranslatedWorldPosition;
 			float3 UnitRayDirection = 0;
 			float LightAngle = 0;
 		#endif
@@ -1093,7 +1104,7 @@ void CapsuleShadowingCS(
 			
 		#if SUPPORT_CAPSULE_SHAPES
 			Visibility *= ShadowConeTraceAgainstCulledCapsuleShapes(
-				WorldRayStart, 
+				TranslatedWorldRayStart,
 				UnitRayDirection, 
 				LightVectorLength,
 				LightAngle, 
@@ -1105,7 +1116,7 @@ void CapsuleShadowingCS(
 
 		#if SUPPORT_MESH_DISTANCE_FIELDS
 			Visibility *= ShadowConeTraceAgainstCulledDistanceFieldCasters(
-				WorldRayStart,
+				TranslatedWorldRayStart,
 				UnitRayDirection,
 				LightAngle,
 				MaxOcclusionDistance,
@@ -1144,7 +1155,7 @@ void CapsuleShadowingCS(
 #endif
 }
 
-Buffer<uint> TileIntersectionCounts;
+StructuredBuffer<uint> TileIntersectionCounts;
 
 // Size of a tile in NDC
 float2 TileSize;
@@ -1176,6 +1187,8 @@ void CapsuleShadowingUpsampleVS(
 	}
 }
 
+#ifdef UPSAMPLE_PASS
+
 Texture2D ShadowFactorsTexture;
 SamplerState ShadowFactorsSampler;
 
@@ -1189,47 +1202,11 @@ void CapsuleShadowingUpsamplePS(
 #endif
 	)
 {
-	// Distance field shadowing was computed at 0,0 regardless of viewrect min
-	float2 DistanceFieldUVs = SvPositionToBufferUV(SVPos) - ScissorRectMinAndSize.xy * View.BufferSizeAndInvSize.zw;
-	float2 ScreenUV = SvPositionToBufferUV(SVPos);
-	float SceneDepth = CalcSceneDepth(ScreenUV);
+	const float2 ScreenUV = SvPositionToBufferUV(SVPos);
 
-#define BILATERAL_UPSAMPLE 1
-#if BILATERAL_UPSAMPLE && UPSAMPLE_REQUIRED
-	float2 LowResBufferSize = floor(View.BufferSizeAndInvSize.xy / DOWNSAMPLE_FACTOR);
-	float2 LowResTexelSize = 1.0f / LowResBufferSize;
-	float2 Corner00UV = floor(DistanceFieldUVs * LowResBufferSize - .5f) / LowResBufferSize + .5f * LowResTexelSize;
-	float2 BilinearWeights = (DistanceFieldUVs - Corner00UV) * LowResBufferSize;
-
-	float2 TextureValues00 = Texture2DSampleLevel(ShadowFactorsTexture, ShadowFactorsSampler, Corner00UV, 0).xy;
-	float2 TextureValues10 = Texture2DSampleLevel(ShadowFactorsTexture, ShadowFactorsSampler, Corner00UV + float2(LowResTexelSize.x, 0), 0).xy;
-	float2 TextureValues01 = Texture2DSampleLevel(ShadowFactorsTexture, ShadowFactorsSampler, Corner00UV + float2(0, LowResTexelSize.y), 0).xy;
-	float2 TextureValues11 = Texture2DSampleLevel(ShadowFactorsTexture, ShadowFactorsSampler, Corner00UV + LowResTexelSize, 0).xy;
-
-	float4 CornerWeights = float4(
-		(1 - BilinearWeights.y) * (1 - BilinearWeights.x), 
-		(1 - BilinearWeights.y) * BilinearWeights.x,
-		BilinearWeights.y * (1 - BilinearWeights.x),
-		BilinearWeights.y * BilinearWeights.x);
-
-	float Epsilon = .0001f;
-
-	float4 CornerDepths = abs(float4(TextureValues00.y, TextureValues10.y, TextureValues01.y, TextureValues11.y));
-	float4 DepthWeights = 1.0f / (abs(CornerDepths - SceneDepth.xxxx) + Epsilon);
-	float4 FinalWeights = CornerWeights * DepthWeights;
-
-	float InterpolatedResult = 
-		(FinalWeights.x * TextureValues00.x 
-		+ FinalWeights.y * TextureValues10.x
-		+ FinalWeights.z * TextureValues01.x 
-		+ FinalWeights.w * TextureValues11.x)
-		/ dot(FinalWeights, 1);
-
-	float Output = InterpolatedResult;
-
-#else
-	float Output = Texture2DSampleLevel(ShadowFactorsTexture, ShadowFactorsSampler, DistanceFieldUVs, 0).x;
-#endif
+	float Output;
+	float SceneDepth;
+	UpsampleShadowFactors(SVPos, ScissorRectMinAndSize, 1.0f / DOWNSAMPLE_FACTOR, ShadowFactorsTexture, ShadowFactorsSampler, Output, SceneDepth);
 
 	if (OutputtingToLightAttenuation > 0)
 	{
@@ -1249,3 +1226,5 @@ void CapsuleShadowingUpsamplePS(
 	OutAmbientOcclusion = Output;
 #endif
 }
+
+#endif // UPSAMPLE_PASS

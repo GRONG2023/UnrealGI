@@ -1,7 +1,5 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "../HairStrands/HairStrandsVoxelPageCommonStruct.ush"
-
 #include "../Common.ush"
 #include "../SceneTextureParameters.ush"
 #include "../PathTracing/Utilities/PathTracingRandomSequence.ush"
@@ -25,6 +23,10 @@ RAY_TRACING_ENTRY_RAYGEN(SkyLightRGS)
 	uint2 DispatchThreadId = DispatchRaysIndex().xy + View.ViewRectMin.xy;
 	uint2 PixelCoord = GetPixelCoord(DispatchThreadId, UpscaleFactor);
 
+#if SUBSTRATE_ENABLED
+	RWSkyOcclusionMaskUAV[DispatchThreadId] = float4(0,0,0,1);
+	RWSkyOcclusionRayDistanceUAV[DispatchThreadId] = float2(200000, 0);
+#else // SUBSTRATE_ENABLED
 	// Get G-Buffer surface data
 	float2 InvBufferSize = View.BufferSizeAndInvSize.zw;
 	float2 UV = (float2(PixelCoord) + 0.5) * InvBufferSize;
@@ -38,9 +40,9 @@ RAY_TRACING_ENTRY_RAYGEN(SkyLightRGS)
 #endif
 
 	float DeviceZ = SceneDepthTexture.Load(int3(PixelCoord, 0)).r;
-	float3 WorldPosition;
+	float3 TranslatedWorldPosition;
 	float3 CameraDirection;
-	ReconstructWorldPositionAndCameraDirectionFromDeviceZ(PixelCoord, DeviceZ, WorldPosition, CameraDirection);
+	ReconstructTranslatedWorldPositionAndCameraDirectionFromDeviceZ(PixelCoord, DeviceZ, TranslatedWorldPosition, CameraDirection);
 	float3 WorldNormal = GBufferData.WorldNormal;
 	float3 Albedo = GBufferData.DiffuseColor;
 
@@ -74,7 +76,7 @@ RAY_TRACING_ENTRY_RAYGEN(SkyLightRGS)
 		DispatchThreadId,
 		PixelCoord,
 		SamplesPerPixel,
-		WorldPosition,
+		TranslatedWorldPosition,
 		WorldNormal,
 		CameraDirection,
 		GBufferData,
@@ -92,10 +94,9 @@ RAY_TRACING_ENTRY_RAYGEN(SkyLightRGS)
 	DiffuseExitantRadiance.g = Albedo.g > 0.0 ? DiffuseExitantRadiance.g / Albedo.g : DiffuseExitantRadiance.g;
 	DiffuseExitantRadiance.b = Albedo.b > 0.0 ? DiffuseExitantRadiance.b / Albedo.b : DiffuseExitantRadiance.b;
 
-#if USE_PREEXPOSURE
 	DiffuseExitantRadiance.rgb *= View.PreExposure;
-#endif
 
 	RWSkyOcclusionMaskUAV[DispatchThreadId] = float4(ClampToHalfFloatRange(DiffuseExitantRadiance.rgb), AmbientOcclusion);
 	RWSkyOcclusionRayDistanceUAV[DispatchThreadId] = float2(HitDistance, SamplesPerPixel);
+#endif // SUBSTRATE_ENABLED
 }

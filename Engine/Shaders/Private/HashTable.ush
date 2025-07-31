@@ -1,50 +1,51 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-uint MurmurAdd( uint Hash, uint Element )
-{
-	Element *= 0xcc9e2d51;
-	Element = ( Element << 15 ) | ( Element >> (32 - 15) );
-	Element *= 0x1b873593;
-    
-	Hash ^= Element;
-	Hash = ( Hash << 13 ) | ( Hash >> (32 - 13) );
-	Hash = Hash * 5 + 0xe6546b64;
-	return Hash;
-}
+#pragma once
 
-uint MurmurMix( uint Hash )
-{
-	Hash ^= Hash >> 16;
-	Hash *= 0x85ebca6b;
-	Hash ^= Hash >> 13;
-	Hash *= 0xc2b2ae35;
-	Hash ^= Hash >> 16;
-	return Hash;
-}
+#include "Hash.ush"
 
 // Linear probing hash table
 StructuredBuffer< uint >	HashTable;
 RWStructuredBuffer< uint >	RWHashTable;
 uint						HashTableSize;
 
+/*
+	Suggested use:
+
+	If the original Key fits in a uint then pass it in as Key and hash it for the initial Index.
+	If the original Key doesn't fit in a uint then use 2 different hashing functions for Key and initial Index.
+
+	In either case a match must match both which reduces aliasing from hash collisions.
+	This is a linear probing hash table so buckets aren't completely disjoint but this tends to
+	double the effective Key bits in terms of likelihood for aliasing.
+*/
+
 // Returns true if key is added for the first time.
+// Index input is the first hash table bucket to look in.
 // Index output is the hash table bucket this key is stored in.
-bool HashTableAdd( uint Key, out uint Index )
+bool HashTableAdd( uint Key, inout uint Index )
 {
 	// Zero is reserved as invalid
 	Key++;
 
-	LOOP
-	for( Index = MurmurMix( Key );; Index++ )
-	{
-		//Index &= HashTableSize - 1;
-		Index = Index % HashTableSize;
+	// TODO v_mul_hi_u32 to avoid integer division
+	// ( Index * HashTableSize ) >> 32
 
+	Index = Index % HashTableSize;
+
+	LOOP
+	ALLOW_UAV_CONDITION
+	for( uint i = 0; i < HashTableSize; i++ )
+	{
 		uint StoredKey = RWHashTable[ Index ];
 		if( StoredKey != Key )
 		{
 			if( StoredKey != 0 )
+			{
+				Index++;
+				Index = Index >= HashTableSize ? 0 : Index;
 				continue;
+			}
 
 			uint PrevKey;
 			InterlockedCompareExchange( RWHashTable[ Index ], 0, Key, PrevKey );
@@ -52,7 +53,11 @@ bool HashTableAdd( uint Key, out uint Index )
 			if( PrevKey == 0 )
 				return true;
 			else if( PrevKey != Key )
+			{
+				Index++;
+				Index = Index >= HashTableSize ? 0 : Index;
 				continue;
+			}
 		}
 
 		break;
@@ -62,29 +67,34 @@ bool HashTableAdd( uint Key, out uint Index )
 }
 
 // Returns true if key is found.
+// Index input is the first hash table bucket to look in.
 // Index output is the hash table bucket this key is stored in if found.
-bool HashTableFind( uint Key, out uint Index )
+bool HashTableFind( uint Key, inout uint Index )
 {
 	// Zero is reserved as invalid
 	Key++;
 
-	LOOP
-	for( Index = MurmurMix( Key );; Index++ )
-	{
-		//Index &= HashTableSize - 1;
-		Index = Index % HashTableSize;
+	Index = Index % HashTableSize;
 
+	LOOP
+	ALLOW_UAV_CONDITION
+	for( uint i = 0; i < HashTableSize; i++ )
+	{
 		uint StoredKey = HashTable[ Index ];
 		if( StoredKey != Key )
 		{
 			if( StoredKey != 0 )
+			{
+				Index++;
+				Index = Index >= HashTableSize ? 0 : Index;
 				continue;
+			}
 
-			return true;
+			return false;
 		}
 
 		break;
 	}
 
-	return false;
+	return true;
 }

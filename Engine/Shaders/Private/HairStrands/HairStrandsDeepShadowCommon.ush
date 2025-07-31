@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #pragma once
+#include "../ColorMap.ush"  
 
 #define DEBUG_MODE 0
 
@@ -158,7 +159,6 @@ float SampleDOM_PCSS(
 	float4 InLayerDepths,
 	Texture2D<float> FrontDepthTexture,
 	Texture2D<float4> DomTexture,
-	SamplerState LinearSampler,
 	float ApexAngleInDegree,
 	float2 Jitter) // [0,1]
 {
@@ -261,5 +261,5 @@ float3 ComputeHairCountDebugColor(
 	const float4 DOMValue = DomTexture.SampleLevel(LinearSampler, LightSpacePosition.xy, 0);
 	const float DistanceToFrontDepth = GetDomDistanceToFrontDepth(FrontDepth, LightSpacePosition.z);
 	const float HairCount = ComputeHairCount(DOMValue, DistanceToFrontDepth, InLayerDepths);
-	return GetColorCode(HairCount / MaxHairCount);
+	return GetHSVDebugColor(HairCount / MaxHairCount);
 }

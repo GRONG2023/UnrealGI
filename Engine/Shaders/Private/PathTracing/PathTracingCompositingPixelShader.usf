@@ -5,39 +5,21 @@ ReferencePathTracinPixelShader.ush: Reference path tracing  compositing pixel sh
 ===============================================================================================*/
 
 #include "../Common.ush"
+#include "../ColorMap.ush"
+#include "PathTracingAdaptiveUtils.ush"
 
 uint Iteration;
 uint MaxSamples;
 int ProgressDisplayEnabled;
 Texture2D<float4> RadianceTexture;
+Texture2D<float4> NormalDepthTexture;
 
-
-float TonemapGammaAndHDR(float Value)
-{
-	if (Value > 1.0)
-	{
-		Value = 1.0 + 2.0 * log(Value);
-	}
-	else
-	{
-		Value = pow(Value, 2.0);
-	}
-	return Value;
-}
-
-float NoTonemap(float Value)
-{
-	return Value;
-}
-
-float Tonemap(float Value)
-{
-	return TonemapGammaAndHDR(Value);
-}
+int AdaptiveSamplingVisualize;
 
 void CompositeMain(
 	in noperspective float2 UV : TEXCOORD0,
-	out float4 OutColor : SV_Target0
+	out float4 OutColor : SV_Target0,
+	out float OutDepth : SV_DEPTH
 )
 {
 	float2 BufferSize = View.BufferSizeAndInvSize.xy;
@@ -45,13 +27,48 @@ void CompositeMain(
 
 	float4 Radiance = RadianceTexture.Load(TexCoord);
 
-	OutColor = float4(Radiance.rgb * View.PreExposure, 1.0);
+	// NOTE: UE has the convention of using 1.0 - Alpha
+	OutColor = float4(Radiance.rgb * View.PreExposure, 1.0 - Radiance.a);
 
+	if (AdaptiveSamplingVisualize == 1)
+	{
+		// Visualize which pixels are still being worked and color them according to how many more samples we think they need
+		float2 VarianceUV = float2(TexCoord.xy + 0.5) * View.BufferSizeAndInvSize.zw;
+		float SampleScaleFactor = GetAdaptiveSampleFactor(TexCoord.xy, View.PreExposure);
+		if (SampleScaleFactor > 1.0)
+		{
+			float4 Variance = VarianceTexture.Load(TexCoord);
+			float Ramp = Variance.z * SampleScaleFactor / MaxSamples;
+			OutColor.xyz = ColorMapTurbo(Ramp);
+		}
+	}
+	if (AdaptiveSamplingVisualize == 2)
+	{
+		// Visualize sample count relative to maximum
+		float4 Variance = VarianceTexture.Load(TexCoord);
+		float Ramp = Variance.z / min(Iteration + 1, MaxSamples);
+		OutColor.xyz = ColorMapTurbo(Ramp);
+	}
+
+	if (AdaptiveSamplingVisualize >= 3 && AdaptiveSamplingVisualize < 3 + int(VarianceTextureDims.z))
+	{
+		//float4 Variance = VarianceTexture.Load(TexCoord);
+		float2 VarianceUV = float2(TexCoord.xy + 0.5) / float2(VarianceTextureDims.xy);
+		int Mip = AdaptiveSamplingVisualize - 3;
+		float4 Variance = SampleVarianceTexture(VarianceUV, Mip);
+		float NumSamples = Variance.z;
+		float OutVariance = Variance.y - Variance.x * Variance.x;
+		float Lum = Variance.x;
+		float StdErr = sqrt(OutVariance / NumSamples);
+		float RelErr = PerceptualError(Lum, StdErr, View.PreExposure);
+		OutColor.xyz = RelErr;
+	}
+	
 	if (ProgressDisplayEnabled && (Iteration + 1) < MaxSamples)
 	{
 		// Draw a progress meter for how far along we are to the max number of passes
 		float Aspect = View.BufferSizeAndInvSize.y * View.BufferSizeAndInvSize.z;
-		float Size = 50.0 * View.BufferSizeAndInvSize.zz;
+		float Size = 50.0 * View.BufferSizeAndInvSize.z;
 		float2 P = float2(UV.x, UV.y * Aspect);
 		float2 RectMin = View.ViewRectMin.xy;
 		float2 RectMax = View.ViewRectMin.xy + View.ViewSizeAndInvSize.xy;
@@ -96,17 +113,5 @@ void CompositeMain(
 #endif
 	}
 
-#if 0
-    // split-screen debugging aids
-	if (UV.x < 0.5)
-	{
-		uint NumSamples = Iteration + 1;
-		float OutVariance = Radiance.a;
-		float Lum = Luminance(Radiance.rgb); // mean
-		float StdErr = NumSamples > 0 ? sqrt(OutVariance / NumSamples) : 0; // stderr
-		//OutColor = Tonemap(Lum + 3 * StdErr) - Tonemap(max(Lum - 3 * StdErr, 0.0)); // error estimator
-		OutColor = StdErr * View.PreExposure;
-		//OutColor = StdErr / (Lum + 0.0001) * View.PreExposure;
-	}
-#endif
+	OutDepth = NormalDepthTexture.Load(TexCoord).w;
 }

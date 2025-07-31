@@ -4,6 +4,9 @@
 	RayTracingDynamicMesh.usf
 =============================================================================*/
 
+// Change to force shader compilation of this shader
+#pragma message("UESHADERMETADATA_VERSION 74B3439C-C6C2-47F8-B07C-05009AB185D1")
+
 #include "/Engine/Private/Common.ush"
 #include "/Engine/Generated/Material.ush"
 #include "/Engine/Generated/VertexFactory.ush"
@@ -12,17 +15,6 @@ struct FRayTracingDynamicMeshVSToGS
 {
 	float4 WorldPosition : SV_POSITION;
 };
-
-void RayTracingDynamicMeshVS(
-	FVertexFactoryInput Input,
-	out FRayTracingDynamicMeshVSToGS Output
-	)
-{
-	ResolvedView = ResolveView();
-
-	FVertexFactoryIntermediates VFIntermediates = GetVertexFactoryIntermediates(Input);
-	Output.WorldPosition = VertexFactoryGetWorldPosition(Input, VFIntermediates) - float4(ResolvedView.PreViewTranslation, 0.0f);
-}
 
 // Must match GetUniformMeshStreamOutLayout and TRIANGLE_VERTEX_DATA_STRIDE
 struct FRayTracingDynamicMeshVertex
@@ -50,8 +42,9 @@ uint NumVertices;
 uint MinVertexIndex;
 uint PrimitiveId;
 uint OutputVertexBaseIndex;
-float4x4 InstanceTransform;
-float4x4 InverseTransform;
+int InstanceId;
+float4x4 WorldToInstance;
+
 RWBuffer<float> RWVertexPositions;
 int bApplyWorldPositionOffset;
 
@@ -70,19 +63,19 @@ void RayTracingDynamicGeometryConverterCS(uint3 DispatchThreadId : SV_DispatchTh
 	if (DispatchThreadId.x < NumActualVertices)
 	{
 		FVertexFactoryInput Input = LoadVertexFactoryInputForDynamicUpdate(VertexIndex / 3, VertexIndex % 3, PrimitiveId);
-		FVertexFactoryIntermediates VFIntermediates = GetVertexFactoryIntermediates(Input);
+
 #if USE_INSTANCING
-		// Instance transform supplied explicitly
-		VFIntermediates.InstanceOrigin = InstanceTransform[3];
-		VFIntermediates.InstanceTransform1 = InstanceTransform[0];
-		VFIntermediates.InstanceTransform2 = InstanceTransform[1];
-		VFIntermediates.InstanceTransform3 = InstanceTransform[2];
+		Input.InstanceId = InstanceId;
+#elif USE_INSTANCE_CULLING
+		Input.DrawInstanceId = InstanceId;
 #endif
+		FVertexFactoryIntermediates VFIntermediates = GetVertexFactoryIntermediates(Input);
+
 		float4 WorldPosition = VertexFactoryGetWorldPosition(Input, VFIntermediates);
 		float3x3 TangentToLocal = VertexFactoryGetTangentToLocal(Input, VFIntermediates);
 		FMaterialVertexParameters VertexParameters = GetMaterialVertexParameters(Input, VFIntermediates, WorldPosition.xyz, TangentToLocal);
 
-		WorldPosition.xyz -= ResolvedView.PreViewTranslation;
+		WorldPosition.xyz -= DFHackToFloat(ResolvedView.PreViewTranslation);
 		if (bApplyWorldPositionOffset)
 		{
 			// We must guarantee that no NaNs are produced by WPO to avoid a possibility of producing invalid BLAS.
@@ -91,9 +84,18 @@ void RayTracingDynamicGeometryConverterCS(uint3 DispatchThreadId : SV_DispatchTh
 			WorldPosition.xyz += MakeFinite(GetMaterialWorldPositionOffset(VertexParameters));
 		}
 
-#if USE_INSTANCING
+#if USE_INSTANCING || USE_INSTANCE_CULLING
 		//Reverse transform to neutral space
-		WorldPosition = mul(WorldPosition, InverseTransform);
+		WorldPosition = mul(WorldPosition, WorldToInstance);
+#elif RAY_TRACING_DYNAMIC_MESH_IN_LOCAL_SPACE
+		// Move the point back into local space because the RT instance will be placed there
+		// This the recommended default behavior so that the transform applied by the VertexFactory and the RT transform are always the same
+		WorldPosition.xyz = DFMultiplyDemote(DFPromote(WorldPosition), VertexFactoryGetWorldToLocal(VFIntermediates)).xyz;
+#elif RAY_TRACING_DYNAMIC_MESH_IN_WORLD_SPACE
+		// There are a few geometry types which natively generate positions in world space and therefore not need any extra processing here.
+		// This behavior must be explicitly opted-in to so as to make the code more self-documenting and avoid un-intended mismatched transforms.
+#else
+#error "Are you sure you want mesh vertices to be in world space? Please update the VertexFactory to report its requirement!"
 #endif
 
 		RWVertexPositions[OutputVertexBaseIndex + VertexIndex * 3 + 0] = WorldPosition.x;

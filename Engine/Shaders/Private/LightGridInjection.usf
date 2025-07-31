@@ -1,20 +1,42 @@
+// Copyright Epic Games, Inc. All Rights Reserved.
+
 /*=============================================================================
 	LightGridInjection.usf
 =============================================================================*/
 
 #include "Common.ush"
 #include "Definitions.usf"
+#include "LargeWorldCoordinates.ush"
+#include "ReflectionEnvironmentShared.ush"
+#include "LightGridCommon.ush"
 
-RWBuffer<uint> RWNumCulledLightsGrid;
-RWBuffer<uint> RWCulledLightDataGrid;
+RWStructuredBuffer<uint> RWNumCulledLightsGrid;
 
-RWBuffer<uint> RWNextCulledLightLink;
-RWBuffer<uint> RWStartOffsetGrid;
-RWBuffer<uint> RWCulledLightLinks;
+#if LIGHT_GRID_USES_16BIT_BUFFERS
+	RWBuffer<uint>					RWCulledLightDataGrid16Bit;
+	#define RWCulledLightDataGrid	RWCulledLightDataGrid16Bit
+#else
+	RWStructuredBuffer<uint>		RWCulledLightDataGrid32Bit;
+	#define RWCulledLightDataGrid	RWCulledLightDataGrid32Bit
+#endif
+
+RWStructuredBuffer<uint> RWNextCulledLightLink;
+RWStructuredBuffer<uint> RWStartOffsetGrid;
+RWStructuredBuffer<uint> RWCulledLightLinks;
+
+StructuredBuffer<float4> ForwardLocalLightBuffer;
+
+uint NumReflectionCaptures;
+uint NumLocalLights;
+uint NumGridCells;
+uint MaxCulledLightsPerCell;
+uint3 CulledGridSize;
+float3 LightGridZParams;
+uint LightGridPixelSizeShift;
 
 #if ENABLE_LIGHT_CULLING_VIEW_SPACE_BUILD_DATA
-Buffer<float4> LightViewSpacePositionAndRadius;
-Buffer<float4> LightViewSpaceDirAndPreprocAngle;
+StructuredBuffer<float4> LightViewSpacePositionAndRadius;
+StructuredBuffer<float4> LightViewSpaceDirAndPreprocAngle;
 #endif // ENABLE_LIGHT_CULLING_VIEW_SPACE_BUILD_DATA
 
 #define REFINE_SPOTLIGHT_BOUNDS 1
@@ -25,9 +47,9 @@ Buffer<float4> LightViewSpaceDirAndPreprocAngle;
 
 float ComputeCellNearViewDepthFromZSlice(uint ZSlice)
 {
-	float SliceDepth = (exp2(ZSlice / ForwardLightData.LightGridZParams.z) - ForwardLightData.LightGridZParams.y) / ForwardLightData.LightGridZParams.x;
+	float SliceDepth = (exp2(ZSlice / LightGridZParams.z) - LightGridZParams.y) / LightGridZParams.x;
 
-	if (ZSlice == (uint)ForwardLightData.CulledGridSize.z)
+	if (ZSlice == (uint)CulledGridSize.z)
 	{
 		// Extend the last slice depth max out to world max
 		// This allows clamping the depth range to reasonable values, 
@@ -50,7 +72,7 @@ float ComputeCellNearViewDepthFromZSlice(uint ZSlice)
 void ComputeCellViewAABB(uint3 GridCoordinate, out float3 ViewTileMin, out float3 ViewTileMax)
 {
 	// Compute extent of tiles in clip-space. Note that the last tile may extend a bit outside of view if view size is not evenly divisible tile size.
-	const float2 InvCulledGridSizeF = (1 << ForwardLightData.LightGridPixelSizeShift) * View.ViewSizeAndInvSize.zw;
+	const float2 InvCulledGridSizeF = (1u << LightGridPixelSizeShift) * View.ViewSizeAndInvSize.zw;
 	const float2 TileSize = float2(2.0f, -2.0f) * InvCulledGridSizeF.xy;
 	const float2 UnitPlaneMin = float2(-1.0f, 1.0f);
 
@@ -146,6 +168,8 @@ bool IsAabbOutsideInfiniteAcuteConeApprox(float3 ConeVertex, float3 ConeAxis, fl
 	return AabbOutsidePlane(D, AabbExt, Plane);
 }
 
+#if SHADER_LIGHT_GRID_INJECTION_CS
+
 [numthreads(THREADGROUP_SIZE, THREADGROUP_SIZE, THREADGROUP_SIZE)]
 void LightGridInjectionCS(
 	uint3 GroupId : SV_GroupID,
@@ -154,9 +178,9 @@ void LightGridInjectionCS(
 {
 	uint3 GridCoordinate = DispatchThreadId;
 
-	if (all(GridCoordinate < (uint3)ForwardLightData.CulledGridSize))
+	if (all(GridCoordinate < (uint3)CulledGridSize))
 	{
-		uint GridIndex = (GridCoordinate.z * ForwardLightData.CulledGridSize.y + GridCoordinate.y) * ForwardLightData.CulledGridSize.x + GridCoordinate.x;
+		uint GridIndex = (GridCoordinate.z * CulledGridSize.y + GridCoordinate.y) * CulledGridSize.x + GridCoordinate.x;
 
 // Disable to pass all lights through for debugging, will hit limits quickly though
 #define CULL_LIGHTS 1
@@ -167,13 +191,13 @@ void LightGridInjectionCS(
 
 		float3 ViewTileCenter = .5f * (ViewTileMin + ViewTileMax);
 		float3 ViewTileExtent = ViewTileMax - ViewTileCenter;
-		float3 WorldTileCenter = mul(float4(ViewTileCenter, 1), View.ViewToTranslatedWorld).xyz - View.PreViewTranslation;
+		float3 WorldTileCenter = mul(float4(ViewTileCenter, 1), View.ViewToTranslatedWorld).xyz - DFHackToFloat(PrimaryView.PreViewTranslation);
 		float4 WorldTileBoundingSphere = float4(WorldTileCenter, length(ViewTileExtent));
 
-		uint NumAvailableLinks = ForwardLightData.NumGridCells * ForwardLightData.MaxCulledLightsPerCell * NUM_CULLED_GRID_PRIMITIVE_TYPES;
+		uint NumAvailableLinks = NumGridCells * MaxCulledLightsPerCell * NUM_CULLED_GRID_PRIMITIVE_TYPES;
 
 		LOOP
-		for (uint LocalLightIndex = 0; LocalLightIndex < ForwardLightData.NumLocalLights; LocalLightIndex++)
+		for (uint LocalLightIndex = 0; LocalLightIndex < NumLocalLights; LocalLightIndex++)
 		{
 			uint LocalLightBaseIndex = LocalLightIndex * LOCAL_LIGHT_DATA_STRIDE;
 
@@ -181,12 +205,11 @@ void LightGridInjectionCS(
 			float4 LightPositionAndRadius = LightViewSpacePositionAndRadius[LocalLightIndex];
 			float3 ViewSpaceLightPosition = LightPositionAndRadius.xyz;
 			float LightRadius = LightPositionAndRadius.w;
-			float4 LightPositionAndInvRadius = ForwardLightData.ForwardLocalLightBuffer[LocalLightBaseIndex + 0];
 #else // !ENABLE_LIGHT_CULLING_VIEW_SPACE_BUILD_DATA
-			float4 LightPositionAndInvRadius = ForwardLightData.ForwardLocalLightBuffer[LocalLightBaseIndex + 0];
+			float4 LightPositionAndInvRadius = ForwardLocalLightBuffer[LocalLightBaseIndex + 0];
 			float LightRadius = 1.0f / LightPositionAndInvRadius.w;
 
-			float3 ViewSpaceLightPosition = mul(float4(LightPositionAndInvRadius.xyz + View.PreViewTranslation.xyz, 1), View.TranslatedWorldToView).xyz;
+			float3 ViewSpaceLightPosition = mul(float4(LightPositionAndInvRadius.xyz, 1), View.TranslatedWorldToView).xyz;
 #endif // ENABLE_LIGHT_CULLING_VIEW_SPACE_BUILD_DATA
 
 			float BoxDistanceSq = ComputeSquaredDistanceFromBoxToPoint(ViewTileCenter, ViewTileExtent, ViewSpaceLightPosition);
@@ -225,11 +248,11 @@ void LightGridInjectionCS(
 #else
 					uint CulledLightIndex;
 					InterlockedAdd(RWNumCulledLightsGrid[GridIndex * NUM_CULLED_LIGHTS_GRID_STRIDE + 0], 1U, CulledLightIndex);
-					RWNumCulledLightsGrid[GridIndex * NUM_CULLED_LIGHTS_GRID_STRIDE + 1] = GridIndex * ForwardLightData.MaxCulledLightsPerCell;
+					RWNumCulledLightsGrid[GridIndex * NUM_CULLED_LIGHTS_GRID_STRIDE + 1] = GridIndex * MaxCulledLightsPerCell;
 
-					if (CulledLightIndex < ForwardLightData.MaxCulledLightsPerCell)
+					if (CulledLightIndex < MaxCulledLightsPerCell)
 					{
-						RWCulledLightDataGrid[GridIndex * ForwardLightData.MaxCulledLightsPerCell + CulledLightIndex] = LocalLightIndex;
+						RWCulledLightDataGrid[GridIndex * MaxCulledLightsPerCell + CulledLightIndex] = LocalLightIndex;
 					}
 #endif
 				}
@@ -237,14 +260,16 @@ void LightGridInjectionCS(
 		}
 		
 		LOOP
-		for (uint ReflectionCaptureIndex = 0; ReflectionCaptureIndex < ForwardLightData.NumReflectionCaptures; ReflectionCaptureIndex++)
+		for (uint ReflectionCaptureIndex = 0; ReflectionCaptureIndex < NumReflectionCaptures; ReflectionCaptureIndex++)
 		{
-			float4 CapturePositionAndRadius = ReflectionCapture.PositionAndRadius[ReflectionCaptureIndex];
-			float3 ViewSpaceCapturePosition = mul(float4(CapturePositionAndRadius.xyz + View.PreViewTranslation.xyz, 1), View.TranslatedWorldToView).xyz;
+			FDFVector3 CaptureWorldPosition = MakeDFVector3(GetReflectionPositionAndRadius(ReflectionCaptureIndex).xyz, GetReflectionPositionLow(ReflectionCaptureIndex).xyz);
+			float3 CaptureTranslatedWorldPosition = DFFastAddDemote(CaptureWorldPosition, PrimaryView.PreViewTranslation);
+			float3 ViewSpaceCapturePosition = mul(float4(CaptureTranslatedWorldPosition, 1), View.TranslatedWorldToView).xyz;
+			float CaptureRadius = GetReflectionPositionAndRadius(ReflectionCaptureIndex).w;
 
 			float BoxDistanceSq = ComputeSquaredDistanceFromBoxToPoint(ViewTileCenter, ViewTileExtent, ViewSpaceCapturePosition);
 
-			if (BoxDistanceSq < CapturePositionAndRadius.w * CapturePositionAndRadius.w)
+			if (BoxDistanceSq < CaptureRadius * CaptureRadius)
 			{
 				#if USE_LINKED_CULL_LIST
 					uint NextLink;
@@ -253,19 +278,19 @@ void LightGridInjectionCS(
 					if (NextLink < NumAvailableLinks)
 					{
 						uint PreviousLink;
-						InterlockedExchange(RWStartOffsetGrid[ForwardLightData.NumGridCells + GridIndex], NextLink, PreviousLink);
+						InterlockedExchange(RWStartOffsetGrid[NumGridCells + GridIndex], NextLink, PreviousLink);
 						RWCulledLightLinks[NextLink * LIGHT_LINK_STRIDE + 0] = ReflectionCaptureIndex;
 						RWCulledLightLinks[NextLink * LIGHT_LINK_STRIDE + 1] = PreviousLink;
 					}
 
 				#else
 					uint CulledCaptureIndex;
-					InterlockedAdd(RWNumCulledLightsGrid[(ForwardLightData.NumGridCells + GridIndex) * NUM_CULLED_LIGHTS_GRID_STRIDE + 0], 1U, CulledCaptureIndex);
-					RWNumCulledLightsGrid[(ForwardLightData.NumGridCells + GridIndex) * NUM_CULLED_LIGHTS_GRID_STRIDE + 1] = (ForwardLightData.NumGridCells + GridIndex) * ForwardLightData.MaxCulledLightsPerCell;
+					InterlockedAdd(RWNumCulledLightsGrid[(NumGridCells + GridIndex) * NUM_CULLED_LIGHTS_GRID_STRIDE + 0], 1U, CulledCaptureIndex);
+					RWNumCulledLightsGrid[(NumGridCells + GridIndex) * NUM_CULLED_LIGHTS_GRID_STRIDE + 1] = (NumGridCells + GridIndex) * MaxCulledLightsPerCell;
 
-					if (CulledCaptureIndex < ForwardLightData.MaxCulledLightsPerCell)
+					if (CulledCaptureIndex < MaxCulledLightsPerCell)
 					{
-						RWCulledLightDataGrid[(ForwardLightData.NumGridCells + GridIndex) * ForwardLightData.MaxCulledLightsPerCell + CulledCaptureIndex] = ReflectionCaptureIndex;
+						RWCulledLightDataGrid[(NumGridCells + GridIndex) * MaxCulledLightsPerCell + CulledCaptureIndex] = ReflectionCaptureIndex;
 					}
 				#endif
 			}
@@ -273,35 +298,41 @@ void LightGridInjectionCS(
 #else
 
 		LOOP
-		for (uint LocalLightIndex = 0; LocalLightIndex < ForwardLightData.NumLocalLights; LocalLightIndex++)
+		for (uint LocalLightIndex = 0; LocalLightIndex < NumLocalLights; LocalLightIndex++)
 		{
-			if (LocalLightIndex < ForwardLightData.MaxCulledLightsPerCell)
+			if (LocalLightIndex < MaxCulledLightsPerCell)
 			{
-				RWCulledLightDataGrid[GridIndex * ForwardLightData.MaxCulledLightsPerCell + LocalLightIndex] = LocalLightIndex;
+				RWCulledLightDataGrid[GridIndex * MaxCulledLightsPerCell + LocalLightIndex] = LocalLightIndex;
 			}
 		}
 
-		RWNumCulledLightsGrid[GridIndex * NUM_CULLED_LIGHTS_GRID_STRIDE + 0] = ForwardLightData.NumLocalLights;
-		RWNumCulledLightsGrid[GridIndex * NUM_CULLED_LIGHTS_GRID_STRIDE + 1] = GridIndex * ForwardLightData.MaxCulledLightsPerCell;
+		RWNumCulledLightsGrid[GridIndex * NUM_CULLED_LIGHTS_GRID_STRIDE + 0] = NumLocalLights;
+		RWNumCulledLightsGrid[GridIndex * NUM_CULLED_LIGHTS_GRID_STRIDE + 1] = GridIndex * MaxCulledLightsPerCell;
 		
 		LOOP
-		for (uint ReflectionCaptureIndex = 0; ReflectionCaptureIndex < ForwardLightData.NumReflectionCaptures; ReflectionCaptureIndex++)
+		for (uint ReflectionCaptureIndex = 0; ReflectionCaptureIndex < NumReflectionCaptures; ReflectionCaptureIndex++)
 		{
-			if (ReflectionCaptureIndex < ForwardLightData.MaxCulledLightsPerCell)
+			if (ReflectionCaptureIndex < MaxCulledLightsPerCell)
 			{
-				RWCulledLightDataGrid[(ForwardLightData.NumGridCells + GridIndex) * ForwardLightData.MaxCulledLightsPerCell + ReflectionCaptureIndex] = ReflectionCaptureIndex;
+				RWCulledLightDataGrid[(NumGridCells + GridIndex) * MaxCulledLightsPerCell + ReflectionCaptureIndex] = ReflectionCaptureIndex;
 			}
 		}
 
-		RWNumCulledLightsGrid[(ForwardLightData.NumGridCells + GridIndex) * NUM_CULLED_LIGHTS_GRID_STRIDE + 0] = ForwardLightData.NumReflectionCaptures;
-		RWNumCulledLightsGrid[(ForwardLightData.NumGridCells + GridIndex) * NUM_CULLED_LIGHTS_GRID_STRIDE + 1] = (ForwardLightData.NumGridCells + GridIndex) * ForwardLightData.MaxCulledLightsPerCell;
+		RWNumCulledLightsGrid[(NumGridCells + GridIndex) * NUM_CULLED_LIGHTS_GRID_STRIDE + 0] = NumReflectionCaptures;
+		RWNumCulledLightsGrid[(NumGridCells + GridIndex) * NUM_CULLED_LIGHTS_GRID_STRIDE + 1] = (NumGridCells + GridIndex) * MaxCulledLightsPerCell;
 #endif
 	}
 }
 
-RWBuffer<uint> RWNextCulledLightData;
-Buffer<uint> StartOffsetGrid;
-Buffer<uint> CulledLightLinks;
+#endif // SHADER_LIGHT_GRID_INJECTION_CS
+
+
+
+#if SHADER_LIGHT_GRID_COMPACT_CS
+
+RWStructuredBuffer<uint> RWNextCulledLightData;
+StructuredBuffer<uint> StartOffsetGrid;
+StructuredBuffer<uint> CulledLightLinks;
 
 #if USE_LOCALSTORE_FOR_ATOMICS
 groupshared uint LDSNextCulledLightData;
@@ -381,14 +412,107 @@ void LightGridCompactCS(
 {
 	uint3 GridCoordinate = DispatchThreadId;
 
-	bool bThreadValid = all(GridCoordinate < ForwardLightData.CulledGridSize);
+	bool bThreadValid = all(GridCoordinate < CulledGridSize);
 	bool bFirstThread =  GroupIndex==0;
 	
-	uint GridIndex = (GridCoordinate.z * ForwardLightData.CulledGridSize.y + GridCoordinate.y) * ForwardLightData.CulledGridSize.x + GridCoordinate.x;
+	uint GridIndex = (GridCoordinate.z * CulledGridSize.y + GridCoordinate.y) * CulledGridSize.x + GridCoordinate.x;
 
 	// Compact lights
-	CompactReverseLinkedList(GridIndex, ForwardLightData.NumLocalLights, bFirstThread, bThreadValid);
+	CompactReverseLinkedList(GridIndex, NumLocalLights, bFirstThread, bThreadValid);
 
 	// Compact reflection captures
-	CompactReverseLinkedList(ForwardLightData.NumGridCells + GridIndex, ForwardLightData.NumReflectionCaptures, bFirstThread, bThreadValid);
+	CompactReverseLinkedList(NumGridCells + GridIndex, NumReflectionCaptures, bFirstThread, bThreadValid);
 }
+
+#endif // SHADER_LIGHT_GRID_COMPACT_CS
+
+
+
+#ifdef SHADER_DEBUG_LIGHT_GRID_PS
+
+#define SUPPORT_CONTACT_SHADOWS 0
+#include "/Engine/Private/ShaderPrint.ush"
+#include "ColorMap.ush"
+
+Texture2D<float4> DepthTexture;
+uint DebugMode;
+
+void DebugLightGridPS(
+	in float4 SVPos : SV_POSITION,
+	out float4 OutLuminanceTransmittance : SV_Target0)
+{
+	OutLuminanceTransmittance = float4(0, 0, 0, 1);
+
+	ResolvedView = ResolveView();
+
+	const uint EyeIndex = 0;
+	const uint2 PixelPos = SVPos.xy;
+	const uint2 LocalPixelPos = (SVPos.xy - ResolvedView.ViewRectMin.xy);
+
+	// Using View.ViewResolutionFraction to maintain a good look under any dynamic resolution factor.
+	const uint2 PixelPosDynRes = float2(PixelPos) * View.ViewResolutionFraction;
+	const uint2 LocalPixelPosDynRes = float2(LocalPixelPos) * View.ViewResolutionFraction;
+	const uint2 LocalPixelPosDynRes2 = float2(LocalPixelPos+1) * View.ViewResolutionFraction;
+
+	if (any(LocalPixelPosDynRes >= uint2(ResolvedView.ViewSizeAndInvSize.xy)))
+	{
+		return;
+	}
+
+	const FLightGridData GridData = GetLightGridData(EyeIndex);
+	uint DebugNumLightsInGridCell = 0;
+
+	uint2 StartPos = uint2(50, 100);
+	FShaderPrintContext Context = InitShaderPrintContext(all(PixelPos == StartPos), StartPos);
+	bool SpecifyDebugSlice = AddCheckbox(Context, TEXT("Specify Slice to debug"), false, GetDefaultFontColor());
+	Newline(Context);
+	float DebugSlice = 0;
+	FFontColor EnableSliceDebugFont = FontDarkGrey; if (SpecifyDebugSlice) { EnableSliceDebugFont = FontWhite; }
+	DebugSlice = AddSlider(Context, TEXT("Slice to debug"), 0.0f, EnableSliceDebugFont, 0.0f, GridData.CulledGridSize.z-1);
+	Newline(Context);
+
+	if (DebugMode == 1 && !SpecifyDebugSlice)
+	{
+		const float SceneDepth = ConvertFromDeviceZ(DepthTexture.Load(int3(PixelPosDynRes, 0)).r);
+
+		const uint GridIndex = ComputeLightGridCellIndex(LocalPixelPosDynRes, SceneDepth, EyeIndex);
+		const FCulledLightsGridData CulledLightsGrid = GetCulledLightsGrid(GridIndex, EyeIndex);
+
+		DebugNumLightsInGridCell = CulledLightsGrid.NumLights;
+	}
+	else
+	{
+		// We do not want to fetch light data from the last slice since in this case the culling will be pretty bad (super large depth turned into a bounding sphere...)
+		// See ComputeCellNearViewDepthFromZSlice.
+		const int StartGridIndexZ = SpecifyDebugSlice ? uint(DebugSlice) : 0;
+		const int EndGridIndexZ   = SpecifyDebugSlice ? StartGridIndexZ+1: (DebugMode == 2 ? GridData.CulledGridSize.z - 1 : GridData.CulledGridSize.z);
+		LOOP
+		for (int SliceIt = StartGridIndexZ; SliceIt < EndGridIndexZ; SliceIt++)
+		{
+			const uint GridIndex = ComputeLightGridCellIndex(uint3(LocalPixelPosDynRes >> GridData.LightGridPixelSizeShift, SliceIt), EyeIndex);
+			const FCulledLightsGridData CulledLightsGrid = GetCulledLightsGrid(GridIndex, EyeIndex);
+		
+			DebugNumLightsInGridCell = max(DebugNumLightsInGridCell, CulledLightsGrid.NumLights);
+		}
+	}
+
+	const uint2 TileTopLeftPixelCoord = (LocalPixelPosDynRes  >> GridData.LightGridPixelSizeShift) << GridData.LightGridPixelSizeShift;
+	const uint2 TileTopLeftPixelCoord2= (LocalPixelPosDynRes2 >> GridData.LightGridPixelSizeShift) << GridData.LightGridPixelSizeShift;
+	const uint TileSize = (0x1u << GridData.LightGridPixelSizeShift) - 1;
+
+	if (DebugNumLightsInGridCell > 0)
+	{
+		OutLuminanceTransmittance.a   = 0.0f;
+		OutLuminanceTransmittance.rgb = GetHSVDebugColor(float(DebugNumLightsInGridCell) / 8.0f);
+		PrintSmallUint(PixelPos, OutLuminanceTransmittance.rgb, float3(0.1, 0.1, 0.1), (TileTopLeftPixelCoord + TileSize/2) / View.ViewResolutionFraction, float(DebugNumLightsInGridCell));
+	}
+
+	if ((TileTopLeftPixelCoord.x <= LocalPixelPosDynRes.x && TileTopLeftPixelCoord2.x >= LocalPixelPosDynRes.x)
+		|| (TileTopLeftPixelCoord.y <= LocalPixelPosDynRes.y && TileTopLeftPixelCoord2.y >= LocalPixelPosDynRes.y))
+	{
+		OutLuminanceTransmittance.rgba = float4(0.25, 0.25, 0.25, 0.0);
+	}
+}
+
+#endif // SHADER_DEBUG_LIGHT_GRID_PS
+

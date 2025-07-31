@@ -109,15 +109,7 @@
 		#define CONFIG_INPUT_TEXTURE_COUNT CONFIG_SIGNAL_BATCH_SIZE
 		#define CONFIG_OUTPUT_TEXTURE_COUNT CONFIG_SIGNAL_BATCH_SIZE
 
-		#define CONFIG_MAX_WITH_REF_DISTANCE 1
-		#define CONFIG_BILATERAL_DISTANCE_COMPUTATION SIGNAL_WORLD_FREQUENCY_PRECOMPUTED_BLURING_RADIUS
-
-		#if CONFIG_SIGNAL_BATCH_SIZE == 1
-			#define CONFIG_NORMALIZE_INPUT 1
-			#define CONFIG_SAMPLE_SET           SAMPLE_SET_DIRECTIONAL_ELLIPSE
-		#else
-			#define CONFIG_SAMPLE_SET           SAMPLE_SET_1X1
-		#endif
+		#define CONFIG_SAMPLE_SET           SAMPLE_SET_1X1
 
 	#else
 		#error Unexpected stage.
@@ -195,8 +187,6 @@
 #elif CONFIG_SIGNAL_PROCESSING == SIGNAL_PROCESSING_AO
 	// Denoise only AO.
 	#define MAX_SIGNAL_BATCH_SIZE 1
-
-	#define CONFIG_BILATERAL_DISTANCE_COMPUTATION SIGNAL_WORLD_FREQUENCY_PRECOMPUTED_BLURING_RADIUS
 
 	#if DIM_STAGE == STAGE_RECONSTRUCTION
 		#define SIGNAL_ARRAY_SIZE 1
@@ -309,7 +299,7 @@
 		#error Unexpected stage.
 	#endif
 
-#elif CONFIG_SIGNAL_PROCESSING == SIGNAL_PROCESSING_DIFFUSE_SPHERICAL_HARMONIC
+#elif CONFIG_SIGNAL_PROCESSING == SIGNAL_PROCESSING_DIFFUSE_SPHERICAL_HARMONIC && 0
 	#define MAX_SIGNAL_BATCH_SIZE 1
 	#define SIGNAL_ARRAY_SIZE 1
 
@@ -343,6 +333,33 @@
 		#error Unexpected stage.
 	#endif
 
+#elif CONFIG_SIGNAL_PROCESSING == SIGNAL_PROCESSING_DIFFUSE_SPHERICAL_HARMONIC && 1
+	#define MAX_SIGNAL_BATCH_SIZE 1
+	#define SIGNAL_ARRAY_SIZE 1
+
+	#define COMPILE_SIGNAL_COLOR_SH 1
+
+	// Given it's a spherical harmonic that store directionality, only need position based rejection.
+	#define CONFIG_BILATERAL_DISTANCE_COMPUTATION SIGNAL_WORLD_FREQUENCY_MIN_METADATA
+	#define CONFIG_BILATERAL_PRESET BILATERAL_PRESET_SPHERICAL_HARMONIC
+	//#define CONFIG_BILATERAL_PRESET BILATERAL_PRESET_DISABLED
+	#define CONFIG_BILATERAL_DISTANCE_MULTIPLIER 6.0
+
+	#define CONFIG_INPUT_TEXTURE_COUNT 2
+	#define CONFIG_OUTPUT_TEXTURE_COUNT 2
+
+	// Input and output layout.
+	#define CONFIG_SIGNAL_INPUT_LAYOUT  SIGNAL_BUFFER_LAYOUT_LUMEN_DIFFUSE_INPUT
+	#define CONFIG_SIGNAL_OUTPUT_LAYOUT SIGNAL_BUFFER_LAYOUT_LUMEN_DIFFUSE_HISTORY
+
+	#if DIM_STAGE == STAGE_RECONSTRUCTION
+		//#define CONFIG_SAMPLE_SET           SAMPLE_SET_STACKOWIAK_4_SETS
+		#define CONFIG_SAMPLE_SET           SAMPLE_SET_RAW_EXPERIMENTAL_KERNEL
+
+	#else
+		#error Unexpected stage.
+	#endif
+
 #elif CONFIG_SIGNAL_PROCESSING == SIGNAL_PROCESSING_SSGI
 	// Denoise diffuse and AO, but AO is FSSDSignalSample::MissCount.
 	#define MAX_SIGNAL_BATCH_SIZE 1
@@ -367,6 +384,36 @@
 
 		#define CONFIG_SAMPLE_SET           SAMPLE_SET_STACKOWIAK_4_SETS
 		//#define CONFIG_SAMPLE_SET           SAMPLE_SET_1X1
+
+	#else
+		#error Unexpected stage.
+	#endif
+
+#elif CONFIG_SIGNAL_PROCESSING == SIGNAL_PROCESSING_DIFFUSE_PROBE_HIERARCHY
+	// Denoise diffuse and AO, but AO is FSSDSignalSample::MissCount.
+	#define MAX_SIGNAL_BATCH_SIZE 1
+	#define SIGNAL_ARRAY_SIZE 1
+	#define CONFIG_MULTIPLEXED_SIGNALS_PER_SIGNAL_DOMAIN 1
+
+	#define COMPILE_SIGNAL_COLOR_ARRAY 2
+
+	#define CONFIG_BILATERAL_PRESET BILATERAL_PRESET_PROBE_HIERARCHY
+	//#define CONFIG_BILATERAL_PRESET BILATERAL_PRESET_DISABLED
+	
+	// SSGI doesn't have any bilateral distance computed from hitT, so allow to blur spatially by about the size of the kernel.
+	#define CONFIG_BILATERAL_DISTANCE_MULTIPLIER 3.0
+
+	#define CONFIG_INPUT_TEXTURE_COUNT 2
+	#define CONFIG_OUTPUT_TEXTURE_COUNT 2
+
+	#if DIM_STAGE == STAGE_RECONSTRUCTION
+		// Input and output layout.
+		#define CONFIG_SIGNAL_INPUT_LAYOUT  SIGNAL_BUFFER_LAYOUT_DIFFUSE_PROBE_HIERARCHY_INPUT
+		//#define CONFIG_SIGNAL_INPUT_TEXTURE_TYPE   SIGNAL_TEXTURE_TYPE_UINT2
+		#define CONFIG_SIGNAL_OUTPUT_LAYOUT SIGNAL_BUFFER_LAYOUT_DIFFUSE_PROBE_HIERARCHY_HISTORY
+
+		//#define CONFIG_SAMPLE_SET           SAMPLE_SET_STACKOWIAK_4_SETS
+		#define CONFIG_SAMPLE_SET           SAMPLE_SET_1X1
 
 	#else
 		#error Unexpected stage.
@@ -467,20 +514,22 @@
 #endif
 
 
-//------------------------------------------------------- COMPILATION WHITE LISTING
+//------------------------------------------------------- COMPILATION CONFIGURATION
 
-// Whitelist kernel to compile.
+// Choose kernel to compile.
 #if CONFIG_SAMPLE_SET == SAMPLE_SET_STACKOWIAK_4_SETS
 	#define COMPILE_STACKOWIAK_KERNEL 1
 #elif CONFIG_SAMPLE_SET == SAMPLE_SET_HEXAWEB
 	#define COMPILE_DISK_KERNEL 1
 #elif CONFIG_SAMPLE_SET == SAMPLE_SET_DIRECTIONAL_RECT || CONFIG_SAMPLE_SET == SAMPLE_SET_DIRECTIONAL_ELLIPSE
 	#define COMPILE_DIRECTIONAL_KERNEL 1
+#elif CONFIG_SAMPLE_SET == SAMPLE_SET_RAW_EXPERIMENTAL_KERNEL
+	#define COMPILE_RAW_EXPERIMENTAL_KERNEL 1
 #else
 	#define COMPILE_BOX_KERNEL 1
 #endif
 
-// White list accumulators to compile.
+// Choose accumulators to compile.
 #if CONFIG_OUTPUT_MODE == OUTPUT_MODE_DRB
 	#define COMPILE_DRB_ACCUMULATOR 1
 	#define COMPILE_MIN_FREQUENCY_ACCUMULATOR 1
@@ -496,18 +545,6 @@
 #else
 	#error Unknown output mode.
 #endif
-
-
-//------------------------------------------------------- LATE SETUP
-
-#if COMPILER_SUPPORTS_WAVE_ONCE
-	#if CONFIG_UPSCALE
-		#define CONFIG_VGPR_FREE_SAMPLE_TRACK_ID 2
-	#else
-		#define CONFIG_VGPR_FREE_SAMPLE_TRACK_ID 1
-	#endif
-#endif
-
 
 //------------------------------------------------------- INCLUDES
 
@@ -635,7 +672,7 @@ void MainCS(
 	float2 SceneBufferUV = DispatchThreadId * ThreadIdToBufferUV.xy + ThreadIdToBufferUV.zw;
 	if (true)
 	{
-		SceneBufferUV = clamp(SceneBufferUV, BufferBilinearUVMinMax.xy, BufferBilinearUVMinMax.zw);
+		SceneBufferUV = clamp(SceneBufferUV, DenoiserBufferBilinearUVMinMax.xy, DenoiserBufferBilinearUVMinMax.zw);
 	}
 	
 	// Read reference meta data.
@@ -753,8 +790,8 @@ void MainCS(
 		SetBilateralPreset(CONFIG_BILATERAL_PRESET, /* inout */ KernelConfig);
 
 		// SGPRs
-		KernelConfig.BufferSizeAndInvSize = BufferSizeAndInvSize;
-		KernelConfig.BufferBilinearUVMinMax = BufferBilinearUVMinMax;
+		KernelConfig.BufferSizeAndInvSize = DenoiserBufferSizeAndInvSize;
+		KernelConfig.BufferBilinearUVMinMax = DenoiserBufferBilinearUVMinMax;
 		KernelConfig.KernelSpreadFactor = KernelSpreadFactor;
 		KernelConfig.HarmonicPeriode = HarmonicPeriode;
 
@@ -915,39 +952,7 @@ void MainCS(
 		}
 		#elif CONFIG_SAMPLE_SET == SAMPLE_SET_DIRECTIONAL_RECT || CONFIG_SAMPLE_SET == SAMPLE_SET_DIRECTIONAL_ELLIPSE
 		{
-			#if CONFIG_SIGNAL_PROCESSING == SIGNAL_PROCESSING_SHADOW_VISIBILITY_MASK
-			{
-				float RefPixelWorldBluringRadius = ComputeWorldBluringRadiusCausedByPixelSize(RefSceneMetadata);
-
-				FSSDSignalDomainKnowledge DomainKnowledge = GetSignalDomainKnowledge(/* BatchedSignalId = */ 0);
-
-				float3 L = ComputeMajorLightRayDirection(RefSceneMetadata, DomainKnowledge);
-
-				float3 N = GetWorldNormal(RefSceneMetadata);
-
-				float NoL = dot(L, N);
-
-				float MajorPixelRadius = lerp(6, 0.5, abs(NoL));
-
-				// Project light dir onto horizon plane
-				float3 WorldBlurDir = normalize(L - dot(L, N) * N);
-
-				float3 TranslatedWorldOffset = GetTranslatedWorldPosition(RefSceneMetadata) + WorldBlurDir * (RefPixelWorldBluringRadius * MajorPixelRadius);
-				float4 ClipOffset = mul(float4(TranslatedWorldOffset, 1.0), View.TranslatedWorldToClip);
-				float2 ScreenOffset = ClipOffset.xy * rcp(ClipOffset.w);
-
-				float2 ScreenDirection = ScreenOffset - RefSceneMetadata.ScreenPosition;
-				float2 ViewportDirection = ScreenDirection * float2(0.5, -0.5);
-				float2 PixelDirection = normalize(ViewportDirection * View.ViewSizeAndInvSize.xy);
-				float PixelDirectionLength = length(ViewportDirection * View.ViewSizeAndInvSize.xy);
-
-				KernelConfig.MajorAxis = PixelDirection;
-				KernelConfig.MajorPixelRadius = MajorPixelRadius;
-				KernelConfig.MinorPixelRadius = 0.5;
-
-				KernelConfig.SampleCount = 2 * KernelConfig.MajorPixelRadius;
-			}
-			#elif CONFIG_SIGNAL_PROCESSING == SIGNAL_PROCESSING_REFLECTIONS
+			#if CONFIG_SIGNAL_PROCESSING == SIGNAL_PROCESSING_REFLECTIONS
 			{
 				const float TargetSamplePerPixel = 0.25;
 				const float MinimalPixelRadius = 0.5 * rsqrt(2.0);
@@ -1017,10 +1022,20 @@ void MainCS(
 			#endif
 		}
 		#endif // CONFIG_SAMPLE_SET == SAMPLE_SET_DIRECTIONAL_*
-		
-		FSSDCompressedSignalAccumulatorArray CompressedAccumulators = CompressAccumulatorArray(UncompressedAccumulators, CONFIG_ACCUMULATOR_VGPR_COMPRESSION);
 
-		if (1)
+		FSSDCompressedSignalAccumulatorArray CompressedAccumulators = CompressAccumulatorArray(UncompressedAccumulators, CONFIG_ACCUMULATOR_VGPR_COMPRESSION);
+		
+
+		// Performance: skip pixels/regions where the center sample is invalid (SampleCount = 0) for virtual shadow maps
+		#if CONFIG_SIGNAL_PROCESSING == SIGNAL_PROCESSING_VIRTUAL_SHADOW_MAP_MASK
+		bool bRefHasSamples = false;
+		for (uint SignalMultiplexId = 0; SignalMultiplexId < SIGNAL_ARRAY_SIZE; SignalMultiplexId++)
+		{
+			bRefHasSamples = bRefHasSamples || (RefSamples.Array[SignalMultiplexId].SampleCount > 0);
+		}
+		BRANCH
+		if (bRefHasSamples)
+		#endif
 		{
 			AccumulateKernel(
 				KernelConfig,
@@ -1205,16 +1220,20 @@ void MainCS(
 	}
 	#endif // DIM_STAGE == STAGE_POST_FILTERING
 
+	#if CONFIG_SIGNAL_PROCESSING == SIGNAL_PROCESSING_DIFFUSE_SPHERICAL_HARMONIC && 0
+		DebugOutput[DispatchThreadId] = float4(
+			OutputSamples.Array[0].ColorSH.R.V.x,
+			OutputSamples.Array[0].ColorSH.G.V.x,
+			OutputSamples.Array[0].ColorSH.B.V.x,
+			OutputSamples.Array[0].SampleCount);
+	#endif
+
 	// TODO(Denoiser):  LeaveRayCount = (LeaveRayCount - 1) * 9 / (9 - 2) post processing to reject when for history rejection
 	uint2 OutputPixelPostion;
 	#if CONFIG_VGPR_OPTIMIZATION && !CONFIG_UPSCALE // TODO(Denoiser)
 	{
 		// No need to keep DispatchThreadId, can recompute the output pixel position based on information stored in VGPRs for spatial kernel.
 		#if CONFIG_SAMPLE_SET == SAMPLE_SET_STACKOWIAK_4_SETS
-			#if CONFIG_VGPR_FREE_SAMPLE_TRACK_ID
-				SampleTrackId = GetSampleTrackIdFromLaneIndex();
-			#endif
-
 			#if CONFIG_UPSCALE
 				SampleTrackId ^= 0x3;
 			#endif
@@ -1235,7 +1254,7 @@ void MainCS(
 	if (all(OutputPixelPostion < ViewportMax))
 	{
 		// Output the multiplexed signal.
-		#if DIM_STAGE == STAGE_FINAL_OUTPUT && CONFIG_SIGNAL_PROCESSING == SIGNAL_PROCESSING_SHADOW_VISIBILITY_MASK
+		#if DIM_STAGE == STAGE_FINAL_OUTPUT && (CONFIG_SIGNAL_PROCESSING == SIGNAL_PROCESSING_SHADOW_VISIBILITY_MASK || CONFIG_SIGNAL_PROCESSING == SIGNAL_PROCESSING_VIRTUAL_SHADOW_MAP_MASK)
 		{
 			UNROLL
 			for (uint MultiplexId = 0; MultiplexId < MultiplexCount; MultiplexId++)
@@ -1247,12 +1266,12 @@ void MainCS(
 
 				// 0 is shadowed, 1 is unshadowed
 				// RETURN_COLOR not needed unless writing to SceneColor;
-				float FadedShadow = lerp(1.0f, Square(Shadow), ShadowFadeFraction);
-				float FadedSSSShadow = lerp(1.0f, Square(SSSTransmission), ShadowFadeFraction);
+				float FadedShadow = lerp(1.0f, Shadow, ShadowFadeFraction);
+				float FadedSSSShadow = lerp(1.0f, SSSTransmission, ShadowFadeFraction);
 
 				// the channel assignment is documented in ShadowRendering.cpp (look for Light Attenuation channel assignment)
 				float4 OutColor;
-				if (LightType[MultiplexId] == LIGHT_TYPE_DIRECTIONAL)
+				if (GET_SCALAR_ARRAY_ELEMENT(LightType, MultiplexId) == LIGHT_TYPE_DIRECTIONAL)
 				{
 					OutColor = EncodeLightAttenuation(half4(FadedShadow, FadedSSSShadow, 1.0, FadedSSSShadow));
 				}

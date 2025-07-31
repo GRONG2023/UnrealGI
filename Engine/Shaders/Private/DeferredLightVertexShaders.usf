@@ -4,18 +4,35 @@
 	DeferredLightVertexShaders.usf: 
 =============================================================================*/
 
-#include "Common.ush"
+#include "HairStrands/HairStrandsVisibilityCommonStruct.ush" 
+#include "Common.ush"  
 
 #if defined(SHADER_RADIAL_LIGHT)
 float4 StencilingGeometryPosAndScale;
 float4 StencilingConeParameters;	// .x NumSides (0 if not cone), .y NumSlices, .z ConeAngle, .w ConeSphereRadius
 float4x4 StencilingConeTransform;
-float3 StencilingPreViewTranslation;
 #endif
 
 #if defined(SHADER_RADIAL_LIGHT) && SHADER_RADIAL_LIGHT == 0
+
+float4 PosScaleBias;
+float4 UVScaleBias;
+float4 InvTargetSizeAndTextureSize; 
+
+void DrawFullScreenRect(
+	in float4 InPosition,
+	in float2 InTexCoord,
+	out float4 OutPosition,
+	out float2 OutTexCoord)
+{
+	OutPosition = InPosition;
+	OutPosition.xy = -1.0f + 2.0f * (PosScaleBias.zw + (InPosition.xy * PosScaleBias.xy)) * InvTargetSizeAndTextureSize.xy;
+	OutPosition.xy *= float2(1, -1);
+	OutTexCoord.xy = (UVScaleBias.zw + (InTexCoord.xy * UVScaleBias.xy)) * InvTargetSizeAndTextureSize.zw;
+}
+
 /** Vertex shader for rendering a directional light using a full screen quad. */
-void DirectionalVertexMain(
+void VertexMain(
 	in float2 InPosition : ATTRIBUTE0,
 	in float2 InUV       : ATTRIBUTE1,
 	out float2 OutTexCoord : TEXCOORD0,
@@ -23,21 +40,21 @@ void DirectionalVertexMain(
 	out float4 OutPosition : SV_POSITION
 	)
 {	
-	DrawRectangle(float4(InPosition.xy, 0, 1), InUV, OutPosition, OutTexCoord);
-	OutScreenVector = mul(float4(OutPosition.xy, 1, 0), View.ScreenToTranslatedWorld).xyz;
+	DrawFullScreenRect(float4(InPosition.xy, 0, 1), InUV, OutPosition, OutTexCoord);
+	OutScreenVector = ScreenVectorFromScreenRect(float4(OutPosition.xy, 1, 0));
 }
 #endif
 
-#if SHADER_RADIAL_LIGHT == 1
+#if defined(SHADER_RADIAL_LIGHT) && SHADER_RADIAL_LIGHT == 1
 /** Vertex shader for rendering a point or spot light using approximate bounding geometry. */
-void RadialVertexMain(
+void VertexMain(
 	in uint InVertexId : SV_VertexID,
 	in float3 InPosition : ATTRIBUTE0,
 	out float4 OutScreenPosition : TEXCOORD0,
 	out float4 OutPosition : SV_POSITION
 	)
 {
-	float3 WorldPosition;
+	float3 TranslatedWorldPosition;
 	uint NumSides = StencilingConeParameters.x;
 	if (NumSides != 0)
 	{
@@ -66,7 +83,7 @@ void RadialVertexMain(
 			// Create a position in the local space of the cone, forming a circle in the XY plane, and offsetting along the Z axis
 			const float3 LocalPosition = float3(ZRadius * SliceIndex / (float)(NumSlices - 1), SliceRadius * sin(CurrentAngle), SliceRadius * cos(CurrentAngle));
 			// Transform to world space and apply pre-view translation, since these vertices will be used with a shader that has pre-view translation removed
-			WorldPosition = mul(float4(LocalPosition, 1), StencilingConeTransform).xyz + StencilingPreViewTranslation;
+			TranslatedWorldPosition = mul(float4(LocalPosition, 1), StencilingConeTransform).xyz;
 		}
 		else
 		{
@@ -85,23 +102,22 @@ void RadialVertexMain(
 
 			const float CurrentAngle = SideIndex * 2 * PI / (float)NumSides;
 			const float3 LocalPosition = float3(ZDistance, SliceRadius * sin(CurrentAngle), SliceRadius * cos(CurrentAngle));
-			WorldPosition = mul(float4(LocalPosition, 1), StencilingConeTransform).xyz + StencilingPreViewTranslation;
+			TranslatedWorldPosition = mul(float4(LocalPosition, 1), StencilingConeTransform).xyz;
 		}
 	}
 	else
 	{
 		// Sphere
-		WorldPosition = InPosition * StencilingGeometryPosAndScale.w + StencilingGeometryPosAndScale.xyz;
+		TranslatedWorldPosition = InPosition * StencilingGeometryPosAndScale.w + StencilingGeometryPosAndScale.xyz;
 	}
 
-	OutScreenPosition = OutPosition = mul(float4(WorldPosition, 1), View.TranslatedWorldToClip);
+	OutScreenPosition = OutPosition = mul(float4(TranslatedWorldPosition, 1), View.TranslatedWorldToClip);
 }
 #endif
 
 #if defined(SHADER_HAIR) && SHADER_HAIR == 1
 
-int2 MaxViewportResolution;
-Texture2D<uint> HairVisibilityNodeCount;
+#include "HairStrands/HairStrandsVisibilityCommon.ush"
 
 void HairVertexMain(
 	in uint InVertexId : SV_VertexID,
@@ -109,11 +125,10 @@ void HairVertexMain(
 	nointerpolation out uint OutNodeCount : DISPATCH_NODECOUNT,
 	nointerpolation out uint2 OutResolution : DISPATCH_RESOLUTION)
 {
-	OutNodeCount = HairVisibilityNodeCount.Load(uint3(0,0,0));
-	OutResolution.x = ceil(sqrt(OutNodeCount));
-	OutResolution.y = OutResolution.x;
+	OutNodeCount = HairStrands.HairSampleCount[0];
+	OutResolution = GetHairSampleResolution(OutNodeCount);
 
-	const float2 ClipCoord = ((OutResolution + 0.5f) / float2(MaxViewportResolution)) * 2;
+	const float2 ClipCoord = ((OutResolution + 0.5f) / float2(HairStrands.HairSampleViewportResolution)) * 2;
 
 	const float2 UV = float2(InVertexId & 1, InVertexId >> 1);
 	const float2 Pos = float2(-UV.x, UV.y) * 4 + float2(-1, +1) + float2(ClipCoord.x, -ClipCoord.y);

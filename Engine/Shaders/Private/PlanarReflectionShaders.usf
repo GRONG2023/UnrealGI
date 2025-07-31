@@ -8,6 +8,7 @@
 #include "DeferredShadingCommon.ush"
 #include "PlanarReflectionShared.ush"
 #include "SceneTextureParameters.ush"
+#include "Substrate/Substrate.ush"
 
 Texture2D SceneColorInputTexture;
 SamplerState SceneColorInputSampler;
@@ -56,7 +57,8 @@ void VerticalSample(float2 InUV, float y, float KernelRadiusY, float CenterDista
 	// Half texel offset for bilinear
 	float4 SampleColor = SampleSceneColorInput(SampleUV + float2(0, ColorHalfTexelOffset));
 
-	AccumulatedColor += SampleColor * SampleWeight;
+	// SampleColor might contain NaNs when sampling out of the view rect, and multiplying by 0 won't help
+	AccumulatedColor += -min(-SampleColor, 0.0) * SampleWeight;
 	AccumulatedWeight += SampleWeight;
 }
 
@@ -76,7 +78,7 @@ void PrefilterPlanarReflectionPS(
 	if (KernelRadiusY > 0)
 	{
 		// Compute distance from camera origin to the camera vector intersection with the reflection plane
-		float CenterDistanceToPlane = -(dot(View.WorldCameraOrigin, PlanarReflectionStruct.ReflectionPlane.xyz) - PlanarReflectionStruct.ReflectionPlane.w) / dot(normalize(ScreenVector), PlanarReflectionStruct.ReflectionPlane.xyz);
+		float CenterDistanceToPlane = -(dot(PrimaryView.TranslatedWorldCameraOrigin, PlanarReflectionStruct.ReflectionPlane.xyz) - PlanarReflectionStruct.ReflectionPlane.w) / dot(normalize(ScreenVector), PlanarReflectionStruct.ReflectionPlane.xyz);
 		// Note: reading from depth after the temporal AA pass
 		// This works without jittering because we disable temporal AA jittering for planar reflections
 		float CenterSceneDepth = CalcSceneDepth(BufferUV);
@@ -139,20 +141,46 @@ void PlanarReflectionPS(
 	ResolvedView = ResolveView();
 	OutColor = 0;
 
+
+#if SUBSTRATE_ENABLED
+
+	const FSubstrateTopLayerData TopLayerData = SubstrateUnpackTopLayerData(Substrate.TopLayerTexture.Load(uint3(SVPos.xy, 0)));
+
+	float DeviceZ = SampleDeviceZFromSceneTextures(BufferUV);
+	float SceneDepth = ConvertFromDeviceZ(DeviceZ);
+
+	float3 TranslatedWorldPosition = ResolvedView.TranslatedWorldCameraOrigin + ScreenVector * SceneDepth;
+
+	const float Roughness = TopLayerData.Roughness;
+	const float3 WorldNormal = TopLayerData.WorldNormal;
+	const bool bNoMaterial = !IsSubstrateMaterial(TopLayerData);
+
+	// Skip unlit pixels (skybox)
+	BRANCH
+	if (!bNoMaterial)
+	{
+		OutColor = ComputePlanarReflections(TranslatedWorldPosition, WorldNormal, Roughness, PlanarReflectionStruct.PlanarReflectionSampler);
+
+		OutColor.xyz *= View.PreExposure;
+	}
+
+#else
+
 	FGBufferData GBuffer = GetGBufferDataFromSceneTextures(BufferUV);
 
-	float3 WorldPosition = ScreenVector * GBuffer.Depth + View.WorldCameraOrigin;
+	float3 TranslatedWorldPosition = ResolvedView.TranslatedWorldCameraOrigin + ScreenVector * GBuffer.Depth;
 
 	// Skip unlit pixels (skybox)
 	BRANCH
 	if (GBuffer.ShadingModelID != SHADINGMODELID_UNLIT)
 	{
-		OutColor = ComputePlanarReflections(WorldPosition, GBuffer.WorldNormal, GBuffer.Roughness, PlanarReflectionStruct.PlanarReflectionSampler);
+		OutColor = ComputePlanarReflections(TranslatedWorldPosition, GBuffer.WorldNormal, GBuffer.Roughness, PlanarReflectionStruct.PlanarReflectionSampler);
 
-	#if USE_PREEXPOSURE
 		OutColor.xyz *= View.PreExposure;
-	#endif
 	}
+
+#endif
+
 }
 
 #endif

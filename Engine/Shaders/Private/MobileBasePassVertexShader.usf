@@ -6,18 +6,13 @@
 
 #define IS_MOBILE_BASEPASS_VERTEX_SHADER 1
 
-// @todo urban: branch was: #define FORCE_FLOATS 1
-#ifndef FORCE_FLOATS
-#define FORCE_FLOATS (COMPILER_METAL)
-#endif
-
 #include "Common.ush"
 
 // Reroute MobileSceneTextures uniform buffer references to the base pass uniform buffer
 #define MobileSceneTextures MobileBasePass.SceneTextures
 
-#include "MobileBasePassCommon.ush"
 #include "/Engine/Generated/Material.ush"
+#include "MobileBasePassCommon.ush"
 #include "/Engine/Generated/VertexFactory.ush"
 #include "HeightFogCommon.ush"
 
@@ -25,11 +20,15 @@
 #include "SkyAtmosphereCommon.ush"
 #endif
 
+#if LOCAL_FOG_VOLUME_ON_TRANSLUCENT
+#include "LocalFogVolumes/LocalFogVolumeCommon.ush"
+#endif
+
 struct FMobileShadingBasePassVSToPS
 {
 	FVertexFactoryInterpolantsVSToPS FactoryInterpolants;
 	FMobileBasePassInterpolantsVSToPS BasePassInterpolants;
-	float4 Position : SV_POSITION;
+	INVARIANT_OUTPUT float4 Position : SV_POSITION;
 };
 
 #define FMobileShadingBasePassVSOutput FMobileShadingBasePassVSToPS
@@ -40,7 +39,6 @@ void Main(
 	FVertexFactoryInput Input
 	, out FMobileShadingBasePassVSOutput Output
 #if INSTANCED_STEREO
-	, uint InstanceId : SV_InstanceID
 	, out uint LayerIndex : SV_RenderTargetArrayIndex
 #elif MOBILE_MULTI_VIEW
 	, in uint ViewId : SV_ViewID
@@ -48,19 +46,13 @@ void Main(
 	)
 {
 #if INSTANCED_STEREO
-	const uint EyeIndex = GetEyeIndex(InstanceId);
+	const uint EyeIndex = GetEyeIndexFromVF(Input);
 	ResolvedView = ResolveView(EyeIndex);
 	LayerIndex = EyeIndex;
-	Output.BasePassInterpolants.MultiViewId = float(EyeIndex);
+	Output.BasePassInterpolants.MultiViewId = EyeIndex;
 #elif MOBILE_MULTI_VIEW
-#if COMPILER_GLSL_ES3_1
-	const int MultiViewId = int(ViewId);
-	ResolvedView = ResolveView(uint(MultiViewId));
-	Output.BasePassInterpolants.MultiViewId = float(MultiViewId);
-#else
 	ResolvedView = ResolveView(ViewId);
-	Output.BasePassInterpolants.MultiViewId = float(ViewId);
-#endif
+	Output.BasePassInterpolants.MultiViewId = ViewId;
 #else
 	ResolvedView = ResolveView();
 #endif
@@ -81,49 +73,58 @@ void Main(
 	half3x3 TangentToLocal = VertexFactoryGetTangentToLocal(Input, VFIntermediates);	
 	FMaterialVertexParameters VertexParameters = GetMaterialVertexParameters(Input, VFIntermediates, WorldPosition.xyz, TangentToLocal);
 
-	half3 WorldPositionOffset = GetMaterialWorldPositionOffset(VertexParameters);
+	float3 WorldPositionOffset = GetMaterialWorldPositionOffset(VertexParameters);
 	
 	WorldPosition.xyz += WorldPositionOffset;
 
 	float4 RasterizedWorldPosition = VertexFactoryGetRasterizedWorldPosition(Input, VFIntermediates, WorldPosition);
-	Output.Position = mul(RasterizedWorldPosition, ResolvedView.TranslatedWorldToClip);
+	Output.Position = INVARIANT(mul(RasterizedWorldPosition, ResolvedView.TranslatedWorldToClip));
 	Output.BasePassInterpolants.PixelPosition = WorldPosition;
 
 #if USE_WORLD_POSITION_EXCLUDING_SHADER_OFFSETS
 	Output.BasePassInterpolants.PixelPositionExcludingWPO = WorldPositionExcludingWPO.xyz;
 #endif
 
-#if USE_PS_CLIP_PLANE
-	Output.BasePassInterpolants.OutClipDistance = dot(ResolvedView.GlobalClippingPlane, float4(WorldPosition.xyz - ResolvedView.PreViewTranslation.xyz, 1));
+#if USE_GLOBAL_CLIP_PLANE
+	Output.BasePassInterpolants.OutClipDistance = dot(ResolvedView.GlobalClippingPlane, float4(WorldPosition.xyz, 1));
 #endif
 
 #if USE_VERTEX_FOG
-	float4 VertexFog = CalculateHeightFog(WorldPosition.xyz - ResolvedView.TranslatedWorldCameraOrigin);
+	half4 VertexFog = CalculateHeightFog(WorldPosition.xyz - ResolvedView.TranslatedWorldCameraOrigin);
 
 #if PROJECT_SUPPORT_SKY_ATMOSPHERE && MATERIAL_IS_SKY==0 // Do not apply aerial perpsective on sky materials
 	if (ResolvedView.SkyAtmosphereApplyCameraAerialPerspectiveVolume > 0.0f)
 	{
-		const float OneOverPreExposure = USE_PREEXPOSURE ? ResolvedView.OneOverPreExposure : 1.0f;
 		// Sample the aerial perspective (AP). It is also blended under the VertexFog parameter.
 		VertexFog = GetAerialPerspectiveLuminanceTransmittanceWithFogOver(
 			ResolvedView.RealTimeReflectionCapture, ResolvedView.SkyAtmosphereCameraAerialPerspectiveVolumeSizeAndInvSize,
-			Output.Position, WorldPosition.xyz*CM_TO_SKY_UNIT, ResolvedView.TranslatedWorldCameraOrigin*CM_TO_SKY_UNIT,
+			Output.Position, (WorldPosition.xyz - ResolvedView.TranslatedWorldCameraOrigin) * CM_TO_SKY_UNIT,
 			View.CameraAerialPerspectiveVolume, View.CameraAerialPerspectiveVolumeSampler,
 			ResolvedView.SkyAtmosphereCameraAerialPerspectiveVolumeDepthResolutionInv,
 			ResolvedView.SkyAtmosphereCameraAerialPerspectiveVolumeDepthResolution,
 			ResolvedView.SkyAtmosphereAerialPerspectiveStartDepthKm,
 			ResolvedView.SkyAtmosphereCameraAerialPerspectiveVolumeDepthSliceLengthKm,
 			ResolvedView.SkyAtmosphereCameraAerialPerspectiveVolumeDepthSliceLengthKmInv,
-			OneOverPreExposure, VertexFog);
+			ResolvedView.OneOverPreExposure, VertexFog);
 	}
 #endif
+
+	// Apply local fog volume if enabled. Note: volumetric fog is not applied on mobile so it can result in visual discrepancy.
+#if LOCAL_FOG_VOLUME_ON_TRANSLUCENT
+	float4 VertexClipSpacePosition	= mul(float4(WorldPosition.xyz, 1), ResolvedView.TranslatedWorldToClip);
+	float2 SvPosition				= (VertexClipSpacePosition.xy / VertexClipSpacePosition.w * float2(.5f, -.5f) + .5f) * ResolvedView.ViewSizeAndInvSize.xy;
+	uint2 TilePos					= clamp(uint2(SvPosition.xy / float(LFVTilePixelSize)), uint2(0, 0), LFVTileDataResolution - 1);
+	const bool bPlatformSupportsVolumetricFogOntranslucent = false; // Mobile does not do that so we try to compensate for it by evalauting LFV regularly on translucent.
+	float4 LFVContribution			= GetLFVContribution(ResolvedView, TilePos, WorldPosition.xyz, bPlatformSupportsVolumetricFogOntranslucent);
+	VertexFog						= float4(LFVContribution.rgb + VertexFog.rgb * LFVContribution.a, LFVContribution.a * VertexFog.a);
+#endif // LOCAL_FOG_VOLUME_ON_TRANSLUCENT
 
 #if PACK_INTERPOLANTS
 	PackedInterps[0] = VertexFog;
 #else
 	Output.BasePassInterpolants.VertexFog = VertexFog;
 #endif // PACK_INTERPOLANTS
-#endif
+#endif // USE_VERTEX_FOG
 
 #if LANDSCAPE_BUG_WORKAROUND
 	Output.BasePassInterpolants.DummyInterp = 0;
@@ -138,8 +139,4 @@ void Main(
 #if PACK_INTERPOLANTS
 	VertexFactoryPackInterpolants(Output.FactoryInterpolants, PackedInterps);
 #endif // PACK_INTERPOLANTS
-
-#if !OUTPUT_MOBILE_HDR && COMPILER_GLSL_ES3_1
-	Output.Position.y *= -1;
-#endif
 }

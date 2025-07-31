@@ -4,10 +4,34 @@
 	MeshDecals.usf: Vertex/Hull/Domain/Pixel shader for computing a mesh decal.
 =============================================================================*/
 
+#include "Common.ush"
+
+#if SHADING_PATH_MOBILE
+	// Reroute MobileSceneTextures uniform buffer references to the base pass uniform buffer 
+	#define MobileSceneTextures MobileBasePass.SceneTextures
+	#define EyeAdaptationStruct MobileBasePass
+#else
+	#define SceneTexturesStruct DecalPass.SceneTextures
+	#define EyeAdaptationStruct DecalPass
+#endif
+
+#include "Substrate/Substrate.ush"
 #include "DecalCommon.ush"
 #include "/Engine/Generated/Material.ush"
 #include "/Engine/Generated/VertexFactory.ush"
 
+
+// If virtual texture feedback is enabled then use early depth test so that UAV feedback buffer writes respect the depth test
+#if MATERIAL_VIRTUALTEXTURE_FEEDBACK
+	#if COMPILER_SUPPORTS_DEPTHSTENCIL_EARLYTEST_LATEWRITE
+		// If we support early depth test with late write behaviour then use it since we may be using discard, or modifying depth
+		#define PIXELSHADER_EARLYDEPTHSTENCIL DEPTHSTENCIL_EARLYTEST_LATEWRITE
+	#elif !OUTPUT_PIXEL_DEPTH_OFFSET
+		// Otherwise we can only use early depth test if not modifying depth
+		// Modifying depth will trigger the slow path where we write feedback to UAV even where depth occluded!
+		#define PIXELSHADER_EARLYDEPTHSTENCIL EARLYDEPTHSTENCIL
+	#endif
+#endif
 
 // Additional guard to remove all struct usage if empty to avoid platform conflicts.
 // This define can be removed if additional data is added to the interpolants struct
@@ -29,68 +53,15 @@ struct FMeshDecalVSToPS
 	float4	Position		: SV_POSITION;
 };
 
-#if USING_TESSELLATION	
-	struct FMeshDecalVSToDS
-	{
-		FVertexFactoryInterpolantsVSToDS FactoryInterpolants;
-	#if NEED_MESH_DECAL_INTERPOLATORS
-		FMeshDecalInterpolants MeshDecalInterpolants;
-	#endif
-		float4 Position : VS_To_DS_Position;
-		OPTIONAL_VertexID_VS_To_DS
-	};
-	
-	#define VS_OUTPUT_TYPE FMeshDecalVSToDS
-#else
-	#define VS_OUTPUT_TYPE FMeshDecalVSToPS
-#endif
-
-#if USING_TESSELLATION	
-	#define FPassSpecificVSToDS FMeshDecalVSToDS
-	#define FPassSpecificVSToPS FMeshDecalVSToPS
-	#define INTERPOLATE_MEMBER(member) O.member = a.member * aInterp + b.member * bInterp
-
-	FMeshDecalVSToDS PassInterpolate(FMeshDecalVSToDS a, float aInterp, FMeshDecalVSToDS b, float bInterp)
-	{
-		FMeshDecalVSToDS O;
-		
-		O.FactoryInterpolants = VertexFactoryInterpolate(a.FactoryInterpolants, aInterp, b.FactoryInterpolants, bInterp);
-
-	#if USE_WORLD_POSITION_EXCLUDING_SHADER_OFFSETS
-		INTERPOLATE_MEMBER(MeshDecalInterpolants.PixelPositionExcludingWPO);
-	#endif
-
-		return O;
-	}
-
-	#undef INTERPOLATE_MEMBER
-	
-	FMeshDecalVSToPS PassFinalizeTessellationOutput(FMeshDecalVSToDS Interpolants, float4 WorldPosition, FMaterialTessellationParameters MaterialParameters)
-	{
-		FMeshDecalVSToPS O;
-		
-		O.FactoryInterpolants = VertexFactoryAssignInterpolants(Interpolants.FactoryInterpolants);
-
-	#if USE_WORLD_POSITION_EXCLUDING_SHADER_OFFSETS
-		O.MeshDecalInterpolants.PixelPositionExcludingWPO = Interpolants.MeshDecalInterpolants.PixelPositionExcludingWPO;
-	#endif
-		
-		// Finally, transform position to clip-space
-		O.Position = mul(WorldPosition, View.TranslatedWorldToClip);
-		return O;
-	}
-	
-	#include "Tessellation.ush"
-#endif
+#define VS_OUTPUT_TYPE FMeshDecalVSToPS
 
 #if VERTEXSHADER
 
 /** transform mesh as normal */
 void MainVS(
 	FVertexFactoryInput Input,
-	OPTIONAL_VertexID
 	out VS_OUTPUT_TYPE Output
-#if USE_GLOBAL_CLIP_PLANE && !USING_TESSELLATION
+#if USE_GLOBAL_CLIP_PLANE
 	, out float OutGlobalClipPlaneDistance : SV_ClipDistance
 #endif
 	)
@@ -113,34 +84,21 @@ void MainVS(
 		WorldPosition.xyz += GetMaterialWorldPositionOffset(VertexParameters);
 	}
 	
-#if USING_TESSELLATION
-	Output.Position = WorldPosition;
-	Output.FactoryInterpolants = VertexFactoryGetInterpolantsVSToDS(Input, VFIntermediates, VertexParameters);
-	
-#else // !USING_TESSELLATION
-
 	Output.Position = mul(WorldPosition, View.TranslatedWorldToClip);
 	Output.FactoryInterpolants = VertexFactoryGetInterpolantsVSToPS(Input, VFIntermediates, VertexParameters);
 
 #if USE_GLOBAL_CLIP_PLANE
-	OutGlobalClipPlaneDistance = dot(ResolvedView.GlobalClippingPlane, float4(WorldPosition.xyz - ResolvedView.PreViewTranslation.xyz, 1));
+	OutGlobalClipPlaneDistance = dot(ResolvedView.GlobalClippingPlane, float4(WorldPosition.xyz, 1));
 #endif
 
-#endif // USING_TESSELLATION
-
-// Move all geometry a little bit towards the camera (to not get z fighting with existing zbuffer of the same meshes rendered with slightly different float computations).
-#if !USING_TESSELLATION
-	// todo: tweak or expose (cvar or per mesh/material setting), if needed the artist always can create a WorldPositionOffset adjustment in the shader (e.g. -0.1*CameraDirectionVector )
-	Output.Position.z += 0.0001f * Output.Position.w;
+#if HAS_INVERTED_Z_BUFFER
+	// Move all geometry a small amount towards the camera to avoid z-fighting.
+	// Assuming a reverse z buffer this pushes the near plane a fixed small distance.
+	Output.Position.z += ResolvedView.DecalDepthBias;
 #endif
-
-	OutputVertexID( Output );
 }
 
 #endif // VERTEXSHADER
-
-
-
 
 // is called in MainPS() from PixelShaderOutputCommon.usf
 void FPixelShaderInOut_MainPS(
@@ -174,47 +132,54 @@ void FPixelShaderInOut_MainPS(
 	}
 #endif
 
-	// Store the results in local variables and reuse instead of calling the functions multiple times.
-	half3 BaseColor = GetMaterialBaseColor(PixelMaterialInputs);
-	half  Metallic = GetMaterialMetallic(PixelMaterialInputs);
-	half  Specular = GetMaterialSpecular(PixelMaterialInputs);
+#if SUBSTRATE_ENABLED
+	FSubstratePixelHeader SubstrateHeader = MaterialParameters.GetFrontSubstrateHeader();
+	SubstrateHeader.IrradianceAO.MaterialAO = GetMaterialAmbientOcclusion(PixelMaterialInputs);
 
-	float3 Color = 1;
+	float Coverage = 0.0;
+	if (SubstrateHeader.SubstrateTree.BSDFCount > 0)
+	{
+		const float3 V = MaterialParameters.CameraVector;
 
-	#if DECAL_BLEND_MODE == DECALBLENDMODEID_NORMAL
-		// -1..1 range to 0..1
-		Color = MaterialParameters.WorldNormal * 0.5f + 0.5f;
-	#else
-		Color = GetMaterialEmissive(PixelMaterialInputs);
-	
-		#if (ES3_1_PROFILE) // only for mobile
-			Color+= BaseColor;
-		#endif
-	#endif
+		// Update tree (coverage/transmittance/luminace weights)
+		const FSubstrateIntegrationSettings Settings = InitSubstrateIntegrationSettings(false /*bForceFullyRough*/, false /*bRoughDiffuseEnabled*/, 0, false/*bRoughnessTracking*/);
+		SubstrateHeader.SubstrateUpdateTree(V, Settings);
+
+		// Either propagate the BSDF opacity, or use the one for AlphaComposite (premultiplied alpha)
+		float CoverageOverBackground = SubstrateHeader.SubstrateTree.BSDFs[0].Coverage;
+#if SUBSTRATE_USE_PREMULTALPHA_OVERRIDE // AlphaComposite - Premultiplied alpha blending
+		CoverageOverBackground = GetMaterialOpacity(PixelMaterialInputs);
+#endif 
+
+		// Since the Convert-To-Decal node forces parameter blending for the entire Substrate tree, the BSDF we are interested in will be in 0.
+		Coverage = DecalCommonOutput(Out, SubstrateHeader, SubstrateHeader.SubstrateTree.BSDFs[0], 1.0f /*CoverageWeight*/, CoverageOverBackground);
+	}
+	const float Opacity = Coverage;
+#else // SUBSTRATE_ENABLED
+	float3 Color = GetMaterialEmissive(PixelMaterialInputs);
 
 	float Opacity = GetMaterialOpacity(PixelMaterialInputs);
 
-	// decal fade
-//	Opacity *= DecalParams.x;
-
-	FGBufferData GBufferData;
-
+	FGBufferData GBufferData = (FGBufferData)0;
 	GBufferData.WorldNormal = MaterialParameters.WorldNormal;
-	GBufferData.BaseColor = BaseColor;
-	GBufferData.Metallic = Metallic;
-	GBufferData.Specular = Specular;
+	GBufferData.BaseColor = GetMaterialBaseColor(PixelMaterialInputs);
+	GBufferData.Metallic = GetMaterialMetallic(PixelMaterialInputs);
+	GBufferData.Specular = GetMaterialSpecular(PixelMaterialInputs);
 	GBufferData.Roughness = GetMaterialRoughness(PixelMaterialInputs);
 	GBufferData.CustomData = 0;
 	GBufferData.IndirectIrradiance = 0;
 	GBufferData.PrecomputedShadowFactors = 1;
-	GBufferData.GBufferAO = 1;
+	GBufferData.GBufferAO = GetMaterialAmbientOcclusion(PixelMaterialInputs);
 	GBufferData.ShadingModelID = SHADINGMODELID_DEFAULT_LIT;
 	GBufferData.SelectiveOutputMask = 0;
 	GBufferData.PerObjectGBufferData = 1;
+	GBufferData.DiffuseIndirectSampleOcclusion = 0;
+	GBufferData.Velocity = 0;
 
 	DecalCommonOutput(In, Out, Color, Opacity, GBufferData);
+#endif // SUBSTRATE_ENABLED
 
-#if NUM_VIRTUALTEXTURE_SAMPLES
+#if MATERIAL_VIRTUALTEXTURE_FEEDBACK
 	FinalizeVirtualTextureFeedback(
 		MaterialParameters.VirtualTextureFeedback,
 		MaterialParameters.SvPosition,
@@ -225,14 +190,13 @@ void FPixelShaderInOut_MainPS(
 #endif
 }
 
-
 #define PIXELSHADEROUTPUT_MESHDECALPASS NEED_MESH_DECAL_INTERPOLATORS
 #define PIXELSHADEROUTPUT_INTERPOLANTS 1
-#define PIXELSHADEROUTPUT_MRT0 (DECAL_RENDERTARGET_COUNT > 0)
-#define PIXELSHADEROUTPUT_MRT1 (DECAL_RENDERTARGET_COUNT > 1)
-#define PIXELSHADEROUTPUT_MRT2 (DECAL_RENDERTARGET_COUNT > 2)
-#define PIXELSHADEROUTPUT_MRT3 (DECAL_RENDERTARGET_COUNT > 3)
-#define PIXELSHADEROUTPUT_MRT4 (DECAL_RENDERTARGET_COUNT > 4)
+//#define PIXELSHADEROUTPUT_MRT0 (DECAL_RENDERTARGET_COUNT > 0)
+//#define PIXELSHADEROUTPUT_MRT1 (DECAL_RENDERTARGET_COUNT > 1)
+//#define PIXELSHADEROUTPUT_MRT2 (DECAL_RENDERTARGET_COUNT > 2)
+//#define PIXELSHADEROUTPUT_MRT3 (DECAL_RENDERTARGET_COUNT > 3)
+//#define PIXELSHADEROUTPUT_MRT4 (DECAL_RENDERTARGET_COUNT > 4)
 // all PIXELSHADEROUTPUT_ and "void FPixelShaderInOut_MainPS()" need to be setup before this include
 // this include generates the wrapper code to call MainPS()
 #include "PixelShaderOutputCommon.ush"

@@ -25,7 +25,7 @@ uint NumTriangles;
 
 Buffer<SNORM float4> TangentInputBuffer;
 Buffer<float2> UVsInputBuffer;
-RWBuffer<SNORM float4> TangentBufferUAV;
+RWBuffer<TANGENT_RWBUFFER_FORMAT> TangentBufferUAV;
 
 // in vertices
 uint InputStreamStart;
@@ -55,3 +55,4 @@ uint SkinCacheStart;
 // intermediate tangent accumulation buffer, int se we can use atomics and to get deterministic results no matter what order
 // uses as output on MainCS(), used and input and output (to clear) for ResolveCS()
 RWBuffer<int> IntermediateAccumBufferUAV;
+uint IntermediateAccumBufferOffset;

@@ -4,6 +4,7 @@
 
 #include "../Common.ush"
 #include "HairStrandsVisibilityCommon.ush" 
+#include "HairStrandsTileCommon.ush" 
 
 #if PERMUTATION_GROUPSIZE == 0
 #define TILE_PIXEL_SIZE_X 8
@@ -13,8 +14,14 @@
 #define TILE_PIXEL_SIZE_Y 8
 #endif
 
+#ifndef PERMUTATION_MULTI_SAMPLE_COUNT
+#define PERMUTATION_MULTI_SAMPLE_COUNT 1
+#endif
+
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
+//TODO: re-enable support for 64 bit visibilty buffer format?
+/*
 #if COMPILER_SUPPORTS_UINT64_IMAGE_ATOMICS && COMPILER_SUPPORTS_ULONG_TYPES
 #define PackedType UlongType
 uint2 UnpackData(PackedType In)
@@ -28,6 +35,7 @@ uint2 UnpackData(PackedType In)
 	return In;
 }
 #endif
+*/
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -35,18 +43,13 @@ int2 OutputResolution;
 uint MaxNodeCount;
 uint SamplerPerPixel;
 float CoverageThreshold;
+uint bSortSampleByDepth;
 
-//float LUT_HairCount;
-//float LUT_HairRadiusCount;
-//
-//SamplerState					LinearSampler;
-//Texture2D<float>				HairCoverageLUT;
-
-RWTexture2D<uint> 				OutCompactNodeCounter;
-RWTexture2D<uint> 				OutCompactNodeIndex;
-RWStructuredBuffer<FNodeVis> 	OutCompactNodeData;
-RWStructuredBuffer<uint> 		OutCompactNodeCoord;
-RWTexture2D<uint4> 				OutCategorizationTexture;
+RWStructuredBuffer<uint> 			OutCompactNodeCounter;
+RWTexture2D<uint> 					OutCompactNodeIndex;
+RWStructuredBuffer<FPackedHairVis> 	OutCompactNodeVis;
+RWBuffer<uint2>						OutCompactNodeCoord;
+RWTexture2D<float> 					OutCoverageTexture;
 
 groupshared uint AllocationNodeCount;
 groupshared uint AllocationNodeOffset;
@@ -60,19 +63,110 @@ struct FSampleSetDesc
 };
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////
-// Compute raster visibility buffer
+// Compute raster visibility buffer compaction
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-Texture2D<PackedType> VisibilityTexture0;
-Texture2D<PackedType> VisibilityTexture1;
-Texture2D<PackedType> VisibilityTexture2;
-Texture2D<PackedType> VisibilityTexture3;
+Texture2DArray<uint>  DepthCovTexture;
+Texture2DArray<uint>  PrimMatTexture;
+Texture2D<uint>  HairCountTexture;
 
-Texture2D<uint>  VisibilityHairCount;
-Texture2D<float> ViewTransmittanceTexture;
+int2 TileCountXY;
+uint TileSize;
+Buffer<uint> TileCountBuffer;
+Buffer<uint2> TileDataBuffer;
+
+#define MERGE_SAMPLE 0
+
+void ComputeUniqueSamples(const uint2 PixelCoord, out uint4 OutSamples[PERMUTATION_MULTI_SAMPLE_COUNT], out FSampleSetDesc OutSet)
+{
+	OutSet.UniqueSampleCount = 0;
+	OutSet.ValidSampleCount = 0;
+	OutSet.HairSampleCount = PERMUTATION_MULTI_SAMPLE_COUNT;
+
+	for (uint SampleIt = 0; SampleIt < OutSet.HairSampleCount; ++SampleIt)
+	{
+		// Note: PrimMatTexture contains both the primitive ID and the material ID. However 
+		// the material ID is constant along the primitive, so it is correct to use this as a 
+		// sorting/deduplication key
+		const uint HairControlPointId = PrimMatTexture.Load(uint4(PixelCoord, SampleIt, 0));
+		const bool bIsValid = HairControlPointId != GetInvalidHairControlPointId();
+		if (!bIsValid)
+		{
+			continue;
+		}
+
+		const float SampleDepth = UnpackHairVisDepth(DepthCovTexture.Load(uint4(PixelCoord, SampleIt, 0)));
+
+		++OutSet.ValidSampleCount;
+#if MERGE_SAMPLE 
+		const float SceneDepth = ConvertFromDeviceZ(SampleDepth);
+#endif
+		bool bAlreadyExist = false;
+		for (uint UniqueIt = 0; UniqueIt < OutSet.UniqueSampleCount; ++UniqueIt)
+		{
+
+#if MERGE_SAMPLE
+			const float UniqueDepth = asfloat(OutSamples[UniqueIt].w);
+			const float UniqueSceneDepth = ConvertFromDeviceZ(UniqueDepth);
+			const bool bIsSimilar =
+				HairControlPointId == OutSamples[UniqueIt].x ||
+				abs(UniqueSceneDepth - SceneDepth) < DepthTheshold;
+#else
+			const bool bIsSimilar = HairControlPointId == OutSamples[UniqueIt].x;
+#endif
+			if (bIsSimilar)
+			{
+				OutSamples[UniqueIt].y += 1;
+
+				// Update the unique sample with the closest depth
+				const uint IntDepth = asuint(SampleDepth);
+				if (IntDepth > OutSamples[UniqueIt].w)
+				{
+#if MERGE_SAMPLE
+					OutSamples[UniqueIt].x = HairControlPointId;
+#endif
+					OutSamples[UniqueIt].z = SampleIt;
+					OutSamples[UniqueIt].w = asuint(SampleDepth);
+				}
+
+				bAlreadyExist = true;
+				break;
+			}
+		}
+
+		if (!bAlreadyExist)
+		{
+			OutSamples[OutSet.UniqueSampleCount].x = HairControlPointId;
+			OutSamples[OutSet.UniqueSampleCount].y = 1;
+			OutSamples[OutSet.UniqueSampleCount].z = SampleIt;
+			OutSamples[OutSet.UniqueSampleCount].w = asuint(SampleDepth);
+			++OutSet.UniqueSampleCount;
+		}
+	}
+
+	// Sort sample from closer to further. This is used later for updating sample coverage 
+	// based on ordered transmittance. See HairStrandsVisibilityComputeSampleCoverage.usf for more details.
+	if (bSortSampleByDepth > 0)
+	{
+		for (uint i = 0; i < OutSet.UniqueSampleCount; ++i)
+		{
+			const uint DepthI = OutSamples[i].w;
+			for (uint j = i + 1; j < OutSet.UniqueSampleCount; ++j)
+			{
+				const uint DepthJ = OutSamples[j].w;
+				if (DepthJ > DepthI)
+				{
+					uint4 Temp = OutSamples[i];
+					OutSamples[i] = OutSamples[j];
+					OutSamples[j] = Temp;
+				}
+			}
+		}
+	}
+}
 
 [numthreads(TILE_PIXEL_SIZE_X, TILE_PIXEL_SIZE_Y, 1)]
-void MainCS(uint GroupIndex : SV_GroupIndex, uint3 DispatchThreadId : SV_DispatchThreadID)
+void MainCS(uint GroupIndex : SV_GroupIndex, uint3 GroupId : SV_GroupID, uint3 GroupThreadId : SV_GroupThreadID, uint3 DispatchThreadId : SV_DispatchThreadID)
 {
 	if (GroupIndex == 0)
 	{
@@ -80,95 +174,27 @@ void MainCS(uint GroupIndex : SV_GroupIndex, uint3 DispatchThreadId : SV_Dispatc
 		AllocationNodeOffset = 0;
 	}
 
-	uint2 PixelCoord = DispatchThreadId.xy;// +ResolutionOffset;
+	const uint TileCount = TileCountBuffer[HAIRTILE_HAIR_ALL];
+	const uint LinearIndex = GroupId.x + GroupId.y * TileCountXY.x;
+	if (LinearIndex >= TileCount)
+	{
+		return;
+	}
+	const uint2 TileCoord = TileDataBuffer[LinearIndex];
+	uint2 PixelCoord = TileCoord * TileSize + GroupThreadId.xy;
+
 	if (PixelCoord.x >= uint(OutputResolution.x) || PixelCoord.y >= uint(OutputResolution.y))
+	{
 		PixelCoord = uint2(0, 0);
+	}
 
 	FSampleSetDesc SampleDesc;
+	uint4 Samples[PERMUTATION_MULTI_SAMPLE_COUNT]; // x:ControlPointId|MaterialId, y:Weight, z:SampleIt, w:Depth (as uint)
 
-	const float OpaqueDepth = SceneTexturesStruct.SceneDepthTexture.Load(uint3(PixelCoord, 0)).r;
-
-	//const uint HairCountAndRadius = VisibilityHairCount.Load(uint3(PixelCoord, 0)); // Contains both hair count and the radius;
-	//const uint HairRadius = 0; // TODO
-	//const uint HairCount  = HairCountAndRadius;
-	const uint2 VisData0 = UnpackData(VisibilityTexture0.Load(uint3(PixelCoord, 0)));
-	const uint2 VisData1 = UnpackData(VisibilityTexture1.Load(uint3(PixelCoord, 0)));
-	const uint2 VisData2 = UnpackData(VisibilityTexture2.Load(uint3(PixelCoord, 0)));
-	const uint2 VisData3 = UnpackData(VisibilityTexture3.Load(uint3(PixelCoord, 0)));
-
-	uint2  Vis_PrimId_MatId[4];
-	float2 Vis_Depth_Cov[4];
-	float  TotalCoverage = 0;
-	uint   UniqueSampleCount = 0;
-
-	uint CurrentPrimitiveId = 0;
-	const float DepthThres = OpaqueDepth;
-	if (VisData0.y)
-	{
-		const FHairVisSample VisSample	= UnpackHairVisSample(VisData0.x);
-		const float2 Depth_Cov			= UnpackHairVisSampleDepth(VisData0.y);
-
-		Vis_PrimId_MatId[UniqueSampleCount]	= uint2(VisSample.PrimitiveId, VisSample.MaterialId);
-		Vis_Depth_Cov[UniqueSampleCount]	= Depth_Cov;
-
-		if (Depth_Cov.x > DepthThres && VisSample.PrimitiveId != CurrentPrimitiveId)
-		{
-			TotalCoverage += Vis_Depth_Cov[UniqueSampleCount].y;
-			CurrentPrimitiveId = VisSample.PrimitiveId;
-			UniqueSampleCount++;
-		}
-	}
-
-	if (VisData1.y && SamplerPerPixel > 1)
-	{
-		const FHairVisSample VisSample	= UnpackHairVisSample(VisData1.x);
-		const float2 Depth_Cov			= UnpackHairVisSampleDepth(VisData1.y);
-
-		Vis_PrimId_MatId[UniqueSampleCount]	= uint2(VisSample.PrimitiveId, VisSample.MaterialId);
-		Vis_Depth_Cov[UniqueSampleCount]	= Depth_Cov;
-		
-		if (Depth_Cov.x > DepthThres && VisSample.PrimitiveId != CurrentPrimitiveId)
-		{
-			TotalCoverage += Vis_Depth_Cov[UniqueSampleCount].y;
-			CurrentPrimitiveId = VisSample.PrimitiveId;
-			UniqueSampleCount++;
-		}
-	}
-
-	if (VisData2.y && SamplerPerPixel > 2)
-	{
-		const FHairVisSample VisSample	= UnpackHairVisSample(VisData2.x);
-		const float2 Depth_Cov			= UnpackHairVisSampleDepth(VisData2.y);
-
-		Vis_PrimId_MatId[UniqueSampleCount]	= uint2(VisSample.PrimitiveId, VisSample.MaterialId);
-		Vis_Depth_Cov[UniqueSampleCount]	= Depth_Cov;
-		
-		if (Depth_Cov.x > DepthThres && VisSample.PrimitiveId != CurrentPrimitiveId)
-		{
-			TotalCoverage += Vis_Depth_Cov[UniqueSampleCount].y;
-			CurrentPrimitiveId = VisSample.PrimitiveId;
-			UniqueSampleCount++;
-		}
-	}
-
-	if (VisData3.y && SamplerPerPixel > 3)
-	{
-		const FHairVisSample VisSample	= UnpackHairVisSample(VisData3.x);
-		const float2 Depth_Cov			= UnpackHairVisSampleDepth(VisData3.y);
-
-		Vis_PrimId_MatId[UniqueSampleCount]	 = uint2(VisSample.PrimitiveId, VisSample.MaterialId);
-		Vis_Depth_Cov[UniqueSampleCount]	 = Depth_Cov;
-		
-		if (Depth_Cov.x > DepthThres && VisSample.PrimitiveId != CurrentPrimitiveId)
-		{
-			TotalCoverage += Vis_Depth_Cov[UniqueSampleCount].y;
-			CurrentPrimitiveId = VisSample.PrimitiveId;
-			UniqueSampleCount++;
-		}
-	}
+	ComputeUniqueSamples(PixelCoord, Samples, SampleDesc);
 
 	FNodeDesc NodeDesc;
-	NodeDesc.Count = UniqueSampleCount;
+	NodeDesc.Count = SampleDesc.UniqueSampleCount;
 	NodeDesc.Offset = 0;
 
 	if (NodeDesc.Count > 0)
@@ -178,12 +204,12 @@ void MainCS(uint GroupIndex : SV_GroupIndex, uint3 DispatchThreadId : SV_Dispatc
 	GroupMemoryBarrierWithGroupSync();
 	if (GroupIndex == 0 && AllocationNodeCount > 0)
 	{
-		InterlockedAdd(OutCompactNodeCounter[uint2(0, 0)], AllocationNodeCount, AllocationNodeOffset);
+		InterlockedAdd(OutCompactNodeCounter[0], AllocationNodeCount, AllocationNodeOffset);
 	}
 	GroupMemoryBarrierWithGroupSync();
 
 	// Allocate node space
-	FCategorizationData Categorization = (FCategorizationData)0;
+	float PixelCoverage = 0;
 	if (NodeDesc.Count > 0)
 	{
 		NodeDesc.Offset += AllocationNodeOffset;
@@ -194,27 +220,24 @@ void MainCS(uint GroupIndex : SV_GroupIndex, uint3 DispatchThreadId : SV_Dispatc
 			for (uint OutIndex = 0; OutIndex < NodeDesc.Count; ++OutIndex)
 			{
 				// VisibilityData.Coverage8bit is a weight normalising to 1 the contribution of all the compacted samples. Because later it is weighted by Categorization.PixelCoverage.
-				FNodeVis OutNodeVis;
-				OutNodeVis.PrimitiveId	= Vis_PrimId_MatId[OutIndex].x;
-				OutNodeVis.MaterialId	= Vis_PrimId_MatId[OutIndex].y;
-				OutNodeVis.Depth		= Vis_Depth_Cov[OutIndex].x;
-				OutNodeVis.Coverage8bit = To8bitCoverage(Vis_Depth_Cov[OutIndex].y / TotalCoverage); 
-
-				Categorization.TotalCoverage8bit += OutNodeVis.Coverage8bit;
-				Categorization.ClosestDepth = max(Categorization.ClosestDepth, OutNodeVis.Depth); // Inverse-Z
-
+				FHairVis OutNodeVis;
+				OutNodeVis.ControlPointId	= UnpackHairVisControlPointId(Samples[OutIndex].x);
+				OutNodeVis.MaterialId	= UnpackHairVisMaterialId(Samples[OutIndex].x);
+				OutNodeVis.Depth		= asfloat(Samples[OutIndex].w);
+				OutNodeVis.Coverage8bit = To8bitCoverage(Samples[OutIndex].y / float(SampleDesc.ValidSampleCount)); // 0xff;
 				const uint StoreIndex = NodeDesc.Offset + OutIndex;
-				OutCompactNodeData[StoreIndex] = OutNodeVis;
-				OutCompactNodeCoord[StoreIndex] = (PixelCoord.x & 0xFFFF) | ((PixelCoord.y & 0xFFFF) << 16);
+				OutCompactNodeVis[StoreIndex] = PackHairVis(OutNodeVis);
+				OutCompactNodeCoord[StoreIndex] = PixelCoord;
 			}
 
-			NodeDesc.Count = NodeDesc.Count;
-			Categorization.SampleCount = NodeDesc.Count;
-
-			Categorization.PixelCoverage = TransmittanceToCoverage(ViewTransmittanceTexture.Load(uint3(PixelCoord, 0)), CoverageThreshold);
+			// skips separate count to transmittance pass  
+			float LogViewTransmittance = -(HairCountTexture.Load(uint3(PixelCoord, 0)) / 1000.0f);
+			float ViewTransmittance = pow(2.71828f, LogViewTransmittance);
+			float CoverageThreshold = 0.98f;
+			PixelCoverage = TransmittanceToCoverage(ViewTransmittance, CoverageThreshold);
 		}
 	}
 
 	OutCompactNodeIndex[PixelCoord] = EncodeNodeDesc(NodeDesc);
-	OutCategorizationTexture[PixelCoord] = EncodeCategorizationData(Categorization);
+	OutCoverageTexture[PixelCoord] = PixelCoverage;
 }

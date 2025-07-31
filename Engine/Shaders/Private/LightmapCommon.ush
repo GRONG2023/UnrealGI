@@ -13,6 +13,25 @@
 #endif
 #include "LightmapData.ush"
 
+#if IS_NANITE_PASS
+#define LightmapUVType FloatDeriv2
+#else
+#define LightmapUVType float2
+#endif
+
+float2 ScaleLightmapUV(float2 UV, float2 Scale)
+{
+	return UV * Scale;
+}
+
+FloatDeriv2 ScaleLightmapUV(FloatDeriv2 UV, float2 Scale)
+{
+	UV.Value *= Scale;
+	UV.Ddx *= Scale;
+	UV.Ddy *= Scale;
+	return UV;
+}
+
 #if HQ_TEXTURE_LIGHTMAP || LQ_TEXTURE_LIGHTMAP
  
 #ifndef MATERIAL_USE_LM_DIRECTIONALITY
@@ -31,11 +50,20 @@
 #if LIGHTMAP_VT_ENABLED
 VTPageTableResult LightmapGetVTSampleInfo(float2 UV, uint LightmapDataIndex, float2 SvPositionXY)
 {
-	UV *= float2(1.0f, 2.0f); // Undo transform used to pack 2 lightmap coeffs in 1 texture for the non-VT default case
+	UV = ScaleLightmapUV(UV, float2(1.0f, 2.0f)); // Undo transform used to pack 2 lightmap coeffs in 1 texture for the non-VT default case
 
 	return TextureLoadVirtualPageTable(LightmapResourceCluster.LightmapVirtualTexturePageTable0, LightmapResourceCluster.LightmapVirtualTexturePageTable1,
 		VTPageTableUniform_Unpack(GetLightmapData(LightmapDataIndex).LightmapVTPackedPageTableUniform[0], GetLightmapData(LightmapDataIndex).LightmapVTPackedPageTableUniform[1]),
 		UV, LIGHTMAP_VTADDRESSMODE, LIGHTMAP_VTADDRESSMODE, 0, SvPositionXY);
+}
+
+VTPageTableResult LightmapGetVTSampleInfo(FloatDeriv2 UV, uint LightmapDataIndex, float2 SvPositionXY)
+{
+	UV = ScaleLightmapUV(UV, float2(1.0f, 2.0f)); // Undo transform used to pack 2 lightmap coeffs in 1 texture for the non-VT default case
+	
+	return TextureLoadVirtualPageTableGrad(LightmapResourceCluster.LightmapVirtualTexturePageTable0, LightmapResourceCluster.LightmapVirtualTexturePageTable1,
+		VTPageTableUniform_Unpack(GetLightmapData(LightmapDataIndex).LightmapVTPackedPageTableUniform[0], GetLightmapData(LightmapDataIndex).LightmapVTPackedPageTableUniform[1]),
+		UV.Value, LIGHTMAP_VTADDRESSMODE, LIGHTMAP_VTADDRESSMODE, UV.Ddx, UV.Ddy, SvPositionXY);
 }
 
 half4 SampleLightmapVT(VTPageTableResult LightmapVTPageTableResult, uint LayerIndex, uint LightmapDataIndex, Texture2D CacheTexture, SamplerState CacheSampler)
@@ -47,8 +75,10 @@ half4 SampleLightmapVT(VTPageTableResult LightmapVTPageTableResult, uint LayerIn
 }
 #endif // LIGHTMAP_VT_ENABLED
 
-half4 GetLightMapColorLQ( VTPageTableResult LightmapVTPageTableResult, float2 LightmapUV0, float2 LightmapUV1, uint LightmapDataIndex, half3 WorldNormal )
+void GetLightMapColorLQ( VTPageTableResult LightmapVTPageTableResult, LightmapUVType LightmapUV0, LightmapUVType LightmapUV1, uint LightmapDataIndex, half3 WorldNormal, bool bEvaluateBackface, out half3 OutDiffuseLighting, out half3 OutSubsurfaceLighting)
 {
+	OutSubsurfaceLighting = 0;
+
 #if LIGHTMAP_VT_ENABLED
 	half4 Lightmap0 = SampleLightmapVT(LightmapVTPageTableResult, 0u, LightmapDataIndex, LightmapResourceCluster.VTLightMapTexture, LightmapResourceCluster.LightMapSampler);
 	half4 Lightmap1 = SampleLightmapVT(LightmapVTPageTableResult, 1u, LightmapDataIndex, LightmapResourceCluster.VTLightMapTexture_1, LightmapResourceCluster.LightMapSampler_1);
@@ -72,17 +102,34 @@ half4 GetLightMapColorLQ( VTPageTableResult LightmapVTPageTableResult, float2 Li
 
 	// Sample SH with normal
 	half Directionality = max( 0.0, dot( SH, float4(WorldNormal.yzx, 1) ) );	// 1 dot, 1 smax
+
+	#if SHADINGMODEL_REQUIRES_BACKFACE_LIGHTING
+	if (bEvaluateBackface)
+	{
+		half SubsurfaceDirectionality = max(0.0, dot(SH, float4(-WorldNormal.yzx, 1)));
+		half SubsurfaceLuma = L * SubsurfaceDirectionality;
+		OutSubsurfaceLighting = LogRGB * (SubsurfaceLuma / LogL);
+	}
+	#endif
 #else
 	half Directionality = 0.6;
+
+	#if SHADINGMODEL_REQUIRES_BACKFACE_LIGHTING
+	if (bEvaluateBackface)
+	{
+		half SubsurfaceLuma = L * Directionality;
+		OutSubsurfaceLighting = LogRGB * (SubsurfaceLuma / LogL);
+	}
+	#endif
 #endif
 		
 	half Luma = L * Directionality;
-	half3 Color = LogRGB * (Luma / LogL);				// 1 rcp, 1 smul, 1 vmul
+	half3 Color = LogRGB * (Luma / max(0.00001f, LogL));	// 1 smax, 1 rcp, 1 smul, 1 vmul
 
-	return half4( Color, Luma );
+	OutDiffuseLighting = Color;
 }
 
-void GetLightMapColorHQ( VTPageTableResult LightmapVTPageTableResult, float2 LightmapUV0, float2 LightmapUV1, uint LightmapDataIndex, half3 WorldNormal, float2 SvPositionXY, uint ShadingModel, out half3 OutDiffuseLighting, out half3 OutSubsurfaceLighting )
+void GetLightMapColorHQ( VTPageTableResult LightmapVTPageTableResult, LightmapUVType LightmapUV0, LightmapUVType LightmapUV1, uint LightmapDataIndex, half3 WorldNormal, float2 SvPositionXY, bool bEvaluateBackface, out half3 OutDiffuseLighting, out half3 OutSubsurfaceLighting )
 {
 	OutSubsurfaceLighting = 0;
 
@@ -118,8 +165,8 @@ void GetLightMapColorHQ( VTPageTableResult LightmapVTPageTableResult, float2 Lig
 	// Sample SH with normal
 	half Directionality = max( 0.0, dot( SH, float4(WorldNormal.yzx, 1) ) );
 
-	#if MATERIAL_SHADINGMODEL_TWOSIDED_FOLIAGE
-	if (ShadingModel == SHADINGMODELID_TWOSIDED_FOLIAGE)
+	#if SHADINGMODEL_REQUIRES_BACKFACE_LIGHTING
+	if (bEvaluateBackface)
 	{
 		half SubsurfaceDirectionality = max(0.0, dot(SH, float4(-WorldNormal.yzx, 1)));
 		OutSubsurfaceLighting = L * SubsurfaceDirectionality * UVW;
@@ -128,8 +175,8 @@ void GetLightMapColorHQ( VTPageTableResult LightmapVTPageTableResult, float2 Lig
 #else
 	half Directionality = 0.6;
 
-	#if MATERIAL_SHADINGMODEL_TWOSIDED_FOLIAGE
-	if (ShadingModel == SHADINGMODELID_TWOSIDED_FOLIAGE)
+	#if SHADINGMODEL_REQUIRES_BACKFACE_LIGHTING
+	if (bEvaluateBackface)
 	{
 		OutSubsurfaceLighting = L * Directionality * UVW;
 	}
@@ -148,7 +195,7 @@ void GetLightMapColorHQ( VTPageTableResult LightmapVTPageTableResult, float2 Lig
 #define LIGHTMAP_SHARED_SAMPLER( Sampler ) LightmapResourceCluster.Sampler
 #endif
 
-float4 GetSkyBentNormalAndOcclusion(VTPageTableResult LightmapVTPageTableResult, float2 LightmapUV, uint LightmapDataIndex, float2 SvPositionXY)
+float4 GetSkyBentNormalAndOcclusion(VTPageTableResult LightmapVTPageTableResult, LightmapUVType LightmapUV, uint LightmapDataIndex, float2 SvPositionXY)
 {
 	float4 TextureValue;
 #if LIGHTMAP_VT_ENABLED
@@ -164,7 +211,7 @@ float4 GetSkyBentNormalAndOcclusion(VTPageTableResult LightmapVTPageTableResult,
 	return TextureValue;
 }
 
-float GetAOMaterialMask(VTPageTableResult LightmapVTPageTableResult, float2 LightmapUV, uint LightmapDataIndex, float2 SvPositionXY)
+float GetAOMaterialMask(VTPageTableResult LightmapVTPageTableResult, LightmapUVType LightmapUV, uint LightmapDataIndex, float2 SvPositionXY)
 {
 	float TextureValue;
 #if LIGHTMAP_VT_ENABLED
@@ -180,13 +227,13 @@ float GetAOMaterialMask(VTPageTableResult LightmapVTPageTableResult, float2 Ligh
 #endif
 
 // Used by deferred renderer only
-half4 GetPrecomputedShadowMasks(VTPageTableResult LightmapVTPageTableResult, FVertexFactoryInterpolantsVSToPS Interpolants, uint PrimitiveId, float3 WorldPosition, float3 VolumetricLightmapBrickTextureUVs)
+half4 GetPrecomputedShadowMasks(VTPageTableResult LightmapVTPageTableResult, FVertexFactoryInterpolantsVSToPS Interpolants, FMaterialPixelParameters MaterialParameters, float3 VolumetricLightmapBrickTextureUVs)
 {
 	// Note: WRITES_PRECSHADOWFACTOR_ZERO have to match the logic here
 	#if STATICLIGHTING_TEXTUREMASK && STATICLIGHTING_SIGNEDDISTANCEFIELD
 
 		// VT doesn't need ShadowMapCoordinate (instead shared lightmap UV), but still needs LightmapDataIndex
-		float2 ShadowMapCoordinate;
+		LightmapUVType ShadowMapCoordinate;
 		uint LightmapDataIndex;
 		GetShadowMapCoordinate(Interpolants, ShadowMapCoordinate, LightmapDataIndex);
 
@@ -216,18 +263,18 @@ half4 GetPrecomputedShadowMasks(VTPageTableResult LightmapVTPageTableResult, FVe
 		float DirectionalLightShadowing = 1.0f;
 
 	#if CACHED_POINT_INDIRECT_LIGHTING || CACHED_VOLUME_INDIRECT_LIGHTING
-		if (GetPrimitiveData(PrimitiveId).UseSingleSampleShadowFromStationaryLights > 0 && View.IndirectLightingCacheShowFlag > 0.0f)
+		if ((GetPrimitiveData(MaterialParameters).Flags & PRIMITIVE_SCENE_DATA_FLAG_USE_SINGLE_SAMPLE_SHADOW_SL) != 0 && View.IndirectLightingCacheShowFlag > 0.0f)
 		{
 			DirectionalLightShadowing = IndirectLightingCache.DirectionalLightShadowing;
 		}
 	#endif
 
 		BRANCH
-		if (GetPrimitiveData(PrimitiveId).UseVolumetricLightmapShadowFromStationaryLights > 0)
+		if ((GetPrimitiveData(MaterialParameters).Flags & PRIMITIVE_SCENE_DATA_FLAG_USE_VOLUMETRIC_LM_SHADOW_SL) != 0)
 		{
 			#if !PRECOMPUTED_IRRADIANCE_VOLUME_LIGHTING
 				// Compute brick UVs if we haven't already
-				VolumetricLightmapBrickTextureUVs = ComputeVolumetricLightmapBrickTextureUVs(WorldPosition);
+				VolumetricLightmapBrickTextureUVs = ComputeVolumetricLightmapBrickTextureUVs(WSHackToFloat(GetWorldPosition(MaterialParameters)));
 			#endif
 
 			DirectionalLightShadowing = GetVolumetricLightmapDirectionalLightShadowing(VolumetricLightmapBrickTextureUVs);
@@ -244,25 +291,25 @@ half4 GetPrecomputedShadowMasks(VTPageTableResult LightmapVTPageTableResult, FVe
 }
 
 // Used by mobile renderer only
-half GetPrimaryPrecomputedShadowMask(VTPageTableResult LightmapVTPageTableResult, FVertexFactoryInterpolantsVSToPS Interpolants)
+half4 GetPrimaryPrecomputedShadowMask(VTPageTableResult LightmapVTPageTableResult, FVertexFactoryInterpolantsVSToPS Interpolants, FMaterialPixelParameters MaterialParameters)
 {
 	#if STATICLIGHTING_TEXTUREMASK && STATICLIGHTING_SIGNEDDISTANCEFIELD
 
-		float2 ShadowMapCoordinate;
+		LightmapUVType ShadowMapCoordinate;
 		uint LightmapDataIndex;
 		GetShadowMapCoordinate(Interpolants, ShadowMapCoordinate, LightmapDataIndex);
 
 		// Fetch the distance field data
 		#if LIGHTMAP_VT_ENABLED
-			half DistanceField = SampleLightmapVT(LightmapVTPageTableResult, 2u, LightmapDataIndex, LightmapResourceCluster.VTStaticShadowTexture, LightmapResourceCluster.StaticShadowTextureSampler);
+			half4 DistanceField = SampleLightmapVT(LightmapVTPageTableResult, 2u, LightmapDataIndex, LightmapResourceCluster.VTStaticShadowTexture, LightmapResourceCluster.StaticShadowTextureSampler);
 		#else
-			half DistanceField = Texture2DSample(LightmapResourceCluster.StaticShadowTexture, LightmapResourceCluster.StaticShadowTextureSampler, ShadowMapCoordinate).r;
+			half4 DistanceField = Texture2DSample(LightmapResourceCluster.StaticShadowTexture, LightmapResourceCluster.StaticShadowTextureSampler, ShadowMapCoordinate);
 		#endif
 		float4 InvUniformPenumbraSizes = GetLightmapData(LightmapDataIndex).InvUniformPenumbraSizes;
-		float DistanceFieldBias = -.5f * InvUniformPenumbraSizes.x + .5f;
+		float4 DistanceFieldBias = -.5f * InvUniformPenumbraSizes + .5f;
 		// Compute shadow factors by scaling and biasing the distance
-		half ShadowFactor = saturate( DistanceField * InvUniformPenumbraSizes.x + DistanceFieldBias );
-		return GetLightmapData(LightmapDataIndex).StaticShadowMapMasks.r * ShadowFactor * ShadowFactor;
+		half4 ShadowFactor = saturate( DistanceField * InvUniformPenumbraSizes + DistanceFieldBias );
+		return GetLightmapData(LightmapDataIndex).StaticShadowMapMasks * ShadowFactor * ShadowFactor;
 	#elif MOVABLE_DIRECTIONAL_LIGHT
 		// Do this before checking for lightmaps as we might have a lightmap + movable directional light
 		return 1.0f;
@@ -273,9 +320,9 @@ half GetPrimaryPrecomputedShadowMask(VTPageTableResult LightmapVTPageTableResult
 	#else
 		#if CACHED_POINT_INDIRECT_LIGHTING || CACHED_VOLUME_INDIRECT_LIGHTING
 			// output per-primitive directional light shadowing if requested
-			if (GetPrimitiveData(Interpolants.PrimitiveId).UseSingleSampleShadowFromStationaryLights > 0 && ResolvedView.IndirectLightingCacheShowFlag > 0.0f)
+			if ((GetPrimitiveData(MaterialParameters).Flags & PRIMITIVE_SCENE_DATA_FLAG_USE_SINGLE_SAMPLE_SHADOW_SL) != 0 && ResolvedView.IndirectLightingCacheShowFlag > 0.0f)
 			{
-				return IndirectLightingCache.DirectionalLightShadowing;
+				return half4(IndirectLightingCache.DirectionalLightShadowing, 1, 1, 1);
 			}
 		#endif
 	#endif

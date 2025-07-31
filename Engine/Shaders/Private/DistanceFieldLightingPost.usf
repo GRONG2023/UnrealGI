@@ -8,6 +8,7 @@
 #include "DeferredShadingCommon.ush"
 #include "DistanceFieldLightingShared.ush"
 #include "DistanceFieldAOShared.ush"
+#include "ScreenPass.ush"
 
 Texture2D BentNormalHistoryTexture;
 SamplerState BentNormalHistorySampler;
@@ -25,12 +26,10 @@ SamplerState VelocityTextureSampler;
 
 float ComputeHistoryWeightBasedOnPosition(float2 ScreenPosition, float SceneDepth, float2 OldScreenPosition, float HistoryCameraDepth)
 {
-	float3 WorldPosition = mul(float4(ScreenPosition * SceneDepth, SceneDepth, 1), View.ScreenToWorld).xyz;
+	float3 TranslatedWorldPosition = mul(float4(GetScreenPositionForProjectionType(ScreenPosition, SceneDepth), SceneDepth, 1), View.ScreenToTranslatedWorld).xyz;
+	float3 PrevPositionTranslatedWorld = mul(float4(GetScreenPositionForProjectionType(OldScreenPosition, HistoryCameraDepth), HistoryCameraDepth, 1), View.PrevScreenToTranslatedWorld).xyz;
 
-	float3 PrevPositionTranslatedWorld = mul(float4(OldScreenPosition * HistoryCameraDepth, HistoryCameraDepth, 1), View.PrevScreenToTranslatedWorld).xyz;
-	float3 PrevWorldPosition = PrevPositionTranslatedWorld - View.PrevPreViewTranslation;
-
-	float DistanceToHistoryValue = length(PrevWorldPosition - WorldPosition);
+	float DistanceToHistoryValue = length(PrevPositionTranslatedWorld - TranslatedWorldPosition);
 	float RelativeHistoryDistanceThreshold = HistoryDistanceThreshold / 1000.0f;
 
 	return DistanceToHistoryValue / SceneDepth > RelativeHistoryDistanceThreshold ? 0.0f : 1.0f;
@@ -39,7 +38,8 @@ float ComputeHistoryWeightBasedOnPosition(float2 ScreenPosition, float SceneDept
 float2 DistanceFieldGBufferTexelSize;
 float2 DistanceFieldGBufferJitterOffset;
 float4 BentNormalBufferAndTexelSize;
-float MinDownsampleFactorToBaseLevel;
+
+FScreenTransform UVToScreenPos;
 
 float4 GetNormalWeights(float2 Corner00UV, float2 LowResTexelSize, float3 WorldNormal)
 {
@@ -78,10 +78,10 @@ float4 GetNormalWeights(float2 Corner00UV, float2 LowResTexelSize, float3 WorldN
 
 float ComputeSampleWeightBasedOnPosition(float4 ReferencePlane, float2 SampleScreenUV, float SampleDepth)
 {
-	float2 SampleScreenPosition = (SampleScreenUV.xy - View.ScreenPositionScaleBias.wz) / View.ScreenPositionScaleBias.xy;
-	float3 SampleWorldPosition = mul(float4(SampleScreenPosition * SampleDepth, SampleDepth, 1), View.ScreenToWorld).xyz;
+	float2 SampleScreenPosition = ApplyScreenTransform(SampleScreenUV, UVToScreenPos);
+	float3 SampleTranslatedWorldPosition = mul(float4(GetScreenPositionForProjectionType(SampleScreenPosition, SampleDepth), SampleDepth, 1), PrimaryView.ScreenToTranslatedWorld).xyz;
 
-	float PlaneDistance = dot(ReferencePlane, float4(SampleWorldPosition, 1));
+	float PlaneDistance = dot(ReferencePlane, float4(SampleTranslatedWorldPosition, 1));
 
 	float Epsilon = .0001f;
 	float RelativeDistance = 1000 * abs(PlaneDistance) / SampleDepth;
@@ -94,9 +94,9 @@ void GeometryAwareUpsample(float4 UVAndScreenPos, out float4 OutBentNormal)
 	float SceneDepth;
 	GetDownsampledGBuffer(UVAndScreenPos.xy, WorldNormal, SceneDepth);
 
-	float3 WorldPosition = mul(float4(UVAndScreenPos.zw * SceneDepth, SceneDepth, 1), View.ScreenToWorld).xyz;
+	float3 TranslatedWorldPosition = mul(float4(GetScreenPositionForProjectionType(UVAndScreenPos.zw, SceneDepth), SceneDepth, 1), PrimaryView.ScreenToTranslatedWorld).xyz;
 
-	float4 ReferencePlane = float4(WorldNormal, -dot(WorldPosition, WorldNormal));
+	float4 ReferencePlane = float4(WorldNormal, -dot(TranslatedWorldPosition, WorldNormal));
 
 	float2 LowResBufferSize = BentNormalBufferAndTexelSize.xy;
 	float2 LowResTexelSize = BentNormalBufferAndTexelSize.zw;
@@ -171,19 +171,22 @@ void UpdateHistoryDepthRejectionPS(
 	float4 ThisClip = float4( UVAndScreenPos.zw, ConvertToDeviceZ(SceneDepth), 1 );
 	float4 PrevClip = mul( ThisClip, View.ClipToPrevClip );
 	float2 PrevScreen = PrevClip.xy / PrevClip.w;
-	float2 Screenvelocity = UVAndScreenPos.zw - PrevScreen;
-		
-	float2 FullResTexel = UVAndScreenPos.xy - .5f * View.BufferSizeAndInvSize.zw;
+	float2 ScreenVelocity = UVAndScreenPos.zw - PrevScreen;
+		 
+	// The scene velocity texture is rendered as a texture atlas for all views,
+	// so first convert the vertex shader's UV coordinates to the size of the view rect and offset into the atlas
+	// before converting back to the correct UV coordinates.
+	float2 FullResTexel = (UVAndScreenPos.xy * View.ViewSizeAndInvSize.xy + View.ViewRectMin.xy - .5f) * View.BufferSizeAndInvSize.zw;
 	float4 EncodedVelocity = Texture2DSampleLevel(VelocityTexture, VelocityTextureSampler, FullResTexel, 0);
 		
 	if (EncodedVelocity.x > 0.0)
 	{
-		Screenvelocity = DecodeVelocityFromTexture(EncodedVelocity).xy;
+		ScreenVelocity = DecodeVelocityFromTexture(EncodedVelocity).xy;
 	}
 		
-	float PixelSpeed = 0.5 * length(Screenvelocity);
+	float PixelSpeed = 0.5 * length(ScreenVelocity);
 
-	float2 OldScreenPosition = (UVAndScreenPos.zw - Screenvelocity);
+	float2 OldScreenPosition = (UVAndScreenPos.zw - ScreenVelocity);
 	float2 OldDistanceFieldUVs = OldScreenPosition * HistoryScreenPositionScaleBias.xy + HistoryScreenPositionScaleBias.wz;
 
 	float EffectiveHistoryWeight = HistoryWeight;
@@ -311,7 +314,6 @@ void FilterHistoryPS(
 		float SceneDepth = abs(HistoryValue.w);
 
 		float4 Accumulation = 0;
-		float3 IrradianceAccumulation = 0;
 
 		for (float y = -HALF_HISTORY_FILL_KERNEL_SIZE; y <= HALF_HISTORY_FILL_KERNEL_SIZE; y++)
 		{
@@ -344,7 +346,7 @@ void FilterHistoryPS(
 		}
 
 		// Only change the history value if the spatial search turned up something applicable
-		if (Accumulation.a > 0)
+		if (Accumulation.a > 0.01f)
 		{
 			float InvWeight = 1.0f / Accumulation.a;
 			// Construct the history value as if the spatial search result was the previous history, 
@@ -368,13 +370,15 @@ void AOUpsamplePS(
 {
 	FGBufferData GBuffer = GetGBufferData(UVAndScreenPos.xy);
 
-	float3 BentNormal = UpsampleDFAO(UVAndScreenPos.xy, GBuffer.Depth, GBuffer.WorldNormal);
+	// The rectangle is drawn according to GBuffer rect,
+	// while the bent normal is always offset at (0, 0)
+	const float2 BentNormalUV = UVAndScreenPos.xy - View.ViewRectMin.xy * View.BufferSizeAndInvSize.zw;
+	float3 BentNormal = UpsampleDFAO(BentNormalUV, GBuffer.Depth, GBuffer.WorldNormal);
 
 #if MODULATE_SCENE_COLOR
 	float Visibility = lerp(length(BentNormal), 1.0f, MinIndirectDiffuseOcclusion);
 	OutSceneColor = Visibility;
 #else
 	OutSceneColor = float4(length(BentNormal).xxx, 1.0f);
-
 #endif
 }

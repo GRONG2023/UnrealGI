@@ -8,17 +8,17 @@
 
 struct BxDFContext
 {
-	float NoV;
-	float NoL;
-	float VoL;
-	float NoH;
-	float VoH;
-	float XoV;
-	float XoL;
-	float XoH;
-	float YoV;
-	float YoL;
-	float YoH;
+	half NoV;
+	half NoL;
+	half VoL;
+	half NoH;
+	half VoH;
+	half XoV;
+	half XoL;
+	half XoH;
+	half YoV;
+	half YoL;
+	half YoH;
 #if 1	// Shit code until we get member functions
 };
 
@@ -58,6 +58,26 @@ void Init( inout BxDFContext Context, half3 N, half3 X, half3 Y, half3 V, half3 
 	Context.YoV = dot(Y, V);
 	Context.YoL = dot(Y, L);
 	Context.YoH = (Context.YoL + Context.YoV) * InvLenH;
+}
+
+void InitMobile(inout BxDFContext Context, half3 N, half3 V, half3 L, half NoL)
+{
+	Context.NoL = NoL;
+	Context.NoV = dot(N, V);
+	Context.VoL = dot(V, L);
+	float3 H = normalize(float3(V + L));
+	Context.NoH = max(0, dot(N, H));
+	Context.VoH = max(0, dot(V, H));
+
+	//NoL = saturate( NoL );
+	//NoV = saturate( abs( NoV ) + 1e-5 );
+
+	Context.XoV = 0.0f;
+	Context.XoL = 0.0f;
+	Context.XoH = 0.0f;
+	Context.YoV = 0.0f;
+	Context.YoL = 0.0f;
+	Context.YoH = 0.0f;
 }
 
 // [ de Carpentier 2017, "Decima Engine: Advances in Lighting and AA" ]
@@ -239,12 +259,23 @@ void SphereMaxNoH( inout BxDFContext Context, float SinAlpha, bool bNewtonIterat
 
 // Physically based shading model
 // parameterized with the below options
+// [ Karis 2013, "Real Shading in Unreal Engine 4" slide 11 ]
 
-// Microfacet specular = D*G*F / (4*NoL*NoV) = D*Vis*F
+// E = Random sample for BRDF.
+// N = Normal of the macro surface.
+// H = Normal of the micro surface.
+// V = View vector going from surface's position towards the view's origin.
+// L = Light ray direction
+
+// D = Microfacet NDF
+// G = Shadowing and masking
+// F = Fresnel
+
 // Vis = G / (4*NoL*NoV)
+// f = Microfacet specular BRDF = D*G*F / (4*NoL*NoV) = D*Vis*F
 
 
-float3 Diffuse_Lambert( float3 DiffuseColor )
+half3 Diffuse_Lambert( half3 DiffuseColor )
 {
 	return DiffuseColor * (1 / PI);
 }
@@ -297,6 +328,42 @@ float3 Diffuse_Gotanda( float3 DiffuseColor, float Roughness, float NoV, float N
 	float Lr = (21.0 / 20.0) * (1 - F0) * ( Fr * Lm + Vd + Bp );
 	return DiffuseColor / PI * Lr;
 #endif
+}
+
+// [ Chan 2018, "Material Advances in Call of Duty: WWII" ]
+// It has been extended here to fade out retro reflectivity contribution from area light in order to avoid visual artefacts.
+float3 Diffuse_Chan( float3 DiffuseColor, float a2, float NoV, float NoL, float VoH, float NoH, float RetroReflectivityWeight)
+{
+	// We saturate each input to avoid out of range negative values which would result in weird darkening at the edge of meshes (resulting from tangent space interpolation).
+	NoV = saturate(NoV);
+	NoL = saturate(NoL);
+	VoH = saturate(VoH);
+	NoH = saturate(NoH);
+
+	// a2 = 2 / ( 1 + exp2( 18 * g )
+	float g = saturate( (1.0 / 18.0) * log2( 2 * rcpFast(a2) - 1 ) );
+
+	float F0 = VoH + Pow5( 1 - VoH );
+	float FdV = 1 - 0.75 * Pow5( 1 - NoV );
+	float FdL = 1 - 0.75 * Pow5( 1 - NoL );
+
+	// Rough (F0) to smooth (FdV * FdL) response interpolation
+	float Fd = lerp( F0, FdV * FdL, saturate( 2.2 * g - 0.5 ) );
+
+	// Retro reflectivity contribution.
+	float Fb = ( (34.5 * g - 59 ) * g + 24.5 ) * VoH * exp2( -max( 73.2 * g - 21.2, 8.9 ) * sqrtFast( NoH ) );
+	// It fades out when lights become area lights in order to avoid visual artefacts.
+	Fb *= RetroReflectivityWeight;
+
+	float Lobe = (1 / PI) * (Fd + Fb);
+
+	// We clamp the BRDF lobe value to an arbitrary value of 1 to get some practical benefits at high roughness:
+	// - This is to avoid too bright edges when using normal map on a mesh and the local bases, L, N and V ends up in an top emisphere setup.
+	// - This maintains the full proper rough look of a sphere when not using normal maps.
+	// - This also fixes the furnace test returning too much energy at the edge of a mesh.
+	Lobe = min(1.0, Lobe);
+
+	return DiffuseColor * Lobe;
 }
 
 // [Blinn 1977, "Models of light reflection for computer synthesized pictures"]
@@ -414,18 +481,98 @@ float3 F_Schlick( float3 SpecularColor, float VoH )
 	
 	// Anything less than 2% is physically impossible and is instead considered to be shadowing
 	return saturate( 50.0 * SpecularColor.g ) * Fc + (1 - Fc) * SpecularColor;
-	
+}
+
+float3 F_Schlick(float3 F0, float3 F90, float VoH)
+{
+	float Fc = Pow5(1 - VoH);
+	return F90 * Fc + (1 - Fc) * F0;
+}
+
+float3 F_AdobeF82(float3 F0, float3 F82, float VoH)
+{
+	// [Kutz et al. 2021, "Novel aspects of the Adobe Standard Material" ]
+	// See Section 2.3 (note the formulas in the paper do not match the code, the code is the correct version)
+	// The constants below are derived by just constant folding the terms dependent on CosThetaMax=1/7
+	const float Fc = Pow5(1 - VoH);
+	const float K = 49.0 / 46656.0;
+	float3 b = (K - K * F82) * (7776.0 + 9031.0 * F0);
+	return saturate(F0 + Fc * ((1 - F0) - b * (VoH - VoH * VoH)));
 }
 
 float3 F_Fresnel( float3 SpecularColor, float VoH )
 {
-	float3 SpecularColorSqrt = sqrt( clamp( float3(0, 0, 0), float3(0.99, 0.99, 0.99), SpecularColor ) );
+	float3 SpecularColorSqrt = sqrt( clamp(SpecularColor, float3(0, 0, 0), float3(0.99, 0.99, 0.99) ) );
 	float3 n = ( 1 + SpecularColorSqrt ) / ( 1 - SpecularColorSqrt );
 	float3 g = sqrt( n*n + VoH*VoH - 1 );
 	return 0.5 * Square( (g - VoH) / (g + VoH) ) * ( 1 + Square( ((g+VoH)*VoH - 1) / ((g-VoH)*VoH + 1) ) );
 }
 
+float4 SheenLTC_Cofficients(float NoV, float Roughness, Texture2D InSheenLTCTexture, SamplerState InSheenSampler)
+{
+	const float Alpha = sqrt(Roughness);
+	const float SatNoV = saturate(abs(NoV) + 1e-5);
+	float2 UV = float2(Alpha, SatNoV);
+	UV = UV * (31.0 / 32.0) + (0.5 / 32.0);
+	return InSheenLTCTexture.SampleLevel(InSheenSampler, UV, 0);
+}
 
+float SheenLTC_DirectionalAlbedo(float NoV, float Roughness, Texture2D InSheenLTCTexture, SamplerState InSheenSampler)
+{
+	return SheenLTC_Cofficients(NoV, Roughness, InSheenLTCTexture, InSheenSampler).z;
+}
+
+// [Zeltner et al. 2022, "Practical Multiple-Scattering Sheen Using Linearly Transformed Cosines"]
+float3 SheenLTC_Sample(float3 CosSample, float3 V, half3 N, float NoV, float Roughness, Texture2D InSheenLTCTexture, SamplerState InSheenSampler)
+{
+	const float4 LTC = SheenLTC_Cofficients(NoV, Roughness, InSheenLTCTexture, InSheenSampler);
+	const float aInv = LTC.x;
+	const float bInv = LTC.y;
+	const float3 LocalL = normalize(float3(CosSample.x / aInv - CosSample.z * bInv / aInv, CosSample.y / aInv, CosSample.z));
+
+	// Rotate L into tangent space
+	const float3 T1 = normalize(V - N * NoV);
+	const float3 T2 = cross(N, T1);
+	const float3x3 TangentBasis = float3x3(T1, T2, N);
+	const float3 S = mul(LocalL, TangentBasis);
+	return S;
+}
+
+// [Zeltner et al. 2022, "Practical Multiple-Scattering Sheen Using Linearly Transformed Cosines"]
+float SheenLTC_Eval(float3 V, float3 L, half3 N, float NoV, float Roughness, Texture2D InSheenLTCTexture, SamplerState InSheenSampler, inout float OutDirectionalAlbedo)
+{
+	// Rotate L into tangent space
+	const float3 T1 = normalize(V - N * NoV);
+	const float3 T2 = cross(N, T1);
+	const float3x3 TangentBasis = float3x3(T1, T2, N);
+
+	// L' = mul(L, InvT) 
+	// Since TangentBasis is orthnormal Inv(T)=Transpose(T), i.e., mul(L, transpose(T)), which is equivalent to mul(T,L)
+	const float3 LocalL = mul(TangentBasis, L); 
+
+	const float4 LTC = SheenLTC_Cofficients(NoV, Roughness, InSheenLTCTexture, InSheenSampler);
+	const float aInv = LTC.x;
+	const float bInv = LTC.y;
+	OutDirectionalAlbedo = LTC.z;
+
+	float3 WrappedLocalL = float3(
+		aInv * LocalL.x + bInv * LocalL.z,
+		aInv * LocalL.y,
+		LocalL.z);
+
+	const float LenWrappedLocalL = length(WrappedLocalL);
+	// Jabobian is defined as: det(InvLTC) / ||InvLTC . L||
+	const float Jacobian = Pow2(aInv) / Pow3(LenWrappedLocalL);
+
+	// Normalized wrapped direction
+	WrappedLocalL /= LenWrappedLocalL;
+
+	// Evaluation a normalized cos distribution
+	const float CosDistribution = WrappedLocalL.z / PI;
+	const float Out = OutDirectionalAlbedo * CosDistribution * Jacobian; // Fs * CosTheta
+
+	return max(Out, 0.f);
+}
 
 //---------------
 // EnvBRDF
@@ -449,6 +596,7 @@ void ModifyGGXAnisotropicNormalRoughness(float3 WorldTangent, float Anisotropy, 
 	}
 }
 
+// Convert a roughness and an anisotropy factor into GGX alpha values respectively for the major and minor axis of the tangent frame
 void GetAnisotropicRoughness(float Alpha, float Anisotropy, out float ax, out float ay)
 {
 #if 1
@@ -463,11 +611,33 @@ void GetAnisotropicRoughness(float Alpha, float Anisotropy, out float ax, out fl
 #endif
 }
 
+// Convert a roughness and an anisotropy factor, into two roughnesses respectively for the major and minor axis of the tangent frame
+float2 GetAnisotropicRoughness(float Roughness, float Anisotropy)
+{
+	// Anisotropic parameters: ax and ay are the roughness along the tangent and bitangent	
+	// Kulla 2017, "Revisiting Physically Based Shading at Imageworks"
+	float2 Out = saturate(Roughness);
+	Anisotropy = clamp(Anisotropy, -1.0, 1.0);
+	Out.x = max(Roughness * sqrt(1.0 + Anisotropy), 0.001f);
+	Out.y = max(Roughness * sqrt(1.0 - Anisotropy), 0.001f);
+	return Out;
+}
+
+// Return anisotropy factor (+1: Tangent is major axis, -1: Bitangent is the major axis), and the original roughness
+void GetAnisotropicFactor(float RoughnessX, float RoughnessY, inout float Anisotropy, inout float OriginalRoughness)
+{
+	const float MinRoughness = 0.001f;
+	float r = Pow2(max(RoughnessX, MinRoughness) / max(RoughnessY, MinRoughness));
+	Anisotropy = (r - 1.0) / (r + 1.0);
+	OriginalRoughness = (RoughnessX + RoughnessY) / (sqrt(1.0 + Anisotropy) + sqrt(1.0 - Anisotropy));
+}
+
 #ifndef PreIntegratedGF
 Texture2D		PreIntegratedGF;
 SamplerState	PreIntegratedGFSampler;
 #endif
 
+// [Karis 2013, "Real Shading in Unreal Engine 4" slide 11]
 half3 EnvBRDF( half3 SpecularColor, half Roughness, half NoV )
 {
 	// Importance sampled preintegrated G * F
@@ -475,6 +645,14 @@ half3 EnvBRDF( half3 SpecularColor, half Roughness, half NoV )
 
 	// Anything less than 2% is physically impossible and is instead considered to be shadowing 
 	float3 GF = SpecularColor * AB.x + saturate( 50.0 * SpecularColor.g ) * AB.y;
+	return GF;
+}
+
+half3 EnvBRDF(half3 F0, half3 F90, half Roughness, half NoV)
+{
+	// Importance sampled preintegrated G * F
+	float2 AB = Texture2DSampleLevel(PreIntegratedGF, PreIntegratedGFSampler, float2(NoV, Roughness), 0).rg;
+	float3 GF = F0 * AB.x + F90 * AB.y;
 	return GF;
 }
 
@@ -496,9 +674,15 @@ half3 EnvBRDFApprox( half3 SpecularColor, half Roughness, half NoV )
 
 	// Anything less than 2% is physically impossible and is instead considered to be shadowing
 	// Note: this is needed for the 'specular' show flag to work, since it uses a SpecularColor of 0
-	float F90 = saturate(50.0 * SpecularColor.g);
+	float F90 = saturate( 50.0 * SpecularColor.g );
 
 	return SpecularColor * AB.x + F90 * AB.y;
+}
+
+half3 EnvBRDFApprox(half3 F0, half3 F90, half Roughness, half NoV)
+{
+	half2 AB = EnvBRDFApproxLazarov(Roughness, NoV);
+	return F0 * AB.x + F90 * AB.y;
 }
 
 half EnvBRDFApproxNonmetal( half Roughness, half NoV )
@@ -521,6 +705,11 @@ void EnvBRDFApproxFullyRough(inout half3 DiffuseColor, inout half SpecularColor)
 {
 	DiffuseColor += SpecularColor * 0.45;
 	SpecularColor = 0;
+}
+void EnvBRDFApproxFullyRough(inout half3 DiffuseColor, inout half3 F0, inout half3 F90)
+{
+	DiffuseColor += F0 * 0.45;
+	F0 = F90 = 0;
 }
 
 
@@ -554,3 +743,108 @@ float Vis_Cloth( float NoV, float NoL )
 	return rcp( 4 * ( NoL + NoV - NoL * NoV ) );
 }
 
+float D_Charlie(float Roughness, float NoH)
+{
+	float InvR = 1 / Roughness;
+	float Cos2H = NoH * NoH;
+	float Sin2H = 1 - Cos2H;
+	return (2 + InvR) * pow(Sin2H, InvR * 0.5) / (2 * PI);
+}
+
+// [Estevez and Kulla 2017, "Production Friendly Microfacet Sheen BRDF"]
+float Vis_Charlie_L(float x, float r)
+{
+	r = saturate(r);
+	r = 1.0 - (1. - r) * (1. - r);
+
+	float a = lerp(25.3245 , 21.5473 , r);
+	float b = lerp( 3.32435,  3.82987, r);
+	float c = lerp( 0.16801,  0.19823, r);
+	float d = lerp(-1.27393, -1.97760, r);
+	float e = lerp(-4.85967, -4.32054, r);
+
+	return a * rcp( (1 + b * pow(x, c)) + d * x + e);
+}
+float Vis_Charlie(float Roughness, float NoV, float NoL)
+{
+	float VisV = NoV < 0.5 ? exp(Vis_Charlie_L(NoV, Roughness)) : exp(2 * Vis_Charlie_L(0.5, Roughness) - Vis_Charlie_L(1 - NoV, Roughness));
+	float VisL = NoL < 0.5 ? exp(Vis_Charlie_L(NoL, Roughness)) : exp(2 * Vis_Charlie_L(0.5, Roughness) - Vis_Charlie_L(1 - NoL, Roughness));
+
+	return rcp(((1 + VisV + VisL) * (4 * NoV * NoL)));
+}
+
+float Vis_Ashikhmin(float NoV, float NoL)
+{
+	return rcp(4 * (NoL + NoV - NoL * NoV));
+}
+
+// Special medium transmittance evaluation for the clear coat BSDF.
+float3 SimpleClearCoatTransmittance(float NoL, float NoV, float Metallic, float3 BaseColor)
+{
+	float3 Transmittance = 1.0;
+
+	float ClearCoatCoverage = Metallic;
+	if (ClearCoatCoverage > 0.0)
+	{
+		float LayerThickness = 1.0;	// Assume a normalized thickness
+
+		// The path length inside the medium is from light to bottom surface, then back from bottom surface to the viewer.
+		// This assuming an infinite and flat medium slab.
+		float ThinDistance = LayerThickness * (rcp(NoV) + rcp(NoL));
+
+		// BaseColor represents reflected color viewed at 0 incidence angle for the view and light direction... 
+		float3 TransmittanceColor = Diffuse_Lambert(BaseColor);
+		// ... and after being affected by the substrate transmittance when traveling through it, back and forth.
+		// Because of this, extinction is normalized by traveling through layer thickness twice
+		float3 ExtinctionCoefficient = -log(max(TransmittanceColor,0.0001)) / (2.0 * LayerThickness);
+
+		// Optical depth is evaluated for ThinDistance computed above. But we also subtract 2.0 * LayerThickness
+		// in order to respect the fact that BaseColor represents reflected color viewed at 0 incidence angle. => In this case, OpticalDepth will be 0 and thus Transmittance=1.
+		float3 OpticalDepth = ExtinctionCoefficient * max(ThinDistance - 2.0 * LayerThickness, 0.0);
+
+		// Compute transmittance as a fonction of OpticalDepth
+		Transmittance = exp(-OpticalDepth);
+		// And as a fucntion of the ClearCoatCoverage.
+		Transmittance = lerp(1.0, Transmittance, ClearCoatCoverage);
+	}
+
+	// Note: this is a really special way to handle clear coat transmittance.
+	//  - The basecolor of the bottom layer is used as the transmittance color.
+	//	- So basically, a colored metal as bottom layer will look even more saturated at grazing angle.
+	//	- Transmittance is only computed for metals, for some reason plastic do not receive transmittance.
+
+	return Transmittance;
+}
+
+// Conversion of GGX roughness to Beckmann roughness
+// Using Microfacet Distribution Function: To Change or Not to Change, That Is the Question.
+float ConvertRoughnessGGXToBeckmann(float Roughness)
+{
+	// Use a custom remapping to better match the overall highlight shape, in particular for lower roughness (i.e., <0.5). 
+	// The original mapping was Ctr=Roughness based on the paper
+	const float Ctr = pow(Roughness, 0.7f);
+	return saturate(0.8388 * Ctr+ 0.7 * Pow4(Ctr));
+}
+float2 ConvertRoughnessGGXToBeckmann(float2 Roughness)
+{
+	return float2(ConvertRoughnessGGXToBeckmann(Roughness.x), ConvertRoughnessGGXToBeckmann(Roughness.y));
+}
+
+struct FBeckmannDesc
+{
+	float2 Roughness;	// Roughness
+	float2 Alpha;		// Roughness squared
+	float2 Sigma;		// RMS slope of the microfacets
+	float  Rho;			// Slope correlation factor to be used with LEAN mapping. See http://igg.unistra.fr/People/chermain/assets/pdf/Chermain2021RealTime.pdf.
+};
+FBeckmannDesc GGXToBeckmann(float2 GGXSafeRoughness)
+{
+	const float InvSqrt2 = 0.707106f;
+
+	FBeckmannDesc Out;
+	Out.Roughness	= ConvertRoughnessGGXToBeckmann(GGXSafeRoughness);
+	Out.Alpha		= Square(Out.Roughness);
+	Out.Sigma		= Out.Alpha * InvSqrt2;
+	Out.Rho			= 0.0f;
+	return Out;
+}
