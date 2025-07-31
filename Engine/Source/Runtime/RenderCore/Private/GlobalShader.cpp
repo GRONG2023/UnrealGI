@@ -6,17 +6,14 @@
 
 #include "GlobalShader.h"
 
-#include "Misc/MessageDialog.h"
-#include "HAL/FileManager.h"
-#include "Serialization/NameAsStringProxyArchive.h"
 #include "Interfaces/ITargetPlatform.h"
 #include "Misc/Paths.h"
 #include "Serialization/MemoryWriter.h"
-#include "Serialization/MemoryReader.h"
-#include "Misc/ScopedSlowTask.h"
-#include "Misc/App.h"
-#include "StaticBoundShaderState.h"
-
+#include "Misc/CoreMisc.h"
+#include "Misc/ConfigCacheIni.h"
+#include "Interfaces/ITargetPlatformManagerModule.h"
+#include "Containers/StaticBitArray.h"
+#include "ShaderCodeLibrary.h"
 
 /** The global shader map. */
 FGlobalShaderMap* GGlobalShaderMap[SP_NumPlatforms] = {};
@@ -26,11 +23,350 @@ IMPLEMENT_TYPE_LAYOUT(FGlobalShaderMapContent);
 
 IMPLEMENT_SHADER_TYPE(,FNULLPS,TEXT("/Engine/Private/NullPixelShader.usf"),TEXT("Main"),SF_Pixel);
 
+/** A per-platform map of global shader defines that come from config .ini */
+class FGlobalShaderConfigDefines
+{
+public:
+
+	static void ApplyConfigDefines(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment)
+	{
+		FName ShaderFormat;
+		if (const FPlatformInfo* Platform = GetPlatformInfoAndErrorCheck(Parameters.Platform, ShaderFormat))
+		{
+			if (const TArray<FDefine>* ShaderDefines = Platform->ShaderDefines.Find(Parameters.GlobalShaderName))
+			{			
+				for (const FDefine& Define : *ShaderDefines)
+				{
+					if (Define.IsRelevant(ShaderFormat, Parameters.PermutationId))
+					{
+						OutEnvironment.SetDefineAndCompileArgument(*Define.Name, Define.Value);
+					}
+				}
+			}
+		}
+	}
+
+	static void AppendKeyString(FString& KeyString, FName ShaderName, int32 PermutationID, FName IniPlatform, EShaderPlatform ShaderPlatform)
+	{
+		FName ShaderFormat;
+		if (const FPlatformInfo* Platform = GetPlatformInfoAndErrorCheck(ShaderPlatform, ShaderFormat))
+		{
+			if (const TArray<FDefine>* ShaderDefines = Platform->ShaderDefines.Find(ShaderName))
+			{
+				TArray<FDefine> FilteredDefines;
+				for (const FDefine& Define : *ShaderDefines)
+				{
+					if (Define.IsRelevant(ShaderFormat, PermutationID))
+					{
+						FilteredDefines.Add(Define);
+					}
+				}
+
+				if (FilteredDefines.Num() > 0)
+				{
+					// Sort and hash the applicable defines
+					FilteredDefines.Sort();
+
+					FSHA1 HashState;
+					for (const FDefine& Define : FilteredDefines)
+					{
+						HashState.UpdateWithString(*Define.Name, Define.Name.Len());
+						HashState.UpdateWithString(*Define.Value, Define.Value.Len());
+
+						const uint32 ShaderFormatHash = GetTypeHash(Define.ShaderFormat);
+						HashState.Update((const uint8*)&ShaderFormatHash, sizeof(ShaderFormatHash));
+
+						HashState.Update((const uint8*)&Define.PermutationID, sizeof(Define.PermutationID));
+					}
+
+					KeyString += HashState.Finalize().ToString();
+				}
+			}
+		}
+	}
+
+private:
+	struct FDefine
+	{
+		FString Name;
+		FString Value;
+		FName ShaderFormat = NAME_None;
+		int32 PermutationID = INDEX_NONE;
+
+		bool IsRelevant(FName InShaderFormat, int32 InPermutationID) const
+		{
+			if (ShaderFormat != NAME_None && ShaderFormat != InShaderFormat)
+			{
+				// This define is inappropriate for the target shader format
+				return false;
+			}
+
+			if (PermutationID != INDEX_NONE && PermutationID != InPermutationID)
+			{
+				// This define is inappropriate for the permutation being compiled
+				return false;
+			}
+
+			return true;
+		}
+
+		int32 Compare(const FDefine& Other) const
+		{
+			int Cmp = Name.Compare(Other.Name, ESearchCase::IgnoreCase);
+			if (Cmp == 0)
+			{
+				Cmp = Value.Compare(Other.Value, ESearchCase::CaseSensitive);
+				if (Cmp == 0)
+				{
+					Cmp = ShaderFormat.Compare(Other.ShaderFormat);
+					if (Cmp == 0)
+					{
+						Cmp = Other.PermutationID - PermutationID;
+					}
+				}
+			}
+
+			return Cmp;
+		}
+
+		bool operator==(const FDefine& Other) const
+		{
+			return Name.Equals(Other.Name, ESearchCase::IgnoreCase)
+				&& Value == Other.Value
+				&& ShaderFormat == Other.ShaderFormat
+				&& PermutationID == Other.PermutationID;
+		}
+
+		bool operator!=(const FDefine& Other) const
+		{
+			return !(*this == Other);
+		}
+
+		bool operator<(const FDefine& Other) const
+		{
+			return Compare(Other) < 0;
+		}
+	};
+
+	using FShaderDefines = TMap<FName, TArray<FDefine>>;
+
+	struct FPlatformInfo
+	{
+		FName Name;
+		bool bInitializedFromConfig = false;
+		FShaderDefines ShaderDefines;
+	};
+	
+	static TMap<FName, FPlatformInfo> ConfigDefines;
+	static TStaticBitArray<EShaderPlatform::SP_NumPlatforms> ErrorCheckedPlatforms;
+
+	static const FPlatformInfo* GetPlatformInfoAndErrorCheck(EShaderPlatform ShaderPlatform, FName& OutShaderFormat)
+	{
+		OutShaderFormat = LegacyShaderPlatformToShaderFormat(ShaderPlatform);
+
+		// Search for all target platforms that support this shader platform
+		TArray<FName, TInlineAllocator<16>> IniPlatforms;
+		for(const ITargetPlatform* TP : GetTargetPlatformManagerRef().GetTargetPlatforms())
+		{
+			check(TP);
+			TArray<FName> PlatformShaderFormats;
+			TP->GetAllPossibleShaderFormats(PlatformShaderFormats);
+			if (PlatformShaderFormats.Contains(OutShaderFormat))
+			{
+				IniPlatforms.AddUnique(FName(TP->IniPlatformName()));
+			}
+		}
+		
+		if (IniPlatforms.Num() == 0)
+		{
+			// No found platforms that support this shader format
+			return nullptr;
+		}
+		
+		// first add all platforms to populate the map :
+		for (int32 PlatformIndex = 0; PlatformIndex < IniPlatforms.Num(); ++PlatformIndex)
+		{
+			FPlatformInfo& Platform = ConfigDefines.FindOrAdd(IniPlatforms[PlatformIndex]);
+
+			if (!Platform.bInitializedFromConfig)
+			{
+				InitializePlatform(Platform, IniPlatforms[PlatformIndex]);
+				check( Platform.bInitializedFromConfig );
+			}
+		}
+
+		if (!ErrorCheckedPlatforms[ShaderPlatform])
+		{
+			ErrorCheckedPlatforms[ShaderPlatform] = true;
+
+			if (IniPlatforms.Num() > 1)
+			{
+				// This shader platform is shared by multiple target platforms that can be configured independently. We need to make sure all config defines
+				// match up, and that no platform-specific defines exist that might introduce shader compiler output that diverges between target platforms
+								
+				// pointer to Platform0 is safe to hold now because all are added first :
+				const FPlatformInfo * Platform0 = ConfigDefines.Find(IniPlatforms[0]);
+				check( Platform0 != nullptr );
+
+				for (int32 PlatformIndex = 1; PlatformIndex < IniPlatforms.Num(); ++PlatformIndex)
+				{
+					const FPlatformInfo * OtherPlatform = ConfigDefines.Find(IniPlatforms[PlatformIndex]);
+					check( OtherPlatform != nullptr );
+
+					ErrorCheckPlatformsForShaderFormat(*Platform0, *OtherPlatform, OutShaderFormat);
+				}
+			}
+		}
+		
+		// reget the pointer to IniPlatforms[0] after all Map adds are done, to return out :
+		// note returned pointer is not safe if any more adds are done
+		const FPlatformInfo * Platform = ConfigDefines.Find(IniPlatforms[0]);
+
+		return Platform;
+	}
+
+	static void InitializePlatform(FPlatformInfo& Platform, FName PlatformName)
+	{
+		if (FConfigCacheIni* ConfigCache = FConfigCacheIni::ForPlatform(PlatformName))
+		{
+			TArray<FString> DefineStrings;
+			ConfigCache->GetArray(TEXT("GlobalShaderDefines"), TEXT("Definitions"), DefineStrings, GEngineIni);
+
+			for (const FString& DefineString : DefineStrings)
+			{				
+				FString ShaderName, DefineName;
+				if (FParse::Value(*DefineString, TEXT("Shader="), ShaderName) &&
+					FParse::Value(*DefineString, TEXT("Define="), DefineName))
+				{
+					FName ShaderFormat = NAME_None;
+					FParse::Value(*DefineString, TEXT("ShaderFormat="), ShaderFormat);
+
+					int32 PermutationID = INDEX_NONE;
+					FParse::Value(*DefineString, TEXT("PermutationID="), PermutationID);
+
+					FString DefineValue;
+					int32 EqualsIndex = INDEX_NONE;
+					if (DefineName.FindChar(TCHAR('='), EqualsIndex))
+					{
+						DefineValue = DefineName.Mid(EqualsIndex + 1);
+						DefineName.MidInline(0, EqualsIndex, EAllowShrinking::No);
+					}
+
+					const FShaderType* ShaderType = FindShaderTypeByName(ShaderName);
+					if (ShaderType == nullptr || ShaderType->GetGlobalShaderType() == nullptr)
+					{
+						// This global shader doesn't actually exist
+						UE_LOG(LogShaders, Warning, TEXT("Global shader definition '%s' found in engine config for global shader '%s', which does not exist"), *DefineName, *ShaderName);
+						continue;
+					}
+
+					TArray<FDefine>& ShaderDefines = Platform.ShaderDefines.FindOrAdd(FName(ShaderName));
+					FDefine* Define = ShaderDefines.FindByPredicate(
+						[&](const FDefine& Define)
+						{
+							return Define.Name.Equals(DefineName, ESearchCase::IgnoreCase) &&
+								Define.ShaderFormat == ShaderFormat &&
+								Define.PermutationID == PermutationID;
+						});
+
+					if (!Define)
+					{
+						Define = &ShaderDefines.AddDefaulted_GetRef();
+						Define->Name = DefineName;
+						Define->ShaderFormat = ShaderFormat;
+						Define->PermutationID = PermutationID;
+					}
+
+					Define->Value = DefineValue;
+				}
+			}			
+		}		
+
+		Platform.Name = PlatformName;
+		Platform.bInitializedFromConfig = true;
+	}
+
+	static void ErrorCheckPlatformsForShaderFormat(const FPlatformInfo& PlatformA, const FPlatformInfo& PlatformB, FName ShaderFormat)
+	{
+		auto FilterShaderDefines = [ShaderFormat](const FShaderDefines& ShaderDefines) -> FShaderDefines
+		{
+			FShaderDefines FilteredShaderDefines;
+
+			for (const auto& ShaderIt : ShaderDefines)
+			{
+				TArray<FDefine> FilteredDefines = ShaderIt.Value.FilterByPredicate(
+					[ShaderFormat](const FDefine& Define)
+					{
+						return Define.ShaderFormat == NAME_None || Define.ShaderFormat == ShaderFormat;
+					});
+
+				if (FilteredDefines.Num() > 0)
+				{
+					// Sort the filtered defines for every shader for the purposes of comparison in error checking
+					FilteredDefines.Sort();
+					FilteredShaderDefines.Add(ShaderIt.Key, MoveTemp(FilteredDefines));
+				}
+			}
+
+			return MoveTemp(FilteredShaderDefines);
+		};
+
+		FShaderDefines FilteredDefinesA = FilterShaderDefines(PlatformA.ShaderDefines);
+		FShaderDefines FilteredDefinesB = FilterShaderDefines(PlatformB.ShaderDefines);
+
+		TSet<FName> ShadersWithError;
+
+		// Check if there are any keys in A that aren't in B, and vice versa
+		{
+			TSet<FName> ShaderNamesA, ShaderNamesB;
+			FilteredDefinesA.GetKeys(ShaderNamesA);
+			FilteredDefinesB.GetKeys(ShaderNamesB);
+
+			ShadersWithError.Append(ShaderNamesA.Difference(ShaderNamesB));
+			ShadersWithError.Append(ShaderNamesB.Difference(ShaderNamesA));
+		}
+
+		// Check if the defines (that are relevant to this shader format) are different between A or B
+		for (const auto& ShaderIt : FilteredDefinesA)
+		{
+			const TArray<FDefine>& DefinesA = ShaderIt.Value;
+			const TArray<FDefine>* DefinesB = FilteredDefinesB.Find(ShaderIt.Key);
+
+			if (DefinesB && DefinesA != *DefinesB)
+			{
+				ShadersWithError.Add(ShaderIt.Key);
+			}
+		}
+
+		if (ShadersWithError.Num() > 0)
+		{
+			FString ShaderListString = *FString::JoinBy(ShadersWithError, TEXT("\n    "), [](const FName& A) { return A.ToString(); });
+			UE_LOG(LogShaders, Fatal, TEXT("It has been detected that one or more global shaders are configured differently between platform '%s' and '%s' for ")
+				TEXT("shader format '%s'. This is unsupported, and could result in data mismatches in the Derived Data Cache. Please check that all entries ")
+				TEXT("of '[GlobalShaderDefines]` in the various engine config .ini files are the same for these shaders on all platforms that use this shader ")
+				TEXT("model.\n\nGlobal shaders with errors:\n    %s\n"),
+				*PlatformA.Name.ToString(), *PlatformB.Name.ToString(), *ShaderFormat.ToString(), *ShaderListString);
+		}
+	}
+};
+
+TMap<FName, FGlobalShaderConfigDefines::FPlatformInfo> FGlobalShaderConfigDefines::ConfigDefines;
+TStaticBitArray<EShaderPlatform::SP_NumPlatforms> FGlobalShaderConfigDefines::ErrorCheckedPlatforms;
+
 /** Used to identify the global shader map in compile queues. */
 const int32 GlobalShaderMapId = 0;
 
 FGlobalShaderMapId::FGlobalShaderMapId(EShaderPlatform Platform, const ITargetPlatform* TargetPlatform)
 {
+	if (TargetPlatform == nullptr)
+	{
+		TargetPlatform = GetTargetPlatformManagerRef().GetRunningTargetPlatform();
+		check(TargetPlatform);
+	}
+
+	ShaderPlatform = Platform;
+	IniPlatformName = FName(TargetPlatform->IniPlatformName());
+
 	LayoutParams.InitializeForPlatform(TargetPlatform);
 	const EShaderPermutationFlags PermutationFlags = GetShaderPermutationFlags(LayoutParams);
 	TArray<FShaderType*> ShaderTypes;
@@ -115,90 +451,63 @@ void FGlobalShaderMapId::AppendKeyString(FString& KeyString, const TArray<FShade
 {
 #if WITH_EDITOR
 
+	LayoutParams.AppendKeyString(KeyString);
+
 	{
-		const FSHAHash LayoutHash = Freeze::HashLayout(StaticGetTypeLayoutDesc<FGlobalShaderMapContent>(), LayoutParams);
-		KeyString += TEXT("_");
-		KeyString += LayoutHash.ToString();
-		KeyString += TEXT("_");
+		const FSHAHash LayoutHash = GetShaderTypeLayoutHash(StaticGetTypeLayoutDesc<FGlobalShaderMapContent>(), LayoutParams);
+		KeyString.AppendChar('_');
+		LayoutHash.AppendString(KeyString);
+		KeyString.AppendChar('_');
 	}
 
-	TMap<const TCHAR*,FCachedUniformBufferDeclaration> ReferencedUniformBuffers;
+	AppendKeyStringShaderDependencies(Dependencies, ShaderPipelineTypeDependencies, TConstArrayView<FVertexFactoryTypeDependency>(), LayoutParams, KeyString);
 
-	for (int32 ShaderIndex = 0; ShaderIndex < Dependencies.Num(); ShaderIndex++)
+	// Extra logic, just for Global shaders
+	for (const FShaderTypeDependency& ShaderTypeDependency : Dependencies)
 	{
-		const FShaderTypeDependency& ShaderTypeDependency = Dependencies[ShaderIndex];
 		const FShaderType* ShaderType = FindShaderTypeByName(ShaderTypeDependency.ShaderTypeName);
-
-		KeyString += TEXT("_");
-		KeyString += ShaderType->GetName();
-		KeyString += FString::Printf(TEXT("%i"), ShaderTypeDependency.PermutationId);
-
-		// Add the type's source hash so that we can invalidate cached shaders when .usf changes are made
-		KeyString += ShaderTypeDependency.SourceHash.ToString();
-
-		if (const FShaderParametersMetadata* ParameterStructMetadata = ShaderType->GetRootParametersMetadata())
-		{
-			KeyString += FString::Printf(TEXT("%08x"), ParameterStructMetadata->GetLayoutHash());
-		}
-
-		// Add the serialization history to the key string so that we can detect changes to global shader serialization without a corresponding .usf change
-		const FSHAHash LayoutHash = Freeze::HashLayout(ShaderType->GetLayout(), LayoutParams);
-		KeyString += LayoutHash.ToString();
-
-		const TMap<const TCHAR*, FCachedUniformBufferDeclaration>& ReferencedUniformBufferStructsCache = ShaderType->GetReferencedUniformBufferStructsCache();
-
-		// Gather referenced uniform buffers
-		for (TMap<const TCHAR*, FCachedUniformBufferDeclaration>::TConstIterator It(ReferencedUniformBufferStructsCache); It; ++It)
-		{
-			ReferencedUniformBuffers.Add(It.Key(), It.Value());
-		}
+		// Add the config define hash, if any defines exist in config
+		FGlobalShaderConfigDefines::AppendKeyString(KeyString, ShaderType->GetFName(), ShaderTypeDependency.PermutationId, IniPlatformName, ShaderPlatform);
 	}
 
-	for (int32 Index = 0; Index < ShaderPipelineTypeDependencies.Num(); ++Index)
-	{
-		const FShaderPipelineTypeDependency& Dependency = ShaderPipelineTypeDependencies[Index];
-		const FShaderPipelineType* ShaderPipelineType = FShaderPipelineType::GetShaderPipelineTypeByName(Dependency.ShaderPipelineTypeName);
-
-		KeyString += TEXT("_");
-		KeyString += ShaderPipelineType->GetName();
-
-		// Add the type's source hash so that we can invalidate cached shaders when .usf changes are made
-		KeyString += Dependency.StagesSourceHash.ToString();
-
-		for (const FShaderType* ShaderType : ShaderPipelineType->GetStages())
-		{
-			if (const FShaderParametersMetadata* ParameterStructMetadata = ShaderType->GetRootParametersMetadata())
-			{
-				KeyString += FString::Printf(TEXT("%08x"), ParameterStructMetadata->GetLayoutHash());
-			}
-
-			const TMap<const TCHAR*, FCachedUniformBufferDeclaration>& ReferencedUniformBufferStructsCache = ShaderType->GetReferencedUniformBufferStructsCache();
-
-			// Gather referenced uniform buffers
-			for (TMap<const TCHAR*, FCachedUniformBufferDeclaration>::TConstIterator It(ReferencedUniformBufferStructsCache); It; ++It)
-			{
-				ReferencedUniformBuffers.Add(It.Key(), It.Value());
-			}
-		}
-	}
-
-	{
-		TArray<uint8> TempData;
-		FSerializationHistory SerializationHistory;
-		FMemoryWriter Ar(TempData, true);
-		FShaderSaveArchive SaveArchive(Ar, SerializationHistory);
-
-		// Save uniform buffer member info so we can detect when layout has changed
-		SerializeUniformBufferInfo(SaveArchive, ReferencedUniformBuffers);
-
-		SerializationHistory.AppendKeyString(KeyString);
-	}
 #endif // WITH_EDITOR
+}
+
+bool FGlobalShaderMapId::WithEditorOnly() const
+{
+	return LayoutParams.WithEditorOnly();
+}
+
+bool FGlobalShaderType::ShouldCompilePipeline(const FShaderPipelineType* ShaderPipelineType, EShaderPlatform Platform, EShaderPermutationFlags Flags)
+{
+	for (const FShaderType* ShaderType : ShaderPipelineType->GetStages())
+	{
+		const FGlobalShaderPermutationParameters Parameters(ShaderType->GetFName(), Platform, kUniqueShaderPermutationId, Flags);
+		checkSlow(ShaderType->GetGlobalShaderType());
+		if (!ShaderType->ShouldCompilePermutation(Parameters))
+		{
+			return false;
+		}
+	}
+	return true;
 }
 
 FGlobalShader::FGlobalShader(const ShaderMetaType::CompiledShaderInitializerType& Initializer)
 :	FShader(Initializer)
 {}
+
+#if WITH_EDITOR
+void FGlobalShaderType::SetupCompileEnvironment(EShaderPlatform Platform, int32 PermutationId, EShaderPermutationFlags Flags, FShaderCompilerEnvironment& Environment) const
+{
+	FGlobalShaderPermutationParameters Parameters(GetFName(), Platform, PermutationId, Flags);
+
+	// Modify the compilation environment based on platform.
+	FGlobalShaderConfigDefines::ApplyConfigDefines(Parameters, Environment);
+
+	// Allow the shader type to modify its compile environment.
+	ModifyCompilationEnvironment(Parameters, Environment);
+}
+#endif // WITH_EDITOR
 
 void BackupGlobalShaderMap(FGlobalShaderBackupData& OutGlobalShaderBackup)
 {
@@ -377,7 +686,9 @@ bool FGlobalShaderMap::IsComplete(const ITargetPlatform* TargetPlatform) const
 	for (TLinkedList<FShaderPipelineType*>::TIterator ShaderPipelineIt(FShaderPipelineType::GetTypeList()); ShaderPipelineIt; ShaderPipelineIt.Next())
 	{
 		const FShaderPipelineType* Pipeline = *ShaderPipelineIt;
-		if (Pipeline->IsGlobalTypePipeline() && !HasShaderPipeline(Pipeline))
+		if (Pipeline->IsGlobalTypePipeline()
+			&& FGlobalShaderType::ShouldCompilePipeline(Pipeline, Platform, PermutationFlags)
+			&& !HasShaderPipeline(Pipeline))
 		{
 			return false;
 		}
@@ -390,7 +701,7 @@ void FGlobalShaderMap::Empty()
 {
 	for (const auto& It : SectionMap)
 	{
-		It.Value->GetMutableContent()->Empty(&It.Value->GetPointerTable());
+		It.Value->GetMutableContent()->Empty();
 	}
 }
 
@@ -492,5 +803,52 @@ void FGlobalShaderMap::LoadFromGlobalArchive(FArchive& Ar)
 		{
 			AddSection(Section);
 		}
+		else
+		{
+			UE_LOG(LogShaders, Fatal, TEXT("Could not load section %d (of %d) of the global shadermap."), i, NumSections);
+		}
+	}
+}
+
+RENDERCORE_API ERecursiveShader GRequiredRecursiveShaders = ERecursiveShader::None;
+
+void ForceInitGlobalShaderType(FShaderType& ShaderType)
+{
+	FGlobalShaderMap* GlobalShaderMap = GetGlobalShaderMap(GMaxRHIFeatureLevel);
+	for (int32 Permutation = 0; Permutation < ShaderType.GetPermutationCount(); ++Permutation)
+	{
+		TShaderRef<FShader> ShaderRef = GlobalShaderMap->GetShader(&ShaderType, Permutation);
+
+		if (ShaderRef.IsValid())
+		{
+			FShaderMapResource& MapResource = ShaderRef.GetResourceChecked();
+			for (int32 Index = 0; Index < MapResource.GetNumShaders(); ++Index)
+			{
+				MapResource.GetShader(Index);
+			}
+		}
+	}
+}
+
+RENDERCORE_API void CreateRecursiveShaders()
+{
+	ensureMsgf(!GRHISupportsMultithreadedShaderCreation, TEXT("CreateRecursiveShaders() is called while GRHISupportsMultithreadedShaderCreation is true. This is an unnecessary call."));
+	ensureMsgf(IsInRenderingThread(), TEXT("CreateRecursiveShaders() is expected to be called from the render thread."));
+
+	if (EnumHasAnyFlags(GRequiredRecursiveShaders, ERecursiveShader::Resolve))
+	{
+		extern void CreateResolveShaders();
+		CreateResolveShaders();
+	}
+
+	if (EnumHasAnyFlags(GRequiredRecursiveShaders, ERecursiveShader::Clear))
+	{
+		extern void CreateClearReplacementShaders();
+		CreateClearReplacementShaders();
+	}
+
+	if (EnumHasAnyFlags(GRequiredRecursiveShaders, ERecursiveShader::Null))
+	{
+		ForceInitGlobalShaderType<FNULLPS>();
 	}
 }

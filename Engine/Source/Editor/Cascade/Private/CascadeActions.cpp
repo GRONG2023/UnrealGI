@@ -2,10 +2,16 @@
 
 #include "CascadeActions.h"
 
+#include "Framework/Commands/InputChord.h"
+#include "Framework/Commands/UICommandInfo.h"
+#include "GenericPlatform/GenericApplication.h"
+#include "InputCoreTypes.h"
+#include "Misc/CoreMiscDefines.h"
+
 #define LOCTEXT_NAMESPACE "CascadeCommands"
 
 /** UI_COMMAND takes long for the compile to optimize */
-PRAGMA_DISABLE_OPTIMIZATION
+UE_DISABLE_OPTIMIZATION_SHIP
 void FCascadeCommands::RegisterCommands()
 {
 	UI_COMMAND(RestartSimulation, "Restart Sim", "Restart Simulation", EUserInterfaceActionType::Button, FInputChord());
@@ -45,6 +51,7 @@ void FCascadeCommands::RegisterCommands()
 	UI_COMMAND(DetailMode_Low, "Low", "Select Low Detail Mode", EUserInterfaceActionType::RadioButton, FInputChord());
 	UI_COMMAND(DetailMode_Medium, "Medium", "Select Medium Detail Mode", EUserInterfaceActionType::RadioButton, FInputChord());
 	UI_COMMAND(DetailMode_High, "High", "Select High Detail Mode", EUserInterfaceActionType::RadioButton, FInputChord());
+	UI_COMMAND(DetailMode_Epic, "Epic", "Select Epic Detail Mode", EUserInterfaceActionType::RadioButton, FInputChord());
 	UI_COMMAND(Significance_Critical, "Critical", "Require >= Critical Significance", EUserInterfaceActionType::RadioButton, FInputChord());
 	UI_COMMAND(Significance_High, "High", "Require High >= Significance", EUserInterfaceActionType::RadioButton, FInputChord());
 	UI_COMMAND(Significance_Medium, "Medium", "Require >= Medium Significance", EUserInterfaceActionType::RadioButton, FInputChord());
@@ -85,6 +92,6 @@ void FCascadeCommands::RegisterCommands()
 	UI_COMMAND(RemoveDuplicateModules, "Remove Duplicate Modules", "Remove Duplicate Modules", EUserInterfaceActionType::Button, FInputChord());
 }
 
-PRAGMA_ENABLE_OPTIMIZATION
+UE_ENABLE_OPTIMIZATION_SHIP
 
 #undef LOCTEXT_NAMESPACE

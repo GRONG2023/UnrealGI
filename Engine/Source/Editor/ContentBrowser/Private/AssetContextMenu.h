@@ -2,18 +2,25 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "Input/Reply.h"
-#include "Widgets/SWidget.h"
-#include "ContentBrowserItem.h"
+#include "Containers/Array.h"
+#include "Containers/ArrayView.h"
 #include "ContentBrowserDataMenuContexts.h"
+#include "ContentBrowserItem.h"
+#include "Delegates/Delegate.h"
+#include "HAL/Platform.h"
+#include "Input/Reply.h"
+#include "Internationalization/Text.h"
 #include "SourcesData.h"
+#include "Templates/SharedPointer.h"
+#include "UObject/NameTypes.h"
 
-class UToolMenu;
 class FUICommandList;
 class SAssetView;
-class SWindow;
+class SWidget;
+class UClass;
+class UToolMenu;
 
+enum class ECheckBoxState : uint8;
 enum class EContentBrowserViewContext : uint8;
 
 class FAssetContextMenu : public TSharedFromThis<FAssetContextMenu>
@@ -30,6 +37,9 @@ public:
 
 	/** Updates the list of currently selected items to those passed in */
 	void SetSelectedItems(TArrayView<const FContentBrowserItem> InSelectedItems);
+
+	/** Read-only access to the list of currently selected items */
+	const TArray<FContentBrowserItem>& GetSelectedItems() const { return SelectedItems; }
 
 	using FOnShowInPathsViewRequested = UContentBrowserDataMenuContext_FileMenu::FOnShowInPathsView;
 	void SetOnShowInPathsViewRequested(const FOnShowInPathsViewRequested& InOnShowInPathsViewRequested);
@@ -93,6 +103,8 @@ private:
 	/** Adds asset reference menu options to a menu builder. Returns true if any options were added. */
 	bool AddReferenceMenuOptions(UToolMenu* Menu);
 
+	bool AddPublicStateMenuOptions(UToolMenu* Menu);
+
 	/** Adds menu options related to working with collections */
 	bool AddCollectionMenuOptions(UToolMenu* Menu);
 
@@ -110,6 +122,30 @@ private:
 
 	/** Handler for confirmation of folder deletion */
 	FReply ExecuteDeleteFolderConfirmed();
+
+	/** Get tooltip for delete */
+	FText GetDeleteToolTip() const;
+
+	/** Handler for when "Public Asset" is toggled */
+	void ExecutePublicAssetToggle();
+
+	/** Handler to check to see if a Public Asset toggle is allowed */
+	bool CanExecutePublicAssetToggle();
+
+	/** Handler for setting all selected assets to Public */
+	void ExecuteBulkSetPublicAsset();
+
+	/** Handler for setting all selected assets to Private */
+	void ExecuteBulkUnsetPublicAsset();
+
+	/** Handler to check if all selected assets can have their Public state changed */
+	bool CanExecuteBulkSetPublicAsset();
+
+	/** Handler for determining the selected asset's Public state */
+	bool IsSelectedAssetPublic();
+
+	/** Handler for determining the selected asset's Private state */
+	bool IsSelectedAssetPrivate();
 
 	/** Handler for CopyReference */
 	void ExecuteCopyReference();
@@ -152,4 +188,6 @@ private:
 
 	/** Cached CanExecute vars */
 	bool bCanExecuteFindInExplorer = false;
+	bool bCanExecutePublicAssetToggle = false;
+	bool bCanExecuteBulkSetPublicAsset = false;
 };

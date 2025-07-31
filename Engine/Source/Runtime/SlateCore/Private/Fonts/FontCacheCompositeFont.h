@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include "Async/AsyncWork.h"
 #include "CoreMinimal.h"
 #include "Fonts/CompositeFont.h"
 
@@ -231,7 +232,7 @@ public:
 	/**
 	 * Gets the allocated font data for a font data asset
 	 */
-	uint32 GetFontDataAssetResidentMemory(const UObject* FontDataAsset) const;
+	SIZE_T GetFontDataAssetResidentMemory(const UObject* FontDataAsset) const;
 
 private:
 	/** Get the cached composite font data for the given composite font */

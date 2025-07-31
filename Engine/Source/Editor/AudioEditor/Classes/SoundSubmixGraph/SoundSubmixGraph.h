@@ -1,11 +1,19 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 #pragma once
 
+#include "Containers/Array.h"
+#include "Containers/Map.h"
+#include "Containers/Set.h"
 #include "EdGraph/EdGraph.h"
+#include "HAL/Platform.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/UObjectGlobals.h"
 
 #include "SoundSubmixGraph.generated.h"
 
-
+class UEdGraphPin;
+class UObject;
 // Forward Declarations
 class USoundSubmixBase;
 class USoundSubmixGraphNode;
@@ -127,9 +135,9 @@ private:
 private:
 	/** SoundSubmix which forms the root of this graph */
 	UPROPERTY(Transient)
-	USoundSubmixBase* RootSoundSubmix = nullptr;
+	TObjectPtr<USoundSubmixBase> RootSoundSubmix = nullptr;
 
 	UPROPERTY(Transient)
-	TArray<USoundSubmixBase*> StaleRoots;
+	TArray<TObjectPtr<USoundSubmixBase>> StaleRoots;
 };
 

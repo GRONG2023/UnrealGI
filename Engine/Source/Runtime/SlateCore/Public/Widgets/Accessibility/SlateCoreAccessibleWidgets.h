@@ -15,33 +15,37 @@ class SWindow;
  * inherit directly from FSlateAccessibleWidget, and optionally inherit from other IAccessible interfaces to
  * provide more functionality.
  */
-class SLATECORE_API FSlateAccessibleWidget : public IAccessibleWidget
+class FSlateAccessibleWidget : public IAccessibleWidget
 {
 	friend class FSlateAccessibleMessageHandler;
 public:
-	FSlateAccessibleWidget(TWeakPtr<SWidget> InWidget, EAccessibleWidgetType InWidgetType = EAccessibleWidgetType::Unknown);
-	virtual ~FSlateAccessibleWidget();
+	SLATECORE_API FSlateAccessibleWidget(TWeakPtr<SWidget> InWidget, EAccessibleWidgetType InWidgetType = EAccessibleWidgetType::Unknown);
+	SLATECORE_API virtual ~FSlateAccessibleWidget();
 
 	// IAccessibleWidget
-	virtual AccessibleWidgetId GetId() const override final;
-	virtual bool IsValid() const override final;
-	virtual TSharedPtr<IAccessibleWidget> GetWindow() const override final;
-	virtual FBox2D GetBounds() const override final;
-	virtual TSharedPtr<IAccessibleWidget> GetParent() override final;
-	virtual TSharedPtr<IAccessibleWidget> GetNextSibling() override final;
-	virtual TSharedPtr<IAccessibleWidget> GetPreviousSibling() override final;
-	virtual TSharedPtr<IAccessibleWidget> GetChildAt(int32 Index) override final;
-	virtual int32 GetNumberOfChildren() override final;
-	virtual FString GetClassName() const override final;
-	virtual bool IsEnabled() const override final;
-	virtual bool IsHidden() const override final;
-	virtual bool SupportsFocus() const override final;
-	virtual bool HasFocus() const override final;
-	virtual void SetFocus() override final;
+	SLATECORE_API virtual AccessibleWidgetId GetId() const override final;
+	SLATECORE_API virtual bool IsValid() const override final;
+	SLATECORE_API virtual TSharedPtr<IAccessibleWidget> GetWindow() const override final;
+	SLATECORE_API virtual FBox2D GetBounds() const override final;
+	SLATECORE_API virtual TSharedPtr<IAccessibleWidget> GetParent() override final;
+	SLATECORE_API virtual TSharedPtr<IAccessibleWidget> GetNextSibling() override final;
+	SLATECORE_API virtual TSharedPtr<IAccessibleWidget> GetPreviousSibling() override final;
+	SLATECORE_API virtual TSharedPtr<IAccessibleWidget> GetNextWidgetInHierarchy() override final;
+	SLATECORE_API virtual TSharedPtr<IAccessibleWidget> GetPreviousWidgetInHierarchy() override final;
+	SLATECORE_API virtual TSharedPtr<IAccessibleWidget> GetChildAt(int32 Index) override final;
+	SLATECORE_API virtual int32 GetNumberOfChildren() override final;
+	SLATECORE_API virtual FString GetClassName() const override final;
+	SLATECORE_API virtual bool IsEnabled() const override final;
+	SLATECORE_API virtual bool IsHidden() const override final;
+	SLATECORE_API virtual bool SupportsFocus() const override final;
+	SLATECORE_API virtual bool SupportsAccessibleFocus() const override final;
+	SLATECORE_API virtual bool CanCurrentlyAcceptAccessibleFocus() const override final;
+	SLATECORE_API virtual bool HasUserFocus(const FAccessibleUserIndex UserIndex) const override final;
+	SLATECORE_API virtual bool SetUserFocus(const FAccessibleUserIndex UserIndex) override final;
 
 	virtual EAccessibleWidgetType GetWidgetType() const override { return WidgetType; }
-	virtual FString GetWidgetName() const override;
-	virtual FString GetHelpText() const override;
+	SLATECORE_API virtual FString GetWidgetName() const override;
+	SLATECORE_API virtual FString GetHelpText() const override;
 	// ~
 
 	/**
@@ -49,7 +53,7 @@ public:
 	 *
 	 * @param NewParent The widget to assign as the new parent widget.
 	 */
-	void UpdateParent(TSharedPtr<IAccessibleWidget> NewParent);
+	SLATECORE_API void UpdateParent(TSharedPtr<IAccessibleWidget> NewParent);
 
 protected:
 	/** The underlying Slate widget backing this accessible widget. */
@@ -73,7 +77,7 @@ private:
 	 *
 	 * @return The parent SWindow for the Slate widget referenced by this accessible widget.
 	 */
-	TSharedPtr<SWindow> GetSlateWindow() const;
+	SLATECORE_API TSharedPtr<SWindow> GetSlateWindow() const;
 };
 
 // SWindow
@@ -93,7 +97,7 @@ public:
 	// IAccessibleWindow
 	virtual TSharedPtr<FGenericWindow> GetNativeWindow() const override;
 	virtual TSharedPtr<IAccessibleWidget> GetChildAtPosition(int32 X, int32 Y) override;
-	virtual TSharedPtr<IAccessibleWidget> GetFocusedWidget() const override;
+	virtual TSharedPtr<IAccessibleWidget> GetUserFocusedWidget(const FAccessibleUserIndex UserIndex) const override;
 	virtual void Close() override;
 	virtual bool SupportsDisplayState(EWindowDisplayState State) const override;
 	virtual EWindowDisplayState GetDisplayState() const override;
@@ -104,7 +108,7 @@ public:
 // ~
 
 // SImage
-class SLATECORE_API FSlateAccessibleImage
+class FSlateAccessibleImage
 	: public FSlateAccessibleWidget
 {
 public:
@@ -112,7 +116,7 @@ public:
 	virtual ~FSlateAccessibleImage() {}
 
 	// IAccessibleWidget
-	virtual FString GetHelpText() const override;
+	SLATECORE_API virtual FString GetHelpText() const override;
 	// ~
 };
 // ~

@@ -2,14 +2,32 @@
 
 
 #include "K2Node_VariableSetRef.h"
+
+#include "BPTerminal.h"
+#include "BlueprintActionDatabaseRegistrar.h"
+#include "BlueprintActionFilter.h"
+#include "BlueprintCompiledStatement.h"
+#include "BlueprintNodeSpawner.h"
+#include "Containers/EnumAsByte.h"
+#include "Containers/Map.h"
+#include "EdGraph/EdGraph.h"
+#include "EdGraph/EdGraphPin.h"
 #include "EdGraphSchema_K2.h"
 #include "EdGraphUtilities.h"
-#include "KismetCompiler.h"
-#include "VariableSetHandler.h"
-#include "BlueprintActionFilter.h"
-#include "BlueprintNodeSpawner.h"
 #include "EditorCategoryUtils.h"
-#include "BlueprintActionDatabaseRegistrar.h"
+#include "HAL/PlatformCrt.h"
+#include "Internationalization/Internationalization.h"
+#include "Kismet2/CompilerResultsLog.h"
+#include "KismetCastingUtils.h"
+#include "KismetCompiledFunctionContext.h"
+#include "KismetCompiler.h"
+#include "Misc/AssertionMacros.h"
+#include "Templates/Casts.h"
+#include "UObject/Class.h"
+#include "UObject/NameTypes.h"
+#include "UObject/UnrealNames.h"
+#include "UObject/WeakObjectPtrTemplates.h"
+#include "VariableSetHandler.h"
 
 static FName TargetVarPinName(TEXT("Target"));
 static FName VarValuePinName(TEXT("Value"));
@@ -29,29 +47,94 @@ public:
 		UK2Node_VariableSetRef* VarRefNode = CastChecked<UK2Node_VariableSetRef>(Node);
 		UEdGraphPin* ValuePin = VarRefNode->GetValuePin();
 		ValidateAndRegisterNetIfLiteral(Context, ValuePin);
+
+		{
+			// The pins on UK2Node_VariableSetRef don't actually refer to storage, so there's nothing to register in the NetMap.
+			// However, their pins' nets do, so we need to check if a cast is required for assignment to the target net.
+			// The cast detection performed by RegisterImplicitCasts doesn't understand the reference semantics used in this node.
+			// As a result, we need to manually handle any implicit casts.
+
+			using namespace UE::KismetCompiler;
+
+			UEdGraphPin* VariablePin = VarRefNode->GetTargetPin();
+			UEdGraphPin* VariablePinNet = FEdGraphUtilities::GetNetFromPin(VariablePin);
+			UEdGraphPin* ValuePinNet = FEdGraphUtilities::GetNetFromPin(ValuePin);
+
+			if ((VariablePinNet != nullptr) && (ValuePinNet != nullptr))
+			{
+				CastingUtils::FConversion Conversion =
+					CastingUtils::GetFloatingPointConversion(*ValuePinNet, *VariablePinNet);
+
+				if (Conversion.Type != CastingUtils::FloatingPointCastType::None)
+				{
+					check(!ImplicitCastMap.Contains(VarRefNode));
+
+					FBPTerminal* NewTerminal = CastingUtils::MakeImplicitCastTerminal(Context, VariablePinNet);
+
+					ImplicitCastMap.Add(VarRefNode, CastingUtils::FImplicitCastParams{Conversion, NewTerminal, Node});
+				}
+			}
+		}
 	}
+
+	virtual void Compile(FKismetFunctionContext& Context, UEdGraphNode* Node) override
+	{
+		UK2Node_VariableSetRef* VarRefNode = CastChecked<UK2Node_VariableSetRef>(Node);
+		UEdGraphPin* VarTargetPin = VarRefNode->GetTargetPin();
+		UEdGraphPin* ValuePin = VarRefNode->GetValuePin();
+
+		InnerAssignment(Context, Node, VarTargetPin, ValuePin);
+
+		// Generate the output impulse from this node
+		GenerateSimpleThenGoto(Context, *Node);
+	}
+
+private:
 
 	void InnerAssignment(FKismetFunctionContext& Context, UEdGraphNode* Node, UEdGraphPin* VariablePin, UEdGraphPin* ValuePin)
 	{
+		UEdGraphPin* VariablePinNet = FEdGraphUtilities::GetNetFromPin(VariablePin);
+		UEdGraphPin* ValuePinNet = FEdGraphUtilities::GetNetFromPin(ValuePin);
+
 		FBPTerminal** VariableTerm = Context.NetMap.Find(VariablePin);
 		if (VariableTerm == nullptr)
 		{
-			VariableTerm = Context.NetMap.Find(FEdGraphUtilities::GetNetFromPin(VariablePin));
+			VariableTerm = Context.NetMap.Find(VariablePinNet);
 		}
 
 		FBPTerminal** ValueTerm = Context.LiteralHackMap.Find(ValuePin);
 		if (ValueTerm == nullptr)
 		{
-			ValueTerm = Context.NetMap.Find(FEdGraphUtilities::GetNetFromPin(ValuePin));
+			ValueTerm = Context.NetMap.Find(ValuePinNet);
 		}
 
 		if ((VariableTerm != nullptr) && (ValueTerm != nullptr))
 		{
-			FBlueprintCompiledStatement& Statement = Context.AppendStatementForNode(Node);
+			FBPTerminal* LHSTerm = *VariableTerm;
+			FBPTerminal* RHSTerm = *ValueTerm;
 
+			{
+				using namespace UE::KismetCompiler;
+
+				UK2Node_VariableSetRef* VarRefNode = CastChecked<UK2Node_VariableSetRef>(Node);
+				if (CastingUtils::FImplicitCastParams* CastParams = ImplicitCastMap.Find(VarRefNode))
+				{
+					CastingUtils::InsertImplicitCastStatement(Context, *CastParams, RHSTerm);
+					
+					RHSTerm = CastParams->TargetTerminal;
+
+					ImplicitCastMap.Remove(VarRefNode);
+
+					// We've manually registered our cast statement, so it can be removed from the context.
+					CastingUtils::RemoveRegisteredImplicitCast(Context, VariablePin);
+					CastingUtils::RemoveRegisteredImplicitCast(Context, ValuePin);
+				}
+			}
+
+			FBlueprintCompiledStatement& Statement = Context.AppendStatementForNode(Node);
 			Statement.Type = KCST_Assignment;
-			Statement.LHS = *VariableTerm;
-			Statement.RHS.Add(*ValueTerm);
+			Statement.LHS = LHSTerm;
+			Statement.RHS.Add(RHSTerm);
 
 			if (!(*VariableTerm)->IsTermWritable())
 			{
@@ -71,17 +154,7 @@ public:
 		}
 	}
 
-	virtual void Compile(FKismetFunctionContext& Context, UEdGraphNode* Node) override
-	{
-		UK2Node_VariableSetRef* VarRefNode = CastChecked<UK2Node_VariableSetRef>(Node);
-		UEdGraphPin* VarTargetPin = VarRefNode->GetTargetPin();
-		UEdGraphPin* ValuePin = VarRefNode->GetValuePin();
-
-		InnerAssignment(Context, Node, VarTargetPin, ValuePin);
-
-		// Generate the output impulse from this node
-		GenerateSimpleThenGoto(Context, *Node);
-	}
+	TMap<UK2Node_VariableSetRef*, UE::KismetCompiler::CastingUtils::FImplicitCastParams> ImplicitCastMap;
 };
 
 UK2Node_VariableSetRef::UK2Node_VariableSetRef(const FObjectInitializer& ObjectInitializer)
@@ -182,22 +255,34 @@ void UK2Node_VariableSetRef::NotifyPinConnectionListChanged(UEdGraphPin* Pin)
 		// If both target and value pins are unlinked, then reset types to wildcard
 		if(TargetPin->LinkedTo.Num() == 0 && ValuePin->LinkedTo.Num() == 0)
 		{
+			// collapse SubPins back into their parent if there are any
+			auto TryRecombineSubPins = [](UEdGraphPin* ParentPin)
+			{
+				if (!ParentPin->SubPins.IsEmpty())
+				{
+					const UEdGraphSchema_K2* K2Schema = GetDefault<UEdGraphSchema_K2>();
+					K2Schema->RecombinePin(ParentPin->SubPins[0]);
+				}
+			};
+			
 			// Pin disconnected...revert to wildcard
 			TargetPin->PinType.PinCategory = UEdGraphSchema_K2::PC_Wildcard;
 			TargetPin->PinType.PinSubCategory = NAME_None;
 			TargetPin->PinType.PinSubCategoryObject = nullptr;
 			TargetPin->BreakAllPinLinks();
+			TryRecombineSubPins(TargetPin);
 
 			ValuePin->PinType.PinCategory = UEdGraphSchema_K2::PC_Wildcard;
 			ValuePin->PinType.PinSubCategory = NAME_None;
 			ValuePin->PinType.PinSubCategoryObject = nullptr;
-			ValuePin->BreakAllPinLinks();			
+			ValuePin->BreakAllPinLinks();
+			TryRecombineSubPins(ValuePin);
 		}
 
 		CachedNodeTitle.MarkDirty();
 		
 		// Get the graph to refresh our title and default value info
-		GetGraph()->NotifyGraphChanged();
+		GetGraph()->NotifyNodeChanged(this);
 	}
 }
 

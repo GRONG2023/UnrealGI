@@ -15,6 +15,8 @@ FSkeletalMeshMerge
 #include "ReferenceSkeleton.h"
 #include "Components.h"
 
+#include "SkeletalMeshMerge.generated.h"
+
 class UMaterialInterface;
 class USkeletalMesh;
 class USkeletalMeshSocket;
@@ -76,27 +78,54 @@ struct FRefPoseOverride
 
 /** 
 * Info to map all the sections from a single source skeletal mesh to 
-* a final section entry int he merged skeletal mesh
+* a final section entry in the merged skeletal mesh
 */
+USTRUCT(BlueprintType)
 struct FSkelMeshMergeSectionMapping
 {
+	GENERATED_USTRUCT_BODY()
+	
 	/** indices to final section entries of the merged skel mesh */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Mesh Merge Parameters")
 	TArray<int32> SectionIDs;
+};
+
+USTRUCT(BlueprintType)
+struct FSkelMeshMergeMeshUVTransforms
+{
+	GENERATED_USTRUCT_BODY()
+
+	/** A list of how UVs should be transformed on a given mesh, where index represents a specific UV channel. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Mesh Merge Parameters")
+	TArray<FTransform> UVTransforms;
 };
 
 /** 
 * Info to map all the sections about how to transform their UVs
 */
-struct FSkelMeshMergeUVTransforms
+struct UE_DEPRECATED(5.0, "FSkelMeshMergeUVTransforms has been deprecated, use FSkelMeshMergeMeshUVTransforms instead") FSkelMeshMergeUVTransforms
 {
 	/** For each UV channel on each mesh, how the UVS should be transformed. */
 	TArray<TArray<FTransform>> UVTransformsPerMesh;
 };
 
 /** 
+* Info to map all the sections about how to transform their UVs
+*/
+USTRUCT(BlueprintType)
+struct FSkelMeshMergeUVTransformMapping
+{
+	GENERATED_USTRUCT_BODY()
+	
+	/** UV coordinates transform datam one entry for each Skeletal Mesh. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Mesh Merge Parameters")
+	TArray<FSkelMeshMergeMeshUVTransforms> UVTransformsPerMesh;
+};
+
+/** 
 * Utility for merging a list of skeletal meshes into a single mesh.
 */
-class ENGINE_API FSkeletalMeshMerge
+class FSkeletalMeshMerge
 {
 public:
 	/**
@@ -108,14 +137,30 @@ public:
     * @param bMeshNeedsCPUAccess - (optional) if the resulting mesh needs to be accessed by the CPU for any reason (e.g. for spawning particle effects).
 	* @param UVTransforms - optional array to transform the UVs in each mesh
 	*/
-	FSkeletalMeshMerge( 
+	ENGINE_API FSkeletalMeshMerge( 
 		USkeletalMesh* InMergeMesh, 
 		const TArray<USkeletalMesh*>& InSrcMeshList, 
 		const TArray<FSkelMeshMergeSectionMapping>& InForceSectionMapping,
 		int32 StripTopLODs,
         EMeshBufferAccess MeshBufferAccess=EMeshBufferAccess::Default,
-		FSkelMeshMergeUVTransforms* InSectionUVTransforms = nullptr
+		const FSkelMeshMergeUVTransformMapping* InSectionUVTransforms = nullptr
 		);
+
+	UE_DEPRECATED(5.0, "FSkelMeshMergeUVTransforms has been replaced with FSkelMeshMergeMeshUVTransforms, use different signature")
+	ENGINE_API FSkeletalMeshMerge( 
+    		USkeletalMesh* InMergeMesh, 
+    		const TArray<USkeletalMesh*>& InSrcMeshList, 
+    		const TArray<FSkelMeshMergeSectionMapping>& InForceSectionMapping,
+    		int32 StripTopLODs,
+            EMeshBufferAccess MeshBufferAccess,
+			PRAGMA_DISABLE_DEPRECATION_WARNINGS
+    		FSkelMeshMergeUVTransforms* InSectionUVTransforms
+    		PRAGMA_ENABLE_DEPRECATION_WARNINGS
+    		);
+
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS
+	FSkeletalMeshMerge(const FSkeletalMeshMerge&) = default;
+	ENGINE_API PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 	/**
 	 * Merge/Composite skeleton and meshes together from the list of source meshes.
@@ -129,14 +174,14 @@ public:
 	 * Use when the reference skeleton is needed prior to finalizing the merged meshes (do not use with DoMerge()).
 	 * @param RefPoseOverrides - An optional override for the merged skeleton's reference pose.
 	 */
-	void MergeSkeleton(const TArray<FRefPoseOverride>* RefPoseOverrides = nullptr);
+	ENGINE_API void MergeSkeleton(const TArray<FRefPoseOverride>* RefPoseOverrides = nullptr);
 
 	/**
 	 * Creates the merged mesh from the 'SrcMeshList' (note, this should only be called after MergeSkeleton()).
  	 * Use when the reference skeleton is needed prior to finalizing the merged meshes (do not use with DoMerge()).
 	 * @return 'true' if successful; 'false' otherwise.
 	 */
-	bool FinalizeMesh();
+	ENGINE_API bool FinalizeMesh();
 
 private:
 	/** Destination merged mesh */
@@ -168,7 +213,10 @@ private:
 	const TArray<FSkelMeshMergeSectionMapping>& ForceSectionMapping;
 
 	/** optional array to transform UVs in each source mesh */
-	const FSkelMeshMergeUVTransforms* SectionUVTransforms;
+	const FSkelMeshMergeUVTransformMapping* SectionUVTransforms;
+
+	UE_DEPRECATED(5.0, "Used to facilitate backwards compatibility with old constructor")
+	FSkelMeshMergeUVTransformMapping DummySectionUVTransforms;
 
 	/** Matches the Materials array in the final mesh - used for creating the right number of Material slots. */
 	TArray<int32>	MaterialIds;
@@ -229,7 +277,7 @@ private:
 	* @param BoneMapToMergedBoneMap - out of mapping from original bonemap to new merged bonemap 
 	* @param BoneMap - input bonemap to merge
 	*/
-	void MergeBoneMap( TArray<FBoneIndexType>& MergedBoneMap, TArray<FBoneIndexType>& BoneMapToMergedBoneMap, const TArray<FBoneIndexType>& BoneMap );
+	ENGINE_API void MergeBoneMap( TArray<FBoneIndexType>& MergedBoneMap, TArray<FBoneIndexType>& BoneMapToMergedBoneMap, const TArray<FBoneIndexType>& BoneMap );
 
 	/**
 	* Creates a new LOD model and adds the new merged sections to it. Modifies the MergedMesh.
@@ -243,80 +291,76 @@ private:
 	* @param NewSectionArray - out array to populate
 	* @param LODIdx - current LOD to process
 	*/
-	void GenerateNewSectionArray( TArray<FNewSectionInfo>& NewSectionArray, int32 LODIdx );
+	ENGINE_API void GenerateNewSectionArray( TArray<FNewSectionInfo>& NewSectionArray, int32 LODIdx );
 
 	/**
 	* (Re)initialize and merge skeletal mesh info from the list of source meshes to the merge mesh
 	* @return true if succeeded
 	*/
-	bool ProcessMergeMesh();
+	ENGINE_API bool ProcessMergeMesh();
 
 	/**
 	 * Returns the number of LODs that can be supported by the meshes in 'SourceMeshList'.
 	 */
-	int32 CalculateLodCount(const TArray<USkeletalMesh*>& SourceMeshList) const;
+	ENGINE_API int32 CalculateLodCount(const TArray<USkeletalMesh*>& SourceMeshList) const;
 
 	/**
 	 * Builds a new 'RefSkeleton' from the reference skeletons in the 'SourceMeshList'.
 	 */
-	static void BuildReferenceSkeleton(const TArray<USkeletalMesh*>& SourceMeshList, FReferenceSkeleton& RefSkeleton, const USkeleton* SkeletonAsset);
+	static ENGINE_API void BuildReferenceSkeleton(const TArray<USkeletalMesh*>& SourceMeshList, FReferenceSkeleton& RefSkeleton, const USkeleton* SkeletonAsset);
 
 	/**
 	 * Overrides the 'TargetSkeleton' bone poses with the bone poses specified in the 'PoseOverrides' array.
 	 */
-	static void OverrideReferenceSkeletonPose(const TArray<FRefPoseOverride>& PoseOverrides, FReferenceSkeleton& TargetSkeleton, const USkeleton* SkeletonAsset);
+	static ENGINE_API void OverrideReferenceSkeletonPose(const TArray<FRefPoseOverride>& PoseOverrides, FReferenceSkeleton& TargetSkeleton, const USkeleton* SkeletonAsset);
 
 	/**
 	 * Override the 'TargetSkeleton' bone pose with the pose from from the 'SourceSkeleton'.
 	 * @return 'true' if the override was successful; 'false' otherwise.
 	 */
-	static bool OverrideReferenceBonePose(int32 SourceBoneIndex, const FReferenceSkeleton& SourceSkeleton, FReferenceSkeletonModifier& TargetSkeleton);
+	static ENGINE_API bool OverrideReferenceBonePose(int32 SourceBoneIndex, const FReferenceSkeleton& SourceSkeleton, FReferenceSkeletonModifier& TargetSkeleton);
 
 	/**
 	 * Releases any resources the 'MergeMesh' is currently holding.
 	 */
-	void ReleaseResources(int32 Slack = 0);
+	ENGINE_API void ReleaseResources(int32 Slack = 0);
 
 	/**
 	 * Copies and adds the 'NewSocket' to the MergeMesh's MeshOnlySocketList only if the socket does not already exist.
 	 * @return 'true' if the socket is added; 'false' otherwise.
 	 */
-	bool AddSocket(const USkeletalMeshSocket* NewSocket, bool bIsSkeletonSocket);
+	ENGINE_API bool AddSocket(const USkeletalMeshSocket* NewSocket, bool bIsSkeletonSocket);
 
 	/**
 	 * Adds only the new sockets from the 'NewSockets' array to the 'ExistingSocketList'.
 	 */
-	void AddSockets(const TArray<USkeletalMeshSocket*>& NewSockets, bool bAreSkeletonSockets);
+	ENGINE_API void AddSockets(const TArray<USkeletalMeshSocket*>& NewSockets, bool bAreSkeletonSockets);
 
 	/**
 	 * Builds a new 'SocketList' from the sockets in the 'SourceMeshList'.
 	 */
-	void BuildSockets(const TArray<USkeletalMesh*>& SourceMeshList);
+	ENGINE_API void BuildSockets(const TArray<USkeletalMesh*>& SourceMeshList);
 
 	//void OverrideSockets(const TArray<FRefPoseOverride>& PoseOverrides);
 
 	/**
 	 * Override the corresponding 'MergeMesh' socket with 'SourceSocket'.
 	 */
-	void OverrideSocket(const USkeletalMeshSocket* SourceSocket);
+	ENGINE_API void OverrideSocket(const USkeletalMeshSocket* SourceSocket);
 
 	/**
 	 * Overrides the sockets attached to 'BoneName' with the corresponding socket in the 'SourceSocketList'.
 	 */
-	void OverrideBoneSockets(const FName& BoneName, const TArray<USkeletalMeshSocket*>& SourceSocketList);
+	ENGINE_API void OverrideBoneSockets(const FName& BoneName, const TArray<USkeletalMeshSocket*>& SourceSocketList);
 
 	/**
 	 * Overrides the sockets of overridden bones.
 	 */
-	void OverrideMergedSockets(const TArray<FRefPoseOverride>& PoseOverrides);
+	ENGINE_API void OverrideMergedSockets(const TArray<FRefPoseOverride>& PoseOverrides);
 
 	/*
 	 * Copy Vertex Buffer from Source LOD Model
 	 */
 	template<typename VertexDataType>
 	void CopyVertexFromSource(VertexDataType& DestVert, const FSkeletalMeshLODRenderData& SrcLODData, int32 SourceVertIdx, const FMergeSectionInfo& MergeSectionInfo);
-
-	/** Copy skin weight info from source LOD model - templatized per SourceLODModel extra bone influence */
-	template<typename SkinWeightType, bool bHasExtraBoneInfluences, typename BoneIndexType>
-	void CopyWeightFromSource(SkinWeightType& DestWeight, const FSkeletalMeshLODRenderData& SrcLODData, int32 SourceVertIdx, const FMergeSectionInfo& MergeSectionInfo);
 };

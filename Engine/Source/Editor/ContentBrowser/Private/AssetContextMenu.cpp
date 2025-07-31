@@ -1,27 +1,75 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "AssetContextMenu.h"
-#include "AssetData.h"
 
-#include "ToolMenus.h"
-#include "ContentBrowserMenuContexts.h"
-#include "ContentBrowserDataSource.h"
-
-#include "IAssetTools.h"
+#include "AssetDefinition.h"
+#include "AssetRegistry/AssetData.h"
 #include "AssetToolsModule.h"
-#include "ContentBrowserUtils.h"
-#include "SAssetView.h"
-#include "ContentBrowserModule.h"
-#include "EditorStyleSet.h"
-#include "HAL/FileManager.h"
-
-#include "ICollectionManager.h"
-#include "CollectionManagerModule.h"
+#include "AssetViewUtils.h"
 #include "CollectionAssetManagement.h"
-
-#include "Toolkits/GlobalEditorCommonCommands.h"
-#include "Framework/Commands/GenericCommands.h"
+#include "CollectionManagerModule.h"
+#include "CollectionManagerTypes.h"
+#include "Containers/Map.h"
+#include "Containers/UnrealString.h"
 #include "ContentBrowserCommands.h"
+#include "ContentBrowserDataSource.h"
+#include "ContentBrowserDelegates.h"
+#include "ContentBrowserItemData.h"
+#include "ContentBrowserMenuContexts.h"
+#include "ContentBrowserModule.h"
+#include "ContentBrowserSingleton.h"
+#include "ContentBrowserUtils.h"
+#include "Framework/Commands/GenericCommands.h"
+#include "Framework/Commands/UIAction.h"
+#include "Framework/Commands/UICommandInfo.h"
+#include "Framework/Commands/UICommandList.h"
+#include "Framework/MultiBox/MultiBoxExtender.h"
+#include "Framework/SlateDelegates.h"
+#include "HAL/IConsoleManager.h"
+#include "HAL/PlatformCrt.h"
+#include "HAL/PlatformStackWalk.h"
+#include "IAssetTools.h"
+#include "IAssetTypeActions.h"
+#include "ICollectionManager.h"
+#include "Internationalization/Internationalization.h"
+#include "Logging/MessageLog.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/Attribute.h"
+#include "Misc/NamePermissionList.h"
+#include "Misc/PathViews.h"
+#include "Misc/Paths.h"
+#include "Misc/StringBuilder.h"
+#include "Modules/ModuleManager.h"
+#include "SAssetView.h"
+#include "Styling/AppStyle.h"
+#include "Styling/SlateTypes.h"
+#include "Templates/Casts.h"
+#include "Templates/Tuple.h"
+#include "Templates/UnrealTemplate.h"
+#include "Textures/SlateIcon.h"
+#include "ToolMenu.h"
+#include "ToolMenuContext.h"
+#include "ToolMenuDelegates.h"
+#include "ToolMenuSection.h"
+#include "ToolMenus.h"
+#include "Toolkits/GlobalEditorCommonCommands.h"
+#include "UObject/Class.h"
+#include "UObject/Object.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/Package.h"
+#include "UObject/UObjectGlobals.h"
+#include "UObject/UnrealNames.h"
+#include "UObject/WeakObjectPtr.h"
+#include "UObject/WeakObjectPtrTemplates.h"
+#include "AssetDefinitionRegistry.h"
+#include "TelemetryRouter.h"
+#include "AssetRegistry/AssetRegistryHelpers.h"
+#include "Engine/AssetManager.h"
+#include "Misc/WarnIfAssetsLoadedInScope.h"
+
+class FMenuBuilder;
+class SWidget;
 
 #define LOCTEXT_NAMESPACE "ContentBrowser"
 
@@ -45,6 +93,8 @@ void FAssetContextMenu::BindCommands(TSharedPtr< FUICommandList >& Commands)
 
 TSharedRef<SWidget> FAssetContextMenu::MakeContextMenu(TArrayView<const FContentBrowserItem> InSelectedItems, const FSourcesData& InSourcesData, TSharedPtr< FUICommandList > InCommandList)
 {
+	FWarnIfAssetsLoadedInScope WarnIfAssetsLoaded;
+	
 	SetSelectedItems(InSelectedItems);
 	SourcesData = InSourcesData;
 
@@ -90,9 +140,7 @@ TSharedRef<SWidget> FAssetContextMenu::MakeContextMenu(TArrayView<const FContent
 	static const FName BaseMenuName("ContentBrowser.AssetContextMenu");
 	static const FName ItemContextMenuName("ContentBrowser.ItemContextMenu");
 	RegisterContextMenu(BaseMenuName);
-
-	TArray<UObject*> SelectedObjects;
-
+	
 	// Create menu hierarchy based on class hierarchy
 	FName MenuName = BaseMenuName;
 	{
@@ -100,52 +148,72 @@ TSharedRef<SWidget> FAssetContextMenu::MakeContextMenu(TArrayView<const FContent
 		// need to keep it here for now to build the correct menu name and register the correct extenders
 
 		// Objects must be loaded for this operation... for now
-		TArray<FString> ObjectPaths;
 		UContentBrowserDataSource* CommonDataSource = nullptr;
-		bool bKeepCheckingCommonDataSource = true;
-		for (const FContentBrowserItem& SelectedItem : SelectedItems)
 		{
-			if (bKeepCheckingCommonDataSource)
+			TArray<FAssetData> SelectedAssets;
+			bool bKeepCheckingCommonDataSource = true;
+			for (const FContentBrowserItem& SelectedItem : SelectedItems)
 			{
-				if (const FContentBrowserItemData* PrimaryInternalItem = SelectedItem.GetPrimaryInternalItem())
+				if (bKeepCheckingCommonDataSource)
 				{
-					if (UContentBrowserDataSource* OwnerDataSource = PrimaryInternalItem->GetOwnerDataSource())
+					if (const FContentBrowserItemData* PrimaryInternalItem = SelectedItem.GetPrimaryInternalItem())
 					{
-						if (CommonDataSource == nullptr)
+						if (UContentBrowserDataSource* OwnerDataSource = PrimaryInternalItem->GetOwnerDataSource())
 						{
-							CommonDataSource = OwnerDataSource;
-						}
-						else if (CommonDataSource != OwnerDataSource)
-						{
-							CommonDataSource = nullptr;
-							bKeepCheckingCommonDataSource = false;
+							if (CommonDataSource == nullptr)
+							{
+								CommonDataSource = OwnerDataSource;
+							}
+							else if (CommonDataSource != OwnerDataSource)
+							{
+								CommonDataSource = nullptr;
+								bKeepCheckingCommonDataSource = false;
+							}
 						}
 					}
 				}
+
+				FAssetData ItemAssetData;
+				if (SelectedItem.Legacy_TryGetAssetData(ItemAssetData))
+				{
+					SelectedAssets.Add(MoveTemp(ItemAssetData));
+				}
 			}
 
-			FAssetData ItemAssetData;
-			if (SelectedItem.Legacy_TryGetAssetData(ItemAssetData))
+			ContextObject->bCanBeModified = SelectedAssets.Num() == 0;
+			ContextObject->SelectedAssets = MoveTemp(SelectedAssets);
+		}
+		FAssetToolsModule& AssetToolsModule = FModuleManager::LoadModuleChecked<FAssetToolsModule>("AssetTools");
+		const TSharedRef<FPathPermissionList>& WritableFolderPermission = AssetToolsModule.Get().GetWritableFolderPermissionList();
+		
+		ContextObject->bContainsUnsupportedAssets = false;
+		for (const FContentBrowserItem& SelectedItem : SelectedItems)
+		{
+			if(!SelectedItem.IsSupported())
 			{
-				ObjectPaths.Add(ItemAssetData.ObjectPath.ToString());
+				ContextObject->bContainsUnsupportedAssets = true;
+				break;
 			}
 		}
 
-		FAssetToolsModule& AssetToolsModule = FModuleManager::LoadModuleChecked<FAssetToolsModule>("AssetTools");
-		const TSharedRef<FBlacklistPaths>& WritableFolderFilter = AssetToolsModule.Get().GetWritableFolderBlacklist();
+		const TArray<FAssetData>& SelectedAssets = ContextObject->SelectedAssets;
 
-		ContextObject->bCanBeModified = ObjectPaths.Num() == 0;
-
-		ContextObject->SelectedObjects.Reset();
-		if (ContentBrowserUtils::LoadAssetsIfNeeded(ObjectPaths, SelectedObjects) && SelectedObjects.Num() > 0)
+		if (SelectedAssets.Num() > 0 && SelectedAssets.Num() == SelectedItems.Num())
 		{
-			ContextObject->SelectedObjects.Append(SelectedObjects);
 
 			// Find common class for selected objects
-			UClass* CommonClass = SelectedObjects[0]->GetClass();
-			for (int32 ObjIdx = 1; ObjIdx < SelectedObjects.Num(); ++ObjIdx)
+			UClass* CommonClass = nullptr;
+			for (int32 ObjIdx = 0; ObjIdx < SelectedAssets.Num(); ++ObjIdx)
 			{
-				while (!SelectedObjects[ObjIdx]->IsA(CommonClass))
+				if (CommonClass == nullptr)
+				{
+					CommonClass = UAssetRegistryHelpers::FindAssetNativeClass(SelectedAssets[ObjIdx]);
+					continue;
+				}
+
+				// Update the CommonClass until we find a common shared class, ignore anything that's not native.
+				UClass* Class = UAssetRegistryHelpers::FindAssetNativeClass(SelectedAssets[ObjIdx]);
+				while (Class && !Class->IsChildOf(CommonClass))
 				{
 					CommonClass = CommonClass->GetSuperClass();
 				}
@@ -153,45 +221,77 @@ TSharedRef<SWidget> FAssetContextMenu::MakeContextMenu(TArrayView<const FContent
 			ContextObject->CommonClass = CommonClass;
 
 			ContextObject->bCanBeModified = true;
-
-			if (WritableFolderFilter->HasFiltering())
+			ContextObject->bHasCookedPackages = false;
+			for (const FAssetData& SelectedAsset : SelectedAssets)
 			{
-				for (const UObject* SelectedObject : SelectedObjects)
+				if (SelectedAsset.HasAnyPackageFlags(PKG_Cooked | PKG_FilterEditorOnly))
 				{
-					if (SelectedObject)
+					ContextObject->bCanBeModified = false;
+					ContextObject->bHasCookedPackages = true;
+					break;
+				}
+
+				if (WritableFolderPermission->HasFiltering() && !WritableFolderPermission->PassesStartsWithFilter(SelectedAsset.PackageName))
+				{
+					ContextObject->bCanBeModified = false;
+					break;
+				}
+
+				if (const UClass* AssetClass = SelectedAsset.GetClass())
+				{
+					if (AssetClass->IsChildOf<UClass>())
 					{
-						UPackage* SelectedObjectPackage = SelectedObject->GetOutermost();
-						if (SelectedObjectPackage && !WritableFolderFilter->PassesStartsWithFilter(SelectedObjectPackage->GetFName()))
+						ContextObject->bCanBeModified = false;
+						break;
+					}
+				}
+			}
+
+			// We can have a null common class if an asset is from unloaded plugin or an missing class.
+			if (CommonClass)
+			{
+				MenuName = UToolMenus::JoinMenuPaths(BaseMenuName, CommonClass->GetFName());
+
+				RegisterMenuHierarchy(CommonClass);
+
+				// Find asset actions for common class
+				ContextObject->CommonAssetDefinition = UAssetDefinitionRegistry::Get()->GetAssetDefinitionForClass(ContextObject->CommonClass);
+				PRAGMA_DISABLE_DEPRECATION_WARNINGS
+				ContextObject->CommonAssetTypeActions = AssetToolsModule.Get().GetAssetTypeActionsForClass(ContextObject->CommonClass).Pin();
+				PRAGMA_ENABLE_DEPRECATION_WARNINGS
+			}
+		}
+		else
+		{
+			if (CommonDataSource)
+			{
+				ContextObject->bCanBeModified = true;
+				ContextObject->bHasCookedPackages = false;
+
+				if (WritableFolderPermission->HasFiltering())
+				{
+					for (const FContentBrowserItem& SelectedItem : SelectedItems)
+					{
+						if (!WritableFolderPermission->PassesStartsWithFilter(SelectedItem.GetInternalPath()))
 						{
 							ContextObject->bCanBeModified = false;
 							break;
 						}
 					}
 				}
-			}
 
-			MenuName = UToolMenus::JoinMenuPaths(BaseMenuName, CommonClass->GetFName());
-
-			RegisterMenuHierarchy(CommonClass);
-
-			// Find asset actions for common class
-			TSharedPtr<IAssetTypeActions> CommonAssetTypeActions = AssetToolsModule.Get().GetAssetTypeActionsForClass(ContextObject->CommonClass).Pin();
-			if (CommonAssetTypeActions.IsValid() && CommonAssetTypeActions->HasActions(SelectedObjects))
-			{
-				ContextObject->CommonAssetTypeActions = CommonAssetTypeActions;
-			}
-		}
-		else if (SelectedObjects.Num() == 0)
-		{
-			if (CommonDataSource)
-			{
-				ContextObject->bCanBeModified = true;
-
-				if (WritableFolderFilter->HasFiltering())
+				for (const FAssetData& SelectedAsset : SelectedAssets)
 				{
-					for (const FContentBrowserItem& SelectedItem : SelectedItems)
+					if (SelectedAsset.HasAnyPackageFlags(PKG_Cooked | PKG_FilterEditorOnly))
 					{
-						if (!WritableFolderFilter->PassesStartsWithFilter(SelectedItem.GetVirtualPath()))
+						ContextObject->bCanBeModified = false;
+						ContextObject->bHasCookedPackages = true;
+						break;
+					}
+
+					if (const UClass* AssetClass = SelectedAsset.GetClass())
+					{
+						if (AssetClass->IsChildOf<UClass>())
 						{
 							ContextObject->bCanBeModified = false;
 							break;
@@ -216,6 +316,8 @@ TSharedRef<SWidget> FAssetContextMenu::MakeContextMenu(TArrayView<const FContent
 		DataContextObject->SelectedItems = SelectedItems;
 		DataContextObject->SelectedCollections = SourcesData.Collections;
 		DataContextObject->bCanBeModified = ContextObject->bCanBeModified;
+		DataContextObject->bHasCookedPackages = ContextObject->bHasCookedPackages;
+		DataContextObject->bContainsUnsupportedAssets = ContextObject->bContainsUnsupportedAssets;
 		DataContextObject->ParentWidget = AssetView;
 		DataContextObject->OnShowInPathsView = OnShowInPathsViewRequested;
 		DataContextObject->OnRefreshView = OnAssetViewRefreshRequested;
@@ -265,27 +367,44 @@ void FAssetContextMenu::RegisterContextMenu(const FName MenuName)
 		UToolMenu* Menu = ToolMenus->RegisterMenu(MenuName);
 		FToolMenuSection& Section = Menu->FindOrAddSection("GetAssetActions");
 
-		Section.AddDynamicEntry("GetActions", FNewToolMenuSectionDelegate::CreateLambda([](FToolMenuSection& InSection)
+		// TODO Remove when IAssetTypeActions is dead or fully deprecated.
 		{
-			UContentBrowserAssetContextMenuContext* Context = InSection.FindContext<UContentBrowserAssetContextMenuContext>();
-			if (Context && Context->CommonAssetTypeActions.IsValid())
+			// Note: Do  not use "GetActions" again when copying this code, otherwise "GetActions" menu entry will be overwritten
+			Section.AddDynamicEntry("GetActions", FNewToolMenuSectionDelegate::CreateLambda([](FToolMenuSection& InSection)
 			{
-				Context->CommonAssetTypeActions.Pin()->GetActions(Context->GetSelectedObjects(), InSection);
-			}
-		}));
+				UContentBrowserAssetContextMenuContext* Context = InSection.FindContext<UContentBrowserAssetContextMenuContext>();
+				PRAGMA_DISABLE_DEPRECATION_WARNINGS
+					if (Context && Context->CommonAssetTypeActions.IsValid() && Context->CommonAssetTypeActions.Pin()->ShouldCallGetActions())
+					{
+						TArray<UObject*> SelectedObjects = Context->LoadSelectedObjectsIfNeeded();						
+						//  It's possible for an unloaded object to be selected if the content browser is out of date, in that case it is unnecessary to call `GetActions`
+						if (SelectedObjects.Num() > 0)
+						{
+							Context->CommonAssetTypeActions.Pin()->GetActions(SelectedObjects, InSection);
+						}
+					}
+				PRAGMA_ENABLE_DEPRECATION_WARNINGS
+			}));
 
-		Section.AddDynamicEntry("GetActionsLegacy", FNewToolMenuDelegateLegacy::CreateLambda([](FMenuBuilder& MenuBuilder, UToolMenu* InMenu)
-		{
-			UContentBrowserAssetContextMenuContext* Context = InMenu->FindContext<UContentBrowserAssetContextMenuContext>();
-			if (Context && Context->CommonAssetTypeActions.IsValid())
+			Section.AddDynamicEntry("GetActionsLegacy", FNewToolMenuDelegateLegacy::CreateLambda([](FMenuBuilder& MenuBuilder, UToolMenu* InMenu)
 			{
-				Context->CommonAssetTypeActions.Pin()->GetActions(Context->GetSelectedObjects(), MenuBuilder);
-			}
-		}));
+				UContentBrowserAssetContextMenuContext* Context = InMenu->FindContext<UContentBrowserAssetContextMenuContext>();
+				PRAGMA_DISABLE_DEPRECATION_WARNINGS
+					if (Context && Context->CommonAssetTypeActions.IsValid() && Context->CommonAssetTypeActions.Pin()->ShouldCallGetActions())
+					{
+						TArray<UObject*> SelectedObjects = Context->LoadSelectedObjectsIfNeeded();
+						if (SelectedObjects.Num() > 0)
+						{
+							Context->CommonAssetTypeActions.Pin()->GetActions(SelectedObjects, MenuBuilder);
+						}
+					}
+				PRAGMA_ENABLE_DEPRECATION_WARNINGS
+			}));
+		}		
 
 		Menu->AddDynamicSection("AddMenuOptions", FNewToolMenuDelegate::CreateLambda([](UToolMenu* InMenu)
 		{
-			UContentBrowserAssetContextMenuContext* Context = InMenu->FindContext<UContentBrowserAssetContextMenuContext>();
+			const UContentBrowserAssetContextMenuContext* Context = InMenu->FindContext<UContentBrowserAssetContextMenuContext>();
 			if (Context && Context->AssetContextMenu.IsValid())
 			{
 				Context->AssetContextMenu.Pin()->AddMenuOptions(InMenu);
@@ -307,6 +426,12 @@ void FAssetContextMenu::AddMenuOptions(UToolMenu* InMenu)
 
 	// Add quick access to view commands
 	AddExploreMenuOptions(InMenu);
+
+	static const IConsoleVariable* EnablePublicAssetFeatureCVar = IConsoleManager::Get().FindConsoleVariable(TEXT("AssetTools.EnablePublicAssetFeature"));
+	if (EnablePublicAssetFeatureCVar && EnablePublicAssetFeatureCVar->GetBool())
+	{
+		AddPublicStateMenuOptions(InMenu);
+	}
 
 	// Add reference options
 	AddReferenceMenuOptions(InMenu);
@@ -380,7 +505,7 @@ bool FAssetContextMenu::AddCommonMenuOptions(UToolMenu* Menu)
 				"EditAsset",
 				LOCTEXT("EditAsset", "Edit..."),
 				LOCTEXT("EditAssetTooltip", "Opens the selected item(s) for edit."),
-				FSlateIcon(FEditorStyle::GetStyleSetName(), "ContentBrowser.AssetActions.Edit"),
+				FSlateIcon(FAppStyle::GetAppStyleSetName(), "Icons.Edit"),
 				FUIAction(
 					FExecuteAction::CreateSP(this, &FAssetContextMenu::ExecuteEditItems),
 					FCanExecuteAction::CreateSP(this, &FAssetContextMenu::CanExecuteEditItems)
@@ -390,29 +515,27 @@ bool FAssetContextMenu::AddCommonMenuOptions(UToolMenu* Menu)
 			// Rename
 			Section.AddMenuEntry(FGenericCommands::Get().Rename,
 				LOCTEXT("Rename", "Rename"),
-				LOCTEXT("RenameTooltip", "Rename the selected item."),
-				FSlateIcon(FEditorStyle::GetStyleSetName(), "ContentBrowser.AssetActions.Rename")
+				LOCTEXT("RenameTooltip", "Rename the selected item.")
 			);
 
 			// Duplicate
 			Section.AddMenuEntry(FGenericCommands::Get().Duplicate,
 				LOCTEXT("Duplicate", "Duplicate"),
 				LOCTEXT("DuplicateTooltip", "Create a copy of the selected item(s)."),
-				FSlateIcon(FEditorStyle::GetStyleSetName(), "ContentBrowser.AssetActions.Duplicate")
+				FSlateIcon(FAppStyle::GetAppStyleSetName(), "Icons.Duplicate")
 			);
 
 			// Save
 			Section.AddMenuEntry(FContentBrowserCommands::Get().SaveSelectedAsset,
 				LOCTEXT("SaveAsset", "Save"),
 				LOCTEXT("SaveAssetTooltip", "Saves the item to file."),
-				FSlateIcon(FEditorStyle::GetStyleSetName(), "Level.SaveIcon16x")
+				FSlateIcon(FAppStyle::GetAppStyleSetName(), "Icons.Save")
 			);
 
 			// Delete
 			Section.AddMenuEntry(FGenericCommands::Get().Delete,
 				LOCTEXT("Delete", "Delete"),
-				LOCTEXT("DeleteTooltip", "Delete the selected items."),
-				FSlateIcon(FEditorStyle::GetStyleSetName(), "ContentBrowser.AssetActions.Delete")
+				TAttribute<FText>::Create(TAttribute<FText>::FGetter::CreateSP(this, &FAssetContextMenu::GetDeleteToolTip))
 			);
 		}
 	}
@@ -422,6 +545,8 @@ bool FAssetContextMenu::AddCommonMenuOptions(UToolMenu* Menu)
 
 void FAssetContextMenu::AddExploreMenuOptions(UToolMenu* Menu)
 {
+	UContentBrowserDataMenuContext_FileMenu* Context = Menu->FindContext<UContentBrowserDataMenuContext_FileMenu>();
+
 	FToolMenuSection& Section = Menu->AddSection("AssetContextExploreMenuOptions", LOCTEXT("AssetContextExploreMenuOptionsHeading", "Explore"));
 	{
 		// Find in Content Browser
@@ -431,24 +556,94 @@ void FAssetContextMenu::AddExploreMenuOptions(UToolMenu* Menu)
 			LOCTEXT("ShowInFolderViewTooltip", "Selects the folder that contains this asset in the Content Browser Sources Panel.")
 			);
 
-		// Find in Explorer
-		Section.AddMenuEntry(
-			"FindInExplorer",
-			ContentBrowserUtils::GetExploreFolderText(),
-			LOCTEXT("FindInExplorerTooltip", "Finds this asset on disk"),
-			FSlateIcon(FEditorStyle::GetStyleSetName(), "SystemWideCommands.FindInContentBrowser"),
-			FUIAction(
-				FExecuteAction::CreateSP(this, &FAssetContextMenu::ExecuteFindInExplorer),
-				FCanExecuteAction::CreateSP(this, &FAssetContextMenu::CanExecuteFindInExplorer)
-			)
-		);
+		if (!Context->bHasCookedPackages)
+		{
+			// Find in Explorer
+			Section.AddMenuEntry(
+				"FindInExplorer",
+				ContentBrowserUtils::GetExploreFolderText(),
+				LOCTEXT("FindInExplorerTooltip", "Finds this asset on disk"),
+				FSlateIcon(FAppStyle::GetAppStyleSetName(), "ContentBrowser.ShowInExplorer"),
+				FUIAction(
+					FExecuteAction::CreateSP(this, &FAssetContextMenu::ExecuteFindInExplorer),
+					FCanExecuteAction::CreateSP(this, &FAssetContextMenu::CanExecuteFindInExplorer)
+				)
+			);
+		}
 	}
+}
+
+bool FAssetContextMenu::AddPublicStateMenuOptions(UToolMenu* Menu)
+{
+	if (!bCanExecutePublicAssetToggle && !bCanExecuteBulkSetPublicAsset)
+	{
+		return false;
+	}
+
+	UContentBrowserDataMenuContext_FileMenu* Context = Menu->FindContext<UContentBrowserDataMenuContext_FileMenu>();
+	{
+		FToolMenuSection& Section = Menu->AddSection("AssetPublicState", LOCTEXT("PublicStateHandling", "Asset State"));
+
+		if (SelectedFiles.Num() == 1 && bCanExecutePublicAssetToggle)
+		{
+			Section.AddMenuEntry(
+				"PublicAsset",
+				LOCTEXT("PublicAssetToggle", "Public Asset"),
+				LOCTEXT("PublicAssetToggleTooltip", "Sets the asset to be referencable by other Plugins"),
+				FSlateIcon(),
+				FUIAction(
+					FExecuteAction::CreateSP(this, &FAssetContextMenu::ExecutePublicAssetToggle),
+					FCanExecuteAction::CreateSP(this, &FAssetContextMenu::CanExecutePublicAssetToggle),
+					FIsActionChecked::CreateSP(this, &FAssetContextMenu::IsSelectedAssetPublic)
+				),
+				EUserInterfaceActionType::RadioButton
+			);
+
+			Section.AddMenuEntry(
+				"PrivateAsset",
+				LOCTEXT("SetPrivateAsset", "Private Asset"),
+				LOCTEXT("SetAssetPrivateTooltip", "Sets the asset so it can't be referenced by other Plugins"),
+				FSlateIcon(),
+				FUIAction(
+					FExecuteAction::CreateSP(this, &FAssetContextMenu::ExecutePublicAssetToggle),
+					FCanExecuteAction::CreateSP(this, &FAssetContextMenu::CanExecutePublicAssetToggle),
+					FIsActionChecked::CreateSP(this, &FAssetContextMenu::IsSelectedAssetPrivate)
+				),
+				EUserInterfaceActionType::RadioButton
+			);
+		}
+		else if (SelectedFiles.Num() > 1 && bCanExecuteBulkSetPublicAsset)
+		{
+			Section.AddMenuEntry(
+				"MarkSelectedAsPublic",
+				LOCTEXT("MarkSelectedAsPublic", "Mark Selected As Public"),
+				LOCTEXT("MarkSelectedAsPublicTooltip", "Sets all selected assets to be publicly available for reference by other plugins"),
+				FSlateIcon(FAppStyle::GetAppStyleSetName(), "ContentBrowser.AssetActions.PublicAssetToggle"),
+				FUIAction(
+					FExecuteAction::CreateSP(this, &FAssetContextMenu::ExecuteBulkSetPublicAsset),
+					FCanExecuteAction::CreateSP(this, &FAssetContextMenu::CanExecuteBulkSetPublicAsset)
+				)
+			);
+
+			Section.AddMenuEntry(
+				"MarkSelectedAsPrivate",
+				LOCTEXT("MarkSelectedAsPrivate", "Mark Selected As Private"),
+				LOCTEXT("MarkSelectedAsPrivateTooltip", "Sets all selected assets to be private and unavailable for reference by other plugins"),
+				FSlateIcon(FAppStyle::GetAppStyleSetName(), "ContentBrowser.AssetActions.PublicAssetToggle"),
+				FUIAction(
+					FExecuteAction::CreateSP(this, &FAssetContextMenu::ExecuteBulkUnsetPublicAsset),
+					FCanExecuteAction::CreateSP(this, &FAssetContextMenu::CanExecuteBulkSetPublicAsset)
+				)
+			);
+		}
+	}
+
+	return true;
 }
 
 bool FAssetContextMenu::AddReferenceMenuOptions(UToolMenu* Menu)
 {
 	UContentBrowserDataMenuContext_FileMenu* Context = Menu->FindContext<UContentBrowserDataMenuContext_FileMenu>();
-
 	{
 		FToolMenuSection& Section = Menu->AddSection("AssetContextReferences", LOCTEXT("ReferencesMenuHeading", "References"));
 
@@ -456,17 +651,17 @@ bool FAssetContextMenu::AddReferenceMenuOptions(UToolMenu* Menu)
 			"CopyReference",
 			LOCTEXT("CopyReference", "Copy Reference"),
 			LOCTEXT("CopyReferenceTooltip", "Copies reference paths for the selected assets to the clipboard."),
-			FSlateIcon(),
+			FSlateIcon(FAppStyle::GetAppStyleSetName(), "GenericCommands.Copy"),
 			FUIAction( FExecuteAction::CreateSP( this, &FAssetContextMenu::ExecuteCopyReference ) )
 			);
 	
-		if (Context->bCanBeModified)
+		if (!Context->bHasCookedPackages)
 		{
 			Section.AddMenuEntry(
 				"CopyFilePath",
 				LOCTEXT("CopyFilePath", "Copy File Path"),
 				LOCTEXT("CopyFilePathTooltip", "Copies the file paths on disk for the selected assets to the clipboard."),
-				FSlateIcon(),
+				FSlateIcon(FAppStyle::GetAppStyleSetName(), "GenericCommands.Copy"),
 				FUIAction(FExecuteAction::CreateSP(this, &FAssetContextMenu::ExecuteCopyFilePath))
 			);
 		}
@@ -480,13 +675,13 @@ bool FAssetContextMenu::AddAssetTypeMenuOptions(UToolMenu* Menu)
 	bool bAnyTypeOptions = false;
 
 	UContentBrowserAssetContextMenuContext* Context = Menu->FindContext<UContentBrowserAssetContextMenuContext>();
-	if (Context && Context->SelectedObjects.Num() > 0)
+	if (Context && Context->SelectedAssets.Num() > 0)
 	{
 		// Label "GetAssetActions" section
 		FToolMenuSection& Section = Menu->FindOrAddSection("GetAssetActions");
-		if (Context->CommonAssetTypeActions.IsValid())
+		if (Context->CommonAssetDefinition)
 		{
-			Section.Label = FText::Format(NSLOCTEXT("AssetTools", "AssetSpecificOptionsMenuHeading", "{0} Actions"), Context->CommonAssetTypeActions.Pin()->GetName());
+			Section.Label = FText::Format(NSLOCTEXT("AssetTools", "AssetSpecificOptionsMenuHeading", "{0} Actions"), Context->CommonAssetDefinition->GetAssetDisplayName());
 		}
 		else if (Context->CommonClass)
 		{
@@ -561,7 +756,7 @@ bool FAssetContextMenu::AddCollectionMenuOptions(UToolMenu* Menu)
 							), 
 						EUserInterfaceActionType::ToggleButton,
 						false,
-						FSlateIcon(FEditorStyle::GetStyleSetName(), ECollectionShareType::GetIconStyleName(AvailableCollection.Type))
+						FSlateIcon(FAppStyle::GetAppStyleSetName(), ECollectionShareType::GetIconStyleName(AvailableCollection.Type))
 						);
 				}
 				else
@@ -570,7 +765,7 @@ bool FAssetContextMenu::AddCollectionMenuOptions(UToolMenu* Menu)
 						NAME_None,
 						FText::FromName(AvailableCollection.Name), 
 						FText::GetEmpty(), 
-						FSlateIcon(FEditorStyle::GetStyleSetName(), ECollectionShareType::GetIconStyleName(AvailableCollection.Type)), 
+						FSlateIcon(FAppStyle::GetAppStyleSetName(), ECollectionShareType::GetIconStyleName(AvailableCollection.Type)),
 						FUIAction(
 							FExecuteAction::CreateStatic(&FManageCollectionsContextMenu::OnCollectionClicked, QuickAssetManagement, AvailableCollection),
 							FCanExecuteAction::CreateStatic(&FManageCollectionsContextMenu::IsCollectionEnabled, QuickAssetManagement, AvailableCollection),
@@ -595,15 +790,42 @@ bool FAssetContextMenu::AddCollectionMenuOptions(UToolMenu* Menu)
 
 		static void OnCollectionClicked(TSharedRef<FCollectionAssetManagement> QuickAssetManagement, FCollectionNameType InCollectionKey)
 		{
+			const double BeginTimeSec = FPlatformTime::Seconds();
+			const int32 ObjectCount = QuickAssetManagement->GetCurrentAssetCount();
+			
 			// The UI actions don't give you the new check state, so we need to emulate the behavior of SCheckBox
 			// Basically, checked will transition to unchecked (removing items), and anything else will transition to checked (adding items)
-			if (GetCollectionCheckState(QuickAssetManagement, InCollectionKey) == ECheckBoxState::Checked)
+			const bool RemoveFromCollection = GetCollectionCheckState(QuickAssetManagement, InCollectionKey) == ECheckBoxState::Checked;
+			if (RemoveFromCollection)
 			{
 				QuickAssetManagement->RemoveCurrentAssetsFromCollection(InCollectionKey);
 			}
 			else
 			{
 				QuickAssetManagement->AddCurrentAssetsToCollection(InCollectionKey);
+			}
+
+			const double DurationSec = FPlatformTime::Seconds() - BeginTimeSec;
+			
+			{
+				if (RemoveFromCollection)
+				{
+					FAssetRemovedFromCollectionTelemetryEvent AssetRemoved;
+					AssetRemoved.DurationSec = DurationSec;
+					AssetRemoved.NumRemoved = ObjectCount;
+					AssetRemoved.CollectionShareType = InCollectionKey.Type;
+					AssetRemoved.Workflow = ECollectionTelemetryAssetRemovedWorkflow::ContextMenu;
+					FTelemetryRouter::Get().ProvideTelemetry(AssetRemoved);
+				}
+				else
+				{
+					FAssetAddedToCollectionTelemetryEvent AssetAdded;
+					AssetAdded.DurationSec = DurationSec;
+					AssetAdded.NumAdded = ObjectCount;
+					AssetAdded.CollectionShareType = InCollectionKey.Type;
+					AssetAdded.Workflow = ECollectionTelemetryAssetAddedWorkflow::ContextMenu;
+					FTelemetryRouter::Get().ProvideTelemetry(AssetAdded);
+				}
 			}
 		}
 	};
@@ -619,10 +841,10 @@ bool FAssetContextMenu::AddCollectionMenuOptions(UToolMenu* Menu)
 	{
 		TSharedRef<FCollectionAssetManagement> QuickAssetManagement = MakeShared<FCollectionAssetManagement>();
 
-		TArray<FName> SelectedItemCollectionIds;
+		TArray<FSoftObjectPath> SelectedItemCollectionIds;
 		for (const FContentBrowserItem& SelectedItem : SelectedFiles)
 		{
-			FName ItemCollectionId;
+			FSoftObjectPath ItemCollectionId;
 			if (SelectedItem.TryGetCollectionId(ItemCollectionId))
 			{
 				SelectedItemCollectionIds.Add(ItemCollectionId);
@@ -634,7 +856,9 @@ bool FAssetContextMenu::AddCollectionMenuOptions(UToolMenu* Menu)
 			"ManageCollections",
 			LOCTEXT("ManageCollections", "Manage Collections"),
 			FText::Format(LOCTEXT("ManageCollections_ToolTip", "Manage the collections that the selected {0}|plural(one=item belongs, other=items belong) to."), SelectedFiles.Num()),
-			FNewToolMenuDelegate::CreateStatic(&FManageCollectionsContextMenu::CreateManageCollectionsSubMenu, QuickAssetManagement)
+			FNewToolMenuDelegate::CreateStatic(&FManageCollectionsContextMenu::CreateManageCollectionsSubMenu, QuickAssetManagement),
+			false, // default value
+			FSlateIcon(FAppStyle::GetAppStyleSetName(), "ContentBrowser.Collections")
 			);
 
 		bHasAddedItems = true;
@@ -670,14 +894,7 @@ void FAssetContextMenu::ExecuteSyncToAssetTree()
 
 void FAssetContextMenu::ExecuteFindInExplorer()
 {
-	for (const FContentBrowserItem& SelectedItem : SelectedFiles)
-	{
-		FString ItemFilename;
-		if (SelectedItem.GetItemPhysicalPath(ItemFilename) && FPaths::FileExists(ItemFilename))
-		{
-			FPlatformProcess::ExploreFolder(*IFileManager::Get().ConvertToAbsolutePathForExternalAppForRead(*ItemFilename));
-		}
-	}
+	ContentBrowserUtils::ExploreFolders(SelectedFiles, AssetView.Pin().ToSharedRef());
 }
 
 bool FAssetContextMenu::CanExecuteEditItems() const
@@ -700,7 +917,7 @@ void FAssetContextMenu::ExecuteEditItems()
 
 void FAssetContextMenu::ExecuteSaveAsset()
 {
-	const EContentBrowserItemSaveFlags SaveFlags = EContentBrowserItemSaveFlags::SaveOnlyIfLoaded;
+	const EContentBrowserItemSaveFlags SaveFlags = EContentBrowserItemSaveFlags::None;
 
 	// Batch these by their data sources
 	TMap<UContentBrowserDataSource*, TArray<FContentBrowserItemData>> SourcesAndItems;
@@ -838,6 +1055,125 @@ FReply FAssetContextMenu::ExecuteDeleteFolderConfirmed()
 	return FReply::Handled();
 }
 
+void FAssetContextMenu::ExecutePublicAssetToggle()
+{
+	// Toggle selected files public asset flag
+	if (ensure(SelectedFiles.Num() == 1))
+	{
+		FAssetData ItemAssetData;
+		if (SelectedFiles[0].Legacy_TryGetAssetData(ItemAssetData))
+		{
+			UPackage* ItemAssetPackage = ItemAssetData.GetPackage();
+
+			if (!ItemAssetPackage)
+			{
+				return;
+			}
+
+			if (ItemAssetPackage->IsExternallyReferenceable())
+			{
+				ExecuteBulkUnsetPublicAsset();
+				return;
+			}
+			else
+			{
+				ItemAssetPackage->SetIsExternallyReferenceable(true);
+			}
+
+			ItemAssetPackage->Modify();
+
+			OnAssetViewRefreshRequested.ExecuteIfBound();
+		}
+	}
+}
+
+bool FAssetContextMenu::CanExecutePublicAssetToggle()
+{
+	return bCanExecutePublicAssetToggle;
+}
+
+void FAssetContextMenu::ExecuteBulkSetPublicAsset()
+{
+	for (const FContentBrowserItem& SelectedItem : SelectedFiles)
+	{
+		FAssetData ItemAssetData;
+		if (SelectedItem.Legacy_TryGetAssetData(ItemAssetData))
+		{
+			UPackage* ItemAssetPackage = ItemAssetData.GetPackage();
+
+			if (!ItemAssetPackage)
+			{
+				continue;
+			}
+
+			if (!ItemAssetPackage->IsExternallyReferenceable())
+			{
+				ItemAssetPackage->SetIsExternallyReferenceable(true);
+
+				ItemAssetPackage->Modify();
+			}
+		}
+	}
+
+	OnAssetViewRefreshRequested.ExecuteIfBound();
+}
+
+void FAssetContextMenu::ExecuteBulkUnsetPublicAsset()
+{
+	// Batch these by their data sources
+	TMap<UContentBrowserDataSource*, TArray<FContentBrowserItemData>> SourcesAndItems;
+	for (const FContentBrowserItem& SelectedItem : SelectedFiles)
+	{
+		FContentBrowserItem::FItemDataArrayView ItemDataArray = SelectedItem.GetInternalItems();
+		for (const FContentBrowserItemData& ItemData : ItemDataArray)
+		{
+			if (UContentBrowserDataSource* ItemDataSource = ItemData.GetOwnerDataSource())
+			{
+				FText PrivateErrorMsg;
+				if (ItemDataSource->CanPrivatizeItem(ItemData, &PrivateErrorMsg))
+				{
+					TArray<FContentBrowserItemData>& ItemsForSource = SourcesAndItems.FindOrAdd(ItemDataSource);
+					ItemsForSource.Add(ItemData);
+				}
+				else
+				{
+					AssetViewUtils::ShowErrorNotifcation(PrivateErrorMsg);
+				}
+			}
+		}
+	}
+
+	for (const auto& SourceAndItemsPair : SourcesAndItems)
+	{
+		SourceAndItemsPair.Key->BulkPrivatizeItems(SourceAndItemsPair.Value);
+	}
+
+	OnAssetViewRefreshRequested.ExecuteIfBound();
+}
+
+bool FAssetContextMenu::CanExecuteBulkSetPublicAsset()
+{
+	return bCanExecuteBulkSetPublicAsset;
+}
+
+bool FAssetContextMenu::IsSelectedAssetPublic()
+{
+	if (ensure(SelectedFiles.Num() == 1))
+	{
+		FAssetData ItemAssetData;
+		if (SelectedFiles[0].Legacy_TryGetAssetData(ItemAssetData))
+		{
+			return !(ItemAssetData.PackageFlags & PKG_NotExternallyReferenceable);
+		}
+	}
+	return true;
+}
+
+bool FAssetContextMenu::IsSelectedAssetPrivate()
+{
+	return !IsSelectedAssetPublic();
+}
+
 void FAssetContextMenu::ExecuteCopyReference()
 {
 	if (SelectedFiles.Num() > 0)
@@ -858,10 +1194,10 @@ void FAssetContextMenu::ExecuteRemoveFromCollection()
 {
 	if ( ensure(SourcesData.Collections.Num() == 1) )
 	{
-		TArray<FName> SelectedItemCollectionIds;
+		TArray<FSoftObjectPath> SelectedItemCollectionIds;
 		for (const FContentBrowserItem& SelectedItem : SelectedFiles)
 		{
-			FName ItemCollectionId;
+			FSoftObjectPath ItemCollectionId;
 			if (SelectedItem.TryGetCollectionId(ItemCollectionId))
 			{
 				SelectedItemCollectionIds.Add(ItemCollectionId);
@@ -873,8 +1209,17 @@ void FAssetContextMenu::ExecuteRemoveFromCollection()
 			FCollectionManagerModule& CollectionManagerModule = FCollectionManagerModule::GetModule();
 
 			const FCollectionNameType& Collection = SourcesData.Collections[0];
+			const double BeginTimeSec = FPlatformTime::Seconds();
 			CollectionManagerModule.Get().RemoveFromCollection(Collection.Name, Collection.Type, SelectedItemCollectionIds);
+			const double DurationSec = FPlatformTime::Seconds() - BeginTimeSec;
 			OnAssetViewRefreshRequested.ExecuteIfBound();
+
+			FAssetRemovedFromCollectionTelemetryEvent AssetRemoved;
+			AssetRemoved.DurationSec = DurationSec;
+			AssetRemoved.NumRemoved = SelectedItemCollectionIds.Num();
+			AssetRemoved.CollectionShareType = Collection.Type;
+			AssetRemoved.Workflow = ECollectionTelemetryAssetRemovedWorkflow::ContextMenu;
+			FTelemetryRouter::Get().ProvideTelemetry(AssetRemoved);
 		}
 	}
 }
@@ -914,12 +1259,23 @@ bool FAssetContextMenu::CanExecuteDelete() const
 	return ContentBrowserUtils::CanDeleteFromAssetView(AssetView);
 }
 
+FText FAssetContextMenu::GetDeleteToolTip() const
+{
+	FText ErrorMessage;
+	if (!ContentBrowserUtils::CanDeleteFromAssetView(AssetView, &ErrorMessage) && !ErrorMessage.IsEmpty())
+	{
+		return ErrorMessage;
+	}
+
+	return LOCTEXT("DeleteTooltip", "Delete the selected items.");
+}
+
 bool FAssetContextMenu::CanExecuteSaveAsset() const
 {
 	bool bCanSave = false;
 	for (const FContentBrowserItem& SelectedItem : SelectedFiles)
 	{
-		bCanSave |= SelectedItem.CanSave(EContentBrowserItemSaveFlags::SaveOnlyIfLoaded);
+		bCanSave |= SelectedItem.CanSave(EContentBrowserItemSaveFlags::None);
 	}
 	return bCanSave;
 }
@@ -927,15 +1283,46 @@ bool FAssetContextMenu::CanExecuteSaveAsset() const
 void FAssetContextMenu::CacheCanExecuteVars()
 {
 	bCanExecuteFindInExplorer = false;
+	bCanExecutePublicAssetToggle = false;
+	bCanExecuteBulkSetPublicAsset = true;
 
 	// Selection must contain at least one file that has exists on disk
 	for (const FContentBrowserItem& SelectedItem : SelectedFiles)
 	{
 		FString ItemFilename;
-		if (SelectedItem.GetItemPhysicalPath(ItemFilename) && FPaths::FileExists(ItemFilename))
+		if (!bCanExecuteFindInExplorer && SelectedItem.GetItemPhysicalPath(ItemFilename) && FPaths::FileExists(ItemFilename))
 		{
 			bCanExecuteFindInExplorer = true;
-			break;
+		}
+		
+		bool bCanChangeAssetPublicState = SelectedItem.CanEdit();
+		if (bCanChangeAssetPublicState)
+		{
+			FNameBuilder ItemVirtualPath(SelectedItem.GetVirtualPath());
+			bCanChangeAssetPublicState = FContentBrowserSingleton::Get().IsShowingPrivateContent(FPathViews::GetPath(ItemVirtualPath));
+		}
+		if (bCanChangeAssetPublicState)
+		{
+			const FNameBuilder ItemInternalPath(SelectedItem.GetInternalPath());
+			const FStringView AssetPath(ItemInternalPath);
+
+			if (!IAssetTools::Get().CanAssetBePublic(AssetPath))
+			{
+				const FAssetData AssetData = IAssetRegistry::GetChecked().GetAssetByObjectPath(FSoftObjectPath(ItemInternalPath));
+				if (!AssetData.IsValid() || AssetData.HasAnyPackageFlags(PKG_NotExternallyReferenceable))
+				{
+					bCanChangeAssetPublicState = false;
+				}
+			}
+		}
+
+		if (bCanChangeAssetPublicState)
+		{
+			bCanExecutePublicAssetToggle = true;
+		}
+		else
+		{
+			bCanExecuteBulkSetPublicAsset = false;
 		}
 	}
 }

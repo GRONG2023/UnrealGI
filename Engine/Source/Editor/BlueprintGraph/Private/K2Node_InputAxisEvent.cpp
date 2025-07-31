@@ -1,16 +1,32 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "K2Node_InputAxisEvent.h"
-#include "GameFramework/Actor.h"
-#include "GameFramework/InputSettings.h"
-#include "Kismet2/BlueprintEditorUtils.h"
-#include "Editor.h"
-#include "Kismet2/CompilerResultsLog.h"
-#include "BlueprintNodeSpawner.h"
-#include "EditorCategoryUtils.h"
-#include "Engine/InputAxisDelegateBinding.h"
+
 #include "BlueprintActionDatabase.h"
 #include "BlueprintActionDatabaseRegistrar.h"
+#include "BlueprintNodeSpawner.h"
+#include "Containers/Array.h"
+#include "Containers/UnrealString.h"
+#include "Delegates/Delegate.h"
+#include "EdGraph/EdGraph.h"
+#include "EdGraphSchema_K2.h"
+#include "Editor.h"
+#include "EditorCategoryUtils.h"
+#include "Engine/Blueprint.h"
+#include "Engine/DynamicBlueprintBinding.h"
+#include "Engine/InputAxisDelegateBinding.h"
+#include "Engine/MemberReference.h"
+#include "GameFramework/InputSettings.h"
+#include "HAL/PlatformCrt.h"
+#include "Internationalization/Internationalization.h"
+#include "Kismet2/BlueprintEditorUtils.h"
+#include "Kismet2/CompilerResultsLog.h"
+#include "Misc/AssertionMacros.h"
+#include "Serialization/Archive.h"
+#include "Templates/Casts.h"
+#include "Templates/SubclassOf.h"
+#include "UObject/Class.h"
+#include "UObject/ObjectVersion.h"
 
 #define LOCTEXT_NAMESPACE "K2Node_InputAxisEvent"
 
@@ -30,7 +46,7 @@ void UK2Node_InputAxisEvent::Serialize(FArchive& Ar)
 
 	if(Ar.IsLoading())
 	{
-		if(Ar.UE4Ver() < VER_UE4_K2NODE_EVENT_MEMBER_REFERENCE && EventSignatureName_DEPRECATED.IsNone() && EventSignatureClass_DEPRECATED == nullptr)
+		if(Ar.UEVer() < VER_UE4_K2NODE_EVENT_MEMBER_REFERENCE && EventSignatureName_DEPRECATED.IsNone() && EventSignatureClass_DEPRECATED == nullptr)
 		{
 			EventReference.SetExternalDelegateMember(TEXT("InputAxisHandlerDynamicSignature__DelegateSignature"));
 		}
@@ -41,7 +57,7 @@ void UK2Node_InputAxisEvent::PostLoad()
 {
 	Super::PostLoad();
 
-	if (GetLinkerUE4Version() < VER_UE4_BLUEPRINT_INPUT_BINDING_OVERRIDES)
+	if (GetLinkerUEVersion() < VER_UE4_BLUEPRINT_INPUT_BINDING_OVERRIDES)
 	{
 		// Don't change existing behaviors
 		bOverrideParentBinding = false;
@@ -123,7 +139,10 @@ bool UK2Node_InputAxisEvent::IsCompatibleWithGraph(const UEdGraph* TargetGraph) 
 	UBlueprint* Blueprint = FBlueprintEditorUtils::FindBlueprintForGraph(TargetGraph);
 	if (Blueprint && Blueprint->SkeletonGeneratedClass)
 	{
-		bIsCompatible = Blueprint->ParentClass->IsChildOf(AActor::StaticClass());
+		UEdGraphSchema_K2 const* K2Schema = Cast<UEdGraphSchema_K2>(TargetGraph->GetSchema());
+		bool const bIsConstructionScript = (K2Schema != nullptr) ? UEdGraphSchema_K2::IsConstructionScript(TargetGraph) : false;
+		
+		bIsCompatible = Blueprint && Blueprint->SupportsInputEvents() && !bIsConstructionScript;
 	}
 
 	return bIsCompatible && Super::IsCompatibleWithGraph(TargetGraph);

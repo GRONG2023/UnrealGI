@@ -2,16 +2,22 @@
 
 #pragma once
 
+#include "Containers/Array.h"
 #include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
 #include "EdGraph/EdGraph.h"
+#include "EdGraph/EdGraphNode.h"
+#include "HAL/Platform.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/UObjectGlobals.h"
+
 #include "BehaviorTreeDecoratorGraph.generated.h"
 
 class UBehaviorTreeDecoratorGraphNode;
 class UEdGraphPin;
+class UObject;
 
 UCLASS()
-class UBehaviorTreeDecoratorGraph : public UEdGraph
+class BEHAVIORTREEEDITOR_API UBehaviorTreeDecoratorGraph : public UEdGraph
 {
 	GENERATED_UCLASS_BODY()
 

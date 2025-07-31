@@ -1,24 +1,50 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "BlueprintFunctionNodeSpawner.h"
-#include "GameFramework/Actor.h"
+
+#include "BlueprintActionFilter.h"
+#include "BlueprintEditorSettings.h"
+#include "BlueprintNodeSpawnerUtils.h"
+#include "BlueprintNodeTemplateCache.h"
+#include "BlueprintTypePromotion.h"
+#include "BlueprintVariableNodeSpawner.h"
+#include "Containers/Array.h"
+#include "Containers/Set.h"
+#include "Containers/UnrealString.h"
+#include "Delegates/Delegate.h"
+#include "EdGraph/EdGraphNode.h"
+#include "EdGraph/EdGraphPin.h"
 #include "EdGraphSchema_K2.h"
-#include "K2Node_CallFunction.h"
+#include "EditorCategoryUtils.h"
+#include "Engine/Blueprint.h"
+#include "Engine/MemberReference.h"
+#include "GameFramework/Actor.h"
+#include "HAL/Platform.h"
+#include "Internationalization/Internationalization.h"
+#include "Internationalization/Text.h"
 #include "K2Node_CallArrayFunction.h"
 #include "K2Node_CallDataTableFunction.h"
+#include "K2Node_CallFunction.h"
 #include "K2Node_CallFunctionOnMember.h"
 #include "K2Node_CallMaterialParameterCollectionFunction.h"
 #include "K2Node_CommutativeAssociativeBinaryOperator.h"
 #include "K2Node_Literal.h"
+#include "K2Node_PromotableOperator.h"
 #include "K2Node_VariableGet.h"
-#include "BlueprintVariableNodeSpawner.h"
-#include "BlueprintNodeTemplateCache.h"
-#include "EditorCategoryUtils.h"
-#include "ObjectEditorUtils.h"
-#include "BlueprintNodeSpawnerUtils.h"
-#include "BlueprintEditorSettings.h"
-#include "SNodePanel.h"
 #include "Kismet2/BlueprintEditorUtils.h"
+#include "Misc/AssertionMacros.h"
+#include "ObjectEditorUtils.h"
+#include "SNodePanel.h"
+#include "Templates/Casts.h"
+#include "Textures/SlateIcon.h"
+#include "UObject/Class.h"
+#include "UObject/Field.h"
+#include "UObject/NameTypes.h"
+#include "UObject/Object.h"
+#include "UObject/Package.h"
+#include "UObject/Script.h"
+#include "UObject/UnrealType.h"
+#include "UObject/WeakObjectPtrTemplates.h"
 
 #define LOCTEXT_NAMESPACE "BlueprintFunctionNodeSpawner"
 
@@ -188,8 +214,14 @@ UBlueprintFunctionNodeSpawner* UBlueprintFunctionNodeSpawner::Create(UFunction c
 	bool const bIsMaterialParamCollectionFunc = Function->HasMetaData(FBlueprintMetadata::MD_MaterialParameterCollectionFunction);
 	bool const bIsDataTableFunc = Function->HasMetaData(FBlueprintMetadata::MD_DataTablePin);
 
+	bool const bIsPromotableFunction = TypePromoDebug::IsTypePromoEnabled() && FTypePromotion::IsFunctionPromotionReady(Function);
+
 	TSubclassOf<UK2Node_CallFunction> NodeClass;
-	if (bIsCommutativeAssociativeBinaryOp && bIsPure)
+	if (bIsPromotableFunction)
+	{
+		NodeClass = UK2Node_PromotableOperator::StaticClass();
+	}
+	else if(bIsCommutativeAssociativeBinaryOp && bIsPure)
 	{
 		NodeClass = UK2Node_CommutativeAssociativeBinaryOperator::StaticClass();
 	}
@@ -226,6 +258,21 @@ UBlueprintFunctionNodeSpawner* UBlueprintFunctionNodeSpawner::Create(TSubclassOf
 	// Constructing the Spawner
 	//--------------------------------------
 
+	bool const bIsPromotableFunction =
+		TypePromoDebug::IsTypePromoEnabled() &&
+		FTypePromotion::IsFunctionPromotionReady(Function);
+
+	FName OpName = FTypePromotion::GetOpNameFromFunction(Function);
+
+	// If a spawner for this operator has been created already, than just return that
+	if (bIsPromotableFunction && FTypePromotion::IsOperatorSpawnerRegistered(Function))
+	{
+		if (UBlueprintFunctionNodeSpawner* OpSpawner = FTypePromotion::GetOperatorSpawner(OpName))
+		{
+			return OpSpawner;
+		}
+	}
+
 	UBlueprintFunctionNodeSpawner* NodeSpawner = NewObject<UBlueprintFunctionNodeSpawner>(Outer);
 	NodeSpawner->SetField(const_cast<UFunction*>(Function));
 
@@ -243,11 +290,26 @@ UBlueprintFunctionNodeSpawner* UBlueprintFunctionNodeSpawner::Create(TSubclassOf
 	//--------------------------------------
 
 	FBlueprintActionUiSpec& MenuSignature = NodeSpawner->DefaultMenuSignature;
-	MenuSignature.MenuName = UK2Node_CallFunction::GetUserFacingFunctionName(Function);
-	MenuSignature.Category = UK2Node_CallFunction::GetDefaultCategoryForFunction(Function, FText::GetEmpty());
-	MenuSignature.Tooltip  = FText::FromString( UK2Node_CallFunction::GetDefaultTooltipForFunction(Function) );
-	// add at least one character, so that PrimeDefaultUiSpec() doesn't attempt to query the template node
-	MenuSignature.Keywords = UK2Node_CallFunction::GetKeywordsForFunction(Function);
+
+	if(bIsPromotableFunction)
+	{
+		MenuSignature.MenuName = FTypePromotion::GetUserFacingOperatorName(OpName);
+		MenuSignature.Category = LOCTEXT("UtilityOperatorCategory", "Utilities|Operators");
+		// Possibly generate some special tooltips for promotable operators?
+		MenuSignature.Tooltip = FTypePromotion::GetUserFacingOperatorName(OpName);
+		MenuSignature.Keywords = FTypePromotion::GetKeywordsForOperator(OpName);
+		FTypePromotion::RegisterOperatorSpawner(OpName, NodeSpawner);
+	}
+	else
+	{
+		MenuSignature.MenuName = UK2Node_CallFunction::GetUserFacingFunctionName(Function);
+		MenuSignature.Category = UK2Node_CallFunction::GetDefaultCategoryForFunction(Function, FText::GetEmpty());
+		MenuSignature.Tooltip = FText::FromString(UK2Node_CallFunction::GetDefaultTooltipForFunction(Function));
+		// add at least one character, so that PrimeDefaultUiSpec() doesn't attempt to query the template node
+		MenuSignature.Keywords = UK2Node_CallFunction::GetKeywordsForFunction(Function);
+	}
+	
+	
 	if (MenuSignature.Keywords.IsEmpty())
 	{
 		MenuSignature.Keywords = FText::FromString(TEXT(" "));
@@ -260,7 +322,7 @@ UBlueprintFunctionNodeSpawner* UBlueprintFunctionNodeSpawner::Create(TSubclassOf
 		MenuSignature.Category = BlueprintFunctionNodeSpawnerImpl::FallbackCategory;
 	}
 
-	if (MenuSignature.Tooltip.IsEmpty())
+	if (MenuSignature.Tooltip.IsEmpty() && !bIsPromotableFunction)
 	{
 		MenuSignature.Tooltip = MenuSignature.MenuName;
 	}
@@ -338,7 +400,7 @@ FBlueprintActionUiSpec UBlueprintFunctionNodeSpawner::GetUiSpec(FBlueprintAction
 		checkSlow(WrappedFunction != nullptr);
 		UClass* FunctionClass = WrappedFunction->GetOwnerClass()->GetAuthoritativeClass();
 
-		if (!TargetClass->IsChildOf(FunctionClass))
+		if (!TargetClass || !TargetClass->IsChildOf(FunctionClass))
 		{
 			// When there are no bindings set, functions need to be categorized into a category "Class" to help reduce clutter in the tree root
 			if(Bindings.Num() == 0)
@@ -449,7 +511,7 @@ bool UBlueprintFunctionNodeSpawner::IsBindingCompatible(FBindingObject BindingCa
 	UClass* BindingClass = FBlueprintNodeSpawnerUtils::GetBindingClass(BindingCandidate)->GetAuthoritativeClass();
 	if (UClass const* FuncOwner = Function->GetOwnerClass()->GetAuthoritativeClass())
 	{
-		bClassOwnerMatches = BindingClass->IsChildOf(FuncOwner);
+		bClassOwnerMatches = BindingClass && BindingClass->IsChildOf(FuncOwner);
 	}
 
 	return bNodeTypeMatches && bClassOwnerMatches && !FObjectEditorUtils::IsFunctionHiddenFromClass(Function, BindingClass);

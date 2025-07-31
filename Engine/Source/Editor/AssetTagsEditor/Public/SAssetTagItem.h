@@ -2,14 +2,29 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
 #include "AssetTagItemTypes.h"
-#include "EditorStyleSet.h"
+#include "CoreMinimal.h"
+#include "Framework/SlateDelegates.h"
+#include "Internationalization/Internationalization.h"
+#include "Internationalization/Text.h"
+#include "Layout/Margin.h"
+#include "Layout/Visibility.h"
+#include "Math/Color.h"
+#include "Misc/Attribute.h"
+#include "Styling/AppStyle.h"
+#include "Styling/SlateColor.h"
+#include "Styling/SlateTypes.h"
+#include "Templates/SharedPointer.h"
 #include "Widgets/DeclarativeSyntaxSupport.h"
-#include "Widgets/SCompoundWidget.h"
-#include "Widgets/Views/STableRow.h"
 #include "Widgets/Input/SCheckBox.h"
+#include "Widgets/Layout/SBorder.h"
+#include "Widgets/SCompoundWidget.h"
 #include "Widgets/Text/SInlineEditableTextBlock.h"
+#include "Widgets/Views/STableRow.h"
+#include "Widgets/Views/STableViewBase.h"
+
+class SWidget;
+struct FSlateBrush;
 
 /** Custom table row used to contain asset tag items within list and tree views */
 template <typename ItemType>
@@ -19,9 +34,6 @@ public:
 	void Construct(const typename STableRow<ItemType>::FArguments& InArgs, const TSharedRef<STableViewBase>& InOwnerTableView)
 	{
 		this->ConstructInternal(InArgs, InOwnerTableView);
-
-		this->Style = &FEditorStyle::GetWidgetStyle<FTableRowStyle>("ContentBrowser.AssetTagTableRow");
-		this->BorderImage = FInvalidatableBrushAttribute(FEditorStyle::GetBrush("NoBorder"));
 
 		this->ConstructChildren(
 			InOwnerTableView->TableViewMode,
@@ -55,7 +67,7 @@ private:
 	{
 		return
 			SNew(SBorder)
-			.Padding(2.0f)
+			.Padding(0)
 			.BorderImage(this, &SAssetTagItemTableRow::GetBorder)
 			[
 				InContent
@@ -165,15 +177,6 @@ private:
 	FLinearColor GetAssetTagDisabledColor() const
 	{
 		return BaseColor.Get().CopyWithNewOpacity(0.04f);
-	}
-
-	FSlateColor GetCheckBoxForegroundColor() const
-	{
-		return CheckBox && CheckBox->IsEnabled()
-			? CheckBox->IsChecked() 
-				? GetAssetTagBrightColor()
-				: GetAssetTagDullColor()
-			: GetAssetTagDisabledColor();
 	}
 
 	FText GetCheckBoxTooltipText() const

@@ -3,13 +3,22 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
+#include "EdGraph/EdGraphNode.h"
+#include "Internationalization/Text.h"
 #include "K2Node.h"
 #include "NodeDependingOnEnumInterface.h"
+#include "UObject/Class.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/UObjectGlobals.h"
+
 #include "K2Node_BitmaskLiteral.generated.h"
 
+class FArchive;
 class FBlueprintActionDatabaseRegistrar;
+class FName;
 class UEdGraph;
+class UObject;
 
 UCLASS(MinimalAPI)
 class UK2Node_BitmaskLiteral : public UK2Node, public INodeDependingOnEnumInterface
@@ -17,7 +26,7 @@ class UK2Node_BitmaskLiteral : public UK2Node, public INodeDependingOnEnumInterf
 	GENERATED_UCLASS_BODY()
 
 	UPROPERTY()
-	UEnum* BitflagsEnum;
+	TObjectPtr<UEnum> BitflagsEnum;
 
 	//~ Begin UObject Interface
 	virtual void Serialize(FArchive& Ar) override;
@@ -39,6 +48,7 @@ class UK2Node_BitmaskLiteral : public UK2Node, public INodeDependingOnEnumInterf
 
 	//~ Begin INodeDependingOnEnumInterface
 	virtual class UEnum* GetEnum() const override { return BitflagsEnum; }
+	virtual void ReloadEnum(class UEnum* InEnum) override;
 	virtual bool ShouldBeReconstructedAfterEnumChanged() const override { return true; }
 	//~ End INodeDependingOnEnumInterface
 

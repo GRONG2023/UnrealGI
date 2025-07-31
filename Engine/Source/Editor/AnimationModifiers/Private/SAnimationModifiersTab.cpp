@@ -2,31 +2,61 @@
 
 #include "SAnimationModifiersTab.h"
 
-#include "AnimationModifierDetailCustomization.h"
-#include "AnimationModifiersAssetUserData.h"
-#include "SModifierListview.h"
-#include "Widgets/Input/SButton.h"
-#include "Widgets/Input/SComboButton.h"
 #include "Animation/AnimSequence.h"
-
-#include "AssetRegistryModule.h"
-#include "Engine/BlueprintGeneratedClass.h"
-#include "ClassViewerModule.h"
-#include "ClassViewerFilter.h"
-#include "PropertyEditorModule.h"
-#include "IDetailsView.h"
-#include "Misc/MessageDialog.h"
-#include "Editor.h"
-#include "ScopedTransaction.h"
-
-#include "Editor.h"
-#include "Widgets/Input/SComboButton.h"
-#include "Widgets/Input/SButton.h"
-#include "ScopedTransaction.h"
-#include "Widgets/Input/SMenuAnchor.h"
-#include "Engine/BlueprintGeneratedClass.h"
+#include "Animation/Skeleton.h"
+#include "AnimationModifier.h"
 #include "AnimationModifierHelpers.h"
+#include "AnimationModifiersAssetUserData.h"
+#include "AssetRegistry/AssetData.h"
+#include "AssetRegistry/AssetRegistryModule.h"
+#include "AssetRegistry/IAssetRegistry.h"
+#include "ClassViewerModule.h"
+#include "Delegates/Delegate.h"
+#include "DetailsViewArgs.h"
+#include "Editor.h"
+#include "Editor/EditorEngine.h"
+#include "Engine/Blueprint.h"
+#include "Engine/BlueprintGeneratedClass.h"
+#include "Framework/SlateDelegates.h"
+#include "HAL/Platform.h"
+#include "HAL/PlatformCrt.h"
+#include "HAL/PlatformMisc.h"
+#include "IDetailsView.h"
+#include "Interfaces/Interface_AssetUserData.h"
+#include "Internationalization/Internationalization.h"
+#include "Internationalization/Text.h"
+#include "Layout/Children.h"
+#include "Layout/Margin.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/Attribute.h"
+#include "Misc/MessageDialog.h"
+#include "Modules/ModuleManager.h"
+#include "PropertyEditorModule.h"
+#include "SModifierListview.h"
+#include "ScopedTransaction.h"
+#include "SlotBase.h"
+#include "Styling/AppStyle.h"
 #include "Subsystems/AssetEditorSubsystem.h"
+#include "Templates/Casts.h"
+#include "Templates/SubclassOf.h"
+#include "Toolkits/AssetEditorToolkit.h"
+#include "Types/SlateEnums.h"
+#include "UObject/NameTypes.h"
+#include "UObject/Object.h"
+#include "UObject/WeakObjectPtr.h"
+#include "Widgets/Input/SButton.h"
+#include "Widgets/Input/SComboButton.h"
+#include "Widgets/Input/SMenuAnchor.h"
+#include "Widgets/Layout/SBorder.h"
+#include "Widgets/Layout/SBox.h"
+#include "Widgets/Layout/SSplitter.h"
+#include "Widgets/SBoxPanel.h"
+#include "Widgets/SOverlay.h"
+#include "Widgets/SWidget.h"
+#include "Widgets/Text/STextBlock.h"
+
+class UClass;
+struct FGeometry;
 
 #define LOCTEXT_NAMESPACE "SAnimationModifiersTab"
 
@@ -91,7 +121,7 @@ void SAnimationModifiersTab::Construct(const FArguments& InArgs)
 			[
 				SNew(SBorder)
 				.Padding(2.0f)
-				.BorderImage(FEditorStyle::GetBrush("ToolPanel.GroupBorder"))
+				.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
 				[
 					SNew(SHorizontalBox)
 					+ SHorizontalBox::Slot()
@@ -127,7 +157,7 @@ void SAnimationModifiersTab::Construct(const FArguments& InArgs)
 			[
 				SNew(SBorder)
 				.Padding(2.0f)
-				.BorderImage(FEditorStyle::GetBrush("ToolPanel.GroupBorder"))
+				.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
 				[				
 					SNew(SSplitter)
 					.Orientation(EOrientation::Orient_Vertical)
@@ -206,31 +236,14 @@ void SAnimationModifiersTab::RetrieveAnimationAsset()
 			if (Object->IsA<UAnimSequence>())
 			{
 				AnimationSequence = Cast<UAnimSequence>(Object);
-
-				AssetUserData = AnimationSequence->GetAssetUserData<UAnimationModifiersAssetUserData>();
-				if (!AssetUserData)
-				{
-					AssetUserData = NewObject<UAnimationModifiersAssetUserData>(AnimationSequence, UAnimationModifiersAssetUserData::StaticClass());
-					checkf(AssetUserData, TEXT("Unable to instantiate AssetUserData class"));
-					AssetUserData->SetFlags(RF_Transactional);
-					AnimationSequence->AddAssetUserData(AssetUserData);
-				}
+				AssetUserData = FAnimationModifierHelpers::RetrieveOrCreateModifierUserData(AnimationSequence);
 				
 				break;
 			}
 			else if (Object->IsA<USkeleton>())
 			{
 				Skeleton = Cast<USkeleton>(Object);
-
-				AssetUserData = Skeleton->GetAssetUserData<UAnimationModifiersAssetUserData>();
-				if (!AssetUserData)
-				{
-					AssetUserData = NewObject<UAnimationModifiersAssetUserData>(Skeleton, UAnimationModifiersAssetUserData::StaticClass());
-					checkf(AssetUserData, TEXT("Unable to instantiate AssetUserData class"));
-					AssetUserData->SetFlags(RF_Transactional);
-					Skeleton->AddAssetUserData(AssetUserData);
-				}
-				
+				AssetUserData = FAnimationModifierHelpers::RetrieveOrCreateModifierUserData(Skeleton);
 				break;
 			}
 		}
@@ -242,15 +255,10 @@ void SAnimationModifiersTab::CreateInstanceDetailsView()
 	// Create a property view
 	FPropertyEditorModule& EditModule = FModuleManager::Get().GetModuleChecked<FPropertyEditorModule>("PropertyEditor");
 
-	FDetailsViewArgs DetailsViewArgs(
-		/*bUpdateFromSelection=*/ false,
-		/*bLockable=*/ false,
-		/*bAllowSearch=*/ false,
-		FDetailsViewArgs::HideNameArea,
-		/*bHideSelectionTip=*/ true,
-		/*InNotifyHook=*/ nullptr,
-		/*InSearchInitialKeyFocus=*/ false,
-		/*InViewIdentifier=*/ NAME_None);
+	FDetailsViewArgs DetailsViewArgs;
+	DetailsViewArgs.bAllowSearch = false;
+	DetailsViewArgs.NameAreaSettings = FDetailsViewArgs::HideNameArea;
+	DetailsViewArgs.bHideSelectionTip = true;
 	DetailsViewArgs.DefaultsOnlyVisibility = EEditDefaultsOnlyNodeVisibility::Automatic;
 	DetailsViewArgs.bShowOptions = false;	
 
@@ -278,6 +286,7 @@ void SAnimationModifiersTab::OnApplyModifier(const TArray<TWeakObjectPtr<UAnimat
 
 	FScopedTransaction Transaction(LOCTEXT("ApplyModifiersTransaction", "Applying Animation Modifier(s)"));
 	ApplyModifiers(ModifierInstances);
+	Refresh();
 }
 
 void SAnimationModifiersTab::FindAnimSequencesForSkeleton(TArray<UAnimSequence *>& ReferencedAnimSequences)
@@ -296,7 +305,7 @@ void SAnimationModifiersTab::FindAnimSequencesForSkeleton(TArray<UAnimSequence *
 		for (const FAssetData& Asset : Assets)
 		{
 			// Only add assets whos class is of UAnimSequence
-			if (Asset.GetClass()->IsChildOf(UAnimSequence::StaticClass()))
+			if (Asset.IsInstanceOf(UAnimSequence::StaticClass()))
 			{
 				ReferencedAnimSequences.Add(CastChecked<UAnimSequence>(Asset.GetAsset()));
 			}
@@ -316,32 +325,74 @@ void SAnimationModifiersTab::OnRevertModifier(const TArray<TWeakObjectPtr<UAnima
 	
 	FScopedTransaction Transaction(LOCTEXT("RevertModifiersTransaction", "Reverting Animation Modifier(s)"));
 	RevertModifiers(ModifierInstances);
+	Refresh();
 }
 
 bool SAnimationModifiersTab::OnCanRevertModifier(const TArray<TWeakObjectPtr<UAnimationModifier>>& Instances)
 {
 	bool bCanRevert = false;
 
-	for (TWeakObjectPtr<UAnimationModifier> InstancePtr : Instances)
+	if (AnimationSequence)
 	{
-		checkf(InstancePtr.IsValid(), TEXT("Invalid weak object ptr to modifier instance"));
-		UAnimationModifier* Instance = InstancePtr.Get();
-
-		// At least one instance has to be revert-able
-		if (Instance->CanRevert())
+		for (const TWeakObjectPtr<UAnimationModifier>& InstancePtr : Instances)
 		{
-			bCanRevert = true;
-			break;
+			checkf(InstancePtr.IsValid(), TEXT("Invalid weak object ptr to modifier instance"));
+			const UAnimationModifier* Modifier = InstancePtr.Get();
+
+			// At least one instance has to be revert-able
+			if (Modifier->CanRevert(AnimationSequence))
+			{
+				bCanRevert = true;
+				break;
+			}
 		}
 	}
+	else if (Skeleton) 
+	{
+		// Check for modifiers applied on previous version
+		// Where asset registry tags were not written
+		for (const TWeakObjectPtr<UAnimationModifier>& Modifier : Instances)
+		{
+			if (Modifier->HasLegacyPreviousAppliedModifierOnSkeleton())
+			{
+				bCanRevert = true;
+				return true;
+			}
+		}
 
+		FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(FName("AssetRegistry"));
+		IAssetRegistry& AssetRegistry = AssetRegistryModule.Get();
+
+		TSet<FString> Modifiers;
+		Algo::Transform(Instances, Modifiers, [](const TWeakObjectPtr<UAnimationModifier>& Ptr) 
+		{
+			return Ptr.Get()->GetName();
+		});
+
+		FARFilter Filter;
+		Filter.ClassPaths.Add(UAnimSequence::StaticClass()->GetClassPathName());
+		Filter.TagsAndValues.Add(FName{"Skeleton"}) = FAssetData(Skeleton).GetExportTextName();
+
+		AssetRegistry.EnumerateAssets(Filter, [&](const FAssetData& Asset) 
+		{
+			FString Tag = Asset.GetTagValueRef<FString>(UAnimationModifier::AnimationModifiersTag);
+
+			FAnimationModifierHelpers::EnumerateAnimationModifierTags(Tag, [&](FStringView Name, FGuid Revision) 
+			{
+				bCanRevert = Modifiers.ContainsByHash(GetTypeHash(Name), Name);
+				return !bCanRevert; // Break if bCanRevert is already true
+			});
+
+			return !bCanRevert; // Break if bCanRevert is already true
+		});
+
+	}
 	return bCanRevert;
 }
 
 void SAnimationModifiersTab::OnRemoveModifier(const TArray<TWeakObjectPtr<UAnimationModifier>>& Instances)
 {
-	const FText Title = FText::FromString("Revert before Removing");
-	const bool bShouldRevert = FMessageDialog::Open(EAppMsgType::YesNo, LOCTEXT("RemoveAndRevertPopupText", "Should the Modifiers be reverted before removing them?"), &Title) == EAppReturnType::Yes;
+	const bool bShouldRevert = FMessageDialog::Open(EAppMsgType::YesNo, LOCTEXT("RemoveAndRevertPopupText", "Should the Modifiers be reverted before removing them?"), LOCTEXT("RemoveAndRevertPopupTitle", "Revert before Removing")) == EAppReturnType::Yes;
 
 	FScopedTransaction Transaction(LOCTEXT("RemoveModifiersTransaction", "Removing Animation Modifier(s)"));	
 	AssetUserData->Modify();
@@ -439,31 +490,31 @@ void SAnimationModifiersTab::ApplyModifiers(const TArray<UAnimationModifier*>& M
 	else if (Skeleton != nullptr)
 	{
 		// Double check with the user for applying all modifiers to referenced animation sequences for the skeleton
-		const FText Title = FText::FromString("Are you sure?");
-		bApply = FMessageDialog::Open(EAppMsgType::YesNo, LOCTEXT("ApplyingSkeletonModifierPopupText", "Are you sure you want to apply the modifiers to all animation sequences referenced by the current skeleton?"), &Title) == EAppReturnType::Yes;
+		bApply = FMessageDialog::Open(EAppMsgType::YesNo, LOCTEXT("ApplyingSkeletonModifierPopupText", "Are you sure you want to apply the modifiers to all animation sequences referenced by the current skeleton?"), LOCTEXT("ApplyingSkeletonModifierPopupTitle", "Are you sure?")) == EAppReturnType::Yes;
 		
 		if (bApply)
 		{
 			FindAnimSequencesForSkeleton(AnimSequences);
-			Skeleton->Modify();
 		}
 	}
 
 	if (bApply)
 	{
-		for (UAnimSequence* AnimSequence : AnimSequences)
-		{
-			AnimSequence->Modify();
-		}
+		UE::Anim::FApplyModifiersScope Scope;
 
 		for (UAnimationModifier* Instance : Modifiers)
 		{
 			checkf(Instance, TEXT("Invalid modifier instance"));
-			Instance->Modify();
+			bool AppliedOnAny = false;
 			for (UAnimSequence* AnimSequence : AnimSequences)
 			{
 				ensure(!(Skeleton != nullptr) || AnimSequence->GetSkeleton() == Skeleton);
 				Instance->ApplyToAnimationSequence(AnimSequence);
+				AppliedOnAny = AppliedOnAny || Instance->CanRevert(AnimSequence);
+			}
+			if (AppliedOnAny && Skeleton)
+			{
+				Instance->RemoveLegacyPreviousAppliedModifierOnSkeleton(Skeleton);
 			}
 		}
 	}
@@ -480,31 +531,29 @@ void SAnimationModifiersTab::RevertModifiers(const TArray<UAnimationModifier*>& 
 	else if (Skeleton != nullptr)
 	{
 		// Double check with the user for reverting all modifiers from referenced animation sequences for the skeleton
-		const FText Title = FText::FromString("Are you sure?");
-		bRevert = FMessageDialog::Open(EAppMsgType::YesNo, LOCTEXT("RevertingSkeletonModifierPopupText", "Are you sure you want to revert the modifiers from all animation sequences referenced by the current skeleton?"), &Title) == EAppReturnType::Yes;
+		bRevert = FMessageDialog::Open(EAppMsgType::YesNo, LOCTEXT("RevertingSkeletonModifierPopupText", "Are you sure you want to revert the modifiers from all animation sequences referenced by the current skeleton?"), LOCTEXT("RevertingSkeletonModifierPopupTitle", "Are you sure?")) == EAppReturnType::Yes;
 
 		if ( bRevert)
 		{
 			FindAnimSequencesForSkeleton(AnimSequences);
-			Skeleton->Modify();
 		}
 	}
 
 	if (bRevert)
 	{
-		for (UAnimSequence* AnimSequence : AnimSequences)
-		{
-			AnimSequence->Modify();
-		}
-
 		for (UAnimationModifier* Instance : Modifiers)
 		{
 			checkf(Instance, TEXT("Invalid modifier instance"));
-			Instance->Modify();
 			for (UAnimSequence* AnimSequence : AnimSequences)
 			{
 				ensure(!(Skeleton != nullptr) || AnimSequence->GetSkeleton() == Skeleton);
 				Instance->RevertFromAnimationSequence(AnimSequence);
+			}
+
+			if (Skeleton)
+			{
+				// Revert can not fail, thus we can always mark reverted
+				Instance->RemoveLegacyPreviousAppliedModifierOnSkeleton(Skeleton);
 			}
 		}
 	}	
@@ -526,6 +575,7 @@ void SAnimationModifiersTab::RetrieveModifierData()
 			Item->Class = Modifier->GetClass();
 			Item->Index = ModifierIndex;
 			Item->OuterClass = AssetUserData->GetOuter()->GetClass();
+			Item->OutOfDate = AnimationSequence && !Modifier->IsLatestRevisionApplied(AnimationSequence);
 			ModifierItems.Add(ModifierListviewItem(Item));
 
 			// Register a delegate for when a BP is compiled, this so we can refresh the UI and prevent issues with invalid instance data
@@ -536,6 +586,82 @@ void SAnimationModifiersTab::RetrieveModifierData()
 				Blueprint->OnCompiled().AddSP(this, &SAnimationModifiersTab::OnBlueprintCompiled);
 				DelegateRegisteredBlueprints.Add(Blueprint);
 			}
+		}
+
+		// Refresh OutOfDate data for modifiers on Skeleton
+		if (Skeleton)
+		{
+			TArray<FModifierListviewItem*> ModifiersToCheck; // Modifiers that are up to date (until current search progress)
+			TArray<FModifierListviewItem*> NextModifiersToCheck; // Double buffer for ModifiersToCheck, store the UpToDate modifiers on this animation
+			ModifiersToCheck.Reserve(ModifierItems.Num());
+
+			// Handle backward compatibility 
+			// Modifier applied in previous version will not have the applied version stored in asset registry tags
+			// Exclude them in asset registry search and use the legacy OutOfDate check
+			for (TSharedPtr<FModifierListviewItem>& Item : ModifierItems)
+			{
+				ensure(!Item->OutOfDate);
+				if (Item->Instance->HasLegacyPreviousAppliedModifierOnSkeleton())
+				{
+					Item->OutOfDate = !Item->Instance->IsLatestRevisionApplied(Skeleton);
+				}
+				else
+				{
+					ModifiersToCheck.Add(Item.Get());
+				}
+			}
+
+			if (ModifiersToCheck.IsEmpty())
+			{
+				return;
+			}
+
+			NextModifiersToCheck.Reserve(ModifiersToCheck.Num());
+
+			// Modifier.OutOfDate = Any(Animation in Skeleton.Animations, Animation=>Modifier.OutOfDateOn(Animation))
+			FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(FName("AssetRegistry"));
+			IAssetRegistry& AssetRegistry = AssetRegistryModule.Get();
+
+			FARFilter Filter;
+			Filter.ClassPaths.Add(UAnimSequence::StaticClass()->GetClassPathName());
+			Filter.TagsAndValues.Add(FName{"Skeleton"}) = FAssetData(Skeleton).GetExportTextName();
+
+			AssetRegistry.EnumerateAssets(Filter, [&](const FAssetData& Asset) {
+				FString Tag = Asset.GetTagValueRef<FString>(UAnimationModifier::AnimationModifiersTag);
+
+				// First mark all modifiers to check as out of date
+				// Since modifiers omitted from the tag were not applied and thus out of date
+				for (FModifierListviewItem* Item : ModifiersToCheck)
+				{
+					Item->OutOfDate = true;
+				}
+
+				// Enumerate the current asset's tag 
+				// To check the revision of each applied modifier
+				// UpToDate modifiers will be add to NextModifiersToCheck to continue the search in next Asset
+				NextModifiersToCheck.Empty();
+				FAnimationModifierHelpers::EnumerateAnimationModifierTags(Tag, [&](FStringView Name, FGuid Revision) {
+					FName ModifierName {Name};
+					auto CompareModifierListViewItemName = [ModifierName](const FModifierListviewItem* Item) {
+						return Item->Instance->GetFName() == ModifierName;
+					};
+					if (FModifierListviewItem** PtrItem = ModifiersToCheck.FindByPredicate(CompareModifierListViewItemName))
+					{
+						FModifierListviewItem* Item = *PtrItem;
+						Item->OutOfDate = Item->Instance->GetLatestRevisionGuid() != Revision;
+						if (!Item->OutOfDate)
+						{
+							NextModifiersToCheck.Add(Item); // Only need to continue check modifiers that is update to date
+						}
+					}
+					return true;
+				});
+				// Swap the double buffer
+				Swap(ModifiersToCheck, NextModifiersToCheck);
+
+				// Break if all modifiers are out of date
+				return !ModifiersToCheck.IsEmpty();
+			});
 		}
 	}
 }

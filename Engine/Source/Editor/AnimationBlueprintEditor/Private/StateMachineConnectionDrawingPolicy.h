@@ -2,13 +2,21 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "Layout/ArrangedWidget.h"
-#include "Widgets/SWidget.h"
 #include "ConnectionDrawingPolicy.h"
+#include "Containers/Map.h"
+#include "HAL/Platform.h"
+#include "Math/Vector2D.h"
+#include "Templates/SharedPointer.h"
 
+class FArrangedChildren;
+class FArrangedWidget;
+class FSlateRect;
 class FSlateWindowElementList;
+class SWidget;
 class UEdGraph;
+class UEdGraphNode;
+class UEdGraphPin;
+struct FGeometry;
 
 /////////////////////////////////////////////////////
 // FStateMachineConnectionDrawingPolicy
@@ -21,6 +29,8 @@ protected:
 
 	TMap<UEdGraphNode*, int32> NodeWidgetMap;
 public:
+	// @Note FConnectionParams.bUserFlag2: Is used here to indicate whether the drawn arrow is a preview transition or a real one.
+
 	//
 	FStateMachineConnectionDrawingPolicy(int32 InBackLayerID, int32 InFrontLayerID, float ZoomFactor, const FSlateRect& InClippingRect, FSlateWindowElementList& InDrawElements, UEdGraph* InGraphObj);
 
@@ -43,4 +53,10 @@ public:
 
 protected:
 	void Internal_DrawLineWithArrow(const FVector2D& StartAnchorPoint, const FVector2D& EndAnchorPoint, const FConnectionParams& Params);
+
+	// Draw line-based circle (no solid filling)
+	void DrawCircle(const FVector2D& Center, float Radius, const FLinearColor& Color, const int NumLineSegments);
+	TArray<FVector2D> TempPoints;
+
+	static constexpr float RelinkHandleHoverRadius = 20.0f;
 };

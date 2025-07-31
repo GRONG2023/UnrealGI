@@ -5,8 +5,11 @@
 #include "CoreMinimal.h"
 #include "SceneInterface.h"
 #include "UnrealClient.h"
+#include "ViewportClient.h"
+#include "Engine/Engine.h"
 #include "SceneViewExtensionContext.generated.h"
 
+class FViewport;
 class ISceneViewExtension;
 class FViewport;
 
@@ -24,6 +27,7 @@ public:
 
 	FViewport* Viewport = nullptr;
 	FSceneInterface* Scene = nullptr;
+	bool bStereoEnabled = false;
 
 	FSceneViewExtensionContext() : Viewport(nullptr), Scene(nullptr) {}
 	explicit FSceneViewExtensionContext(FViewport* InViewport) : Viewport(InViewport) {}
@@ -54,6 +58,17 @@ public:
 		}
 
 		return nullptr;
+	}
+
+	bool IsStereoSupported() const
+	{
+		return bStereoEnabled && GEngine && GEngine->IsStereoscopic3D(Viewport);
+	}
+
+	// Return true, if HMD supported
+	virtual bool IsHMDSupported() const
+	{
+		return true;
 	}
 };
 

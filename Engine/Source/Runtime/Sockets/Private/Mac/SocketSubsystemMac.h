@@ -67,6 +67,8 @@ public:
 	 * @return Whether the machine has a properly configured network device or not
 	 */
 	virtual bool HasNetworkDevice() override;
+
+	virtual bool GetLocalAdapterAddresses(TArray<TSharedPtr<FInternetAddr>>& OutAddresses) override;
 };
 
 /**
@@ -90,6 +92,7 @@ public:
 
 	~FSocketMac()
 	{
+		FSocketMac::Close();
 	}
 
 	virtual bool Close() override

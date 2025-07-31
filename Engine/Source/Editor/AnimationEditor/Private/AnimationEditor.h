@@ -2,30 +2,40 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "Stats/Stats.h"
-#include "Widgets/SWidget.h"
-#include "UObject/GCObject.h"
-#include "Toolkits/IToolkitHost.h"
-#include "IAnimationEditor.h"
-#include "TickableEditorObject.h"
-#include "EditorUndoClient.h"
+#include "Containers/Array.h"
 #include "Containers/ArrayView.h"
+#include "Containers/UnrealString.h"
+#include "Delegates/Delegate.h"
+#include "HAL/Platform.h"
+#include "IAnimationEditor.h"
+#include "Internationalization/Text.h"
+#include "Math/Color.h"
+#include "Stats/Stats2.h"
+#include "Templates/SharedPointer.h"
+#include "Tickable.h"
+#include "TickableEditorObject.h"
+#include "Toolkits/IToolkit.h"
+#include "Types/SlateEnums.h"
+#include "UObject/GCObject.h"
+#include "UObject/NameTypes.h"
 
-struct FAssetData;
+class IDetailLayoutBuilder;
+class FExtender;
 class FMenuBuilder;
+class FReferenceCollector;
+class IAnimSequenceCurveEditor;
 class IAnimationSequenceBrowser;
-class IDetailsView;
-class IPersonaToolkit;
-class IPersonaViewport;
-class ISkeletonTree;
-class UAnimationAsset;
-class USkeletalMeshComponent;
+class ISkeletonTreeItem;
+class ITimeSliderController;
+class SDockTab;
+class SWidget;
 class UAnimSequence;
 class UAnimSequenceBase;
-class ISkeletonTreeItem;
-class IAnimSequenceCurveEditor;
-struct FRichCurve;
+class UAnimationAsset;
+class UObject;
+class USkeletalMeshComponent;
+struct FAssetData;
+struct FToolMenuContext;
 
 namespace AnimationEditorModes
 {
@@ -47,13 +57,12 @@ namespace AnimationEditorTabs
 	extern const FName CurveNamesTab;
 	extern const FName SlotNamesTab;
 	extern const FName AnimMontageSectionsTab;
+	extern const FName FindReplaceTab;
 }
 
-class FAnimationEditor : public IAnimationEditor, public FGCObject, public FEditorUndoClient, public FTickableEditorObject
+class FAnimationEditor : public IAnimationEditor, public FGCObject, public FTickableEditorObject
 {
 public:
-	FAnimationEditor();
-
 	virtual ~FAnimationEditor();
 
 	/** Edits the specified Skeleton object */
@@ -75,24 +84,25 @@ public:
 	virtual FText GetBaseToolkitName() const override;
 	virtual FString GetWorldCentricTabPrefix() const override;
 	virtual FLinearColor GetWorldCentricTabColorScale() const override;
+	virtual void InitToolMenuContext(FToolMenuContext& MenuContext) override;
 
 	/** FTickableEditorObject Interface */
 	virtual void Tick(float DeltaTime) override;
 	virtual TStatId GetStatId() const override;
 	virtual ETickableTickType GetTickableTickType() const override { return ETickableTickType::Always; }
-	
-	/** FEditorUndoClient interface */
-	virtual void PostUndo(bool bSuccess) override;
-	virtual void PostRedo(bool bSuccess) override;
 
 	/** @return the documentation location for this editor */
 	virtual FString GetDocumentationLink() const override
 	{
-		return FString(TEXT("Engine/Animation/AnimationEditor"));
+		return FString(TEXT("AnimatingObjects/SkeletalMeshAnimation/Persona/Modes/Animation"));
 	}
 
 	/** FGCObject interface */
 	virtual void AddReferencedObjects(FReferenceCollector& Collector) override;
+	virtual FString GetReferencerName() const override
+	{
+		return TEXT("FAnimationEditor");
+	}
 
 	/** Get the skeleton tree widget */
 	TSharedRef<class ISkeletonTree> GetSkeletonTree() const { return SkeletonTree.ToSharedRef(); }
@@ -129,10 +139,6 @@ private:
 
 	void OnSetKey();
 
-	bool CanApplyRawAnimChanges() const;
-
-	void OnApplyRawAnimChanges();
-
 	void OnReimportAnimation();
 
 	void OnApplyCompression();
@@ -145,8 +151,6 @@ private:
 	void OnRemoveBoneTrack();
 
 	TSharedRef< SWidget > GenerateExportAssetMenu() const;
-
-	void FillCopyToSoundWaveMenu(FMenuBuilder& MenuBuilder) const;
 
 	void FillExportAssetMenu(FMenuBuilder& MenuBuilder) const;
 
@@ -168,10 +172,12 @@ private:
 	TSharedPtr<SDockTab> OpenNewAnimationDocumentTab(UAnimationAsset* InAnimAsset);
 
 	bool RecordMeshToAnimation(USkeletalMeshComponent* PreviewComponent, UAnimSequence* NewAsset) const;
-public:
-	/** Multicast delegate fired on global undo/redo */
-	FSimpleMulticastDelegate OnPostUndo;
 
+	static TSharedPtr<FAnimationEditor> GetAnimationEditor(const FToolMenuContext& InMenuContext);
+
+	void HandleOnPreviewSceneSettingsCustomized(IDetailLayoutBuilder& DetailBuilder) const;
+	
+public:
 	/** Multicast delegate fired on global undo/redo */
 	FSimpleMulticastDelegate OnLODChanged;
 
@@ -180,7 +186,7 @@ public:
 
 private:
 	/** The animation asset we are editing */
-	UAnimationAsset* AnimationAsset;
+	TObjectPtr<UAnimationAsset> AnimationAsset;
 
 	/** Toolbar extender */
 	TSharedPtr<FExtender> ToolbarExtender;

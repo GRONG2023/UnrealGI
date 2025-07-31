@@ -1,49 +1,78 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "CoreMinimal.h"
-#include "Modules/ModuleManager.h"
-#include "Widgets/DeclarativeSyntaxSupport.h"
-#include "Framework/Docking/TabManager.h"
-#include "IBlutilityModule.h"
-#include "EditorUtilityWidget.h"
-#include "EditorUtilityBlueprint.h"
-#include "GlobalEditorUtilityBase.h"
-
+#include "AssetRegistry/AssetData.h"
+#include "AssetRegistry/AssetRegistryModule.h"
+#include "AssetRegistry/IAssetRegistry.h"
 #include "AssetToolsModule.h"
-#include "PropertyEditorModule.h"
-#include "AssetTypeActions_EditorUtilityBlueprint.h"
-#include "WorkspaceMenuStructure.h"
-#include "WorkspaceMenuStructureModule.h"
-
-#include "Widgets/Docking/SDockTab.h"
+#include "AssetTypeCategories.h"
 #include "BlutilityContentBrowserExtensions.h"
 #include "BlutilityLevelEditorExtensions.h"
-#include "AssetTypeActions_EditorUtilityWidgetBlueprint.h"
-#include "KismetCompiler.h"
-#include "EditorUtilityWidgetBlueprint.h"
-#include "ComponentReregisterContext.h"
-#include "KismetCompilerModule.h"
-#include "WidgetBlueprintCompiler.h"
-#include "UMGEditorModule.h"
-#include "EditorUtilitySubsystem.h"
-#include "LevelEditor.h"
+#include "BlutilityUMGEditorExtensions.h"
+#include "Containers/Array.h"
+#include "Containers/UnrealString.h"
+#include "Delegates/Delegate.h"
 #include "Editor.h"
-#include "UnrealEdMisc.h"
+#include "Editor/EditorEngine.h"
 #include "EditorSupportDelegates.h"
-#include "UObject/PurgingReferenceCollector.h"
-#include "AssetRegistryModule.h"
+#include "EditorUtilityActor.h"
+#include "EditorUtilityBlueprint.h"
+#include "EditorUtilityCamera.h"
 #include "EditorUtilityCommon.h"
-#include "EditorUtilityToolMenu.h"
+#include "EditorUtilityObject.h"
+#include "EditorUtilitySubsystem.h"
+#include "EditorUtilityWidget.h"
+#include "EditorUtilityWidgetBlueprint.h"
+#include "Engine/Blueprint.h"
+#include "Engine/Engine.h"
+#include "Engine/World.h"
+#include "Framework/Docking/TabManager.h"
+#include "Framework/Docking/WorkspaceItem.h"
+#include "GlobalEditorUtilityBase.h"
+#include "HAL/Platform.h"
+#include "HAL/PlatformCrt.h"
+#include "IAssetTools.h"
+#include "IBlutilityModule.h"
+#include "Internationalization/Internationalization.h"
+#include "Internationalization/Text.h"
+#include "KismetCompiler.h"
+#include "KismetCompilerModule.h"
+#include "LevelEditor.h"
+#include "Logging/LogCategory.h"
+#include "Logging/LogMacros.h"
+#include "Misc/AssertionMacros.h"
+#include "Modules/ModuleManager.h"
+#include "Styling/AppStyle.h"
+#include "Templates/Casts.h"
+#include "Templates/SharedPointer.h"
+#include "Templates/SubclassOf.h"
+#include "Textures/SlateIcon.h"
+#include "Trace/Detail/Channel.h"
+#include "UMGEditorModule.h"
+#include "UObject/Class.h"
+#include "UObject/GCObject.h"
+#include "UObject/NameTypes.h"
+#include "UObject/Object.h"
+#include "UObject/Package.h"
+#include "UObject/PurgingReferenceCollector.h"
+#include "UObject/SoftObjectPath.h"
+#include "UObject/UObjectBase.h"
+#include "UObject/UObjectGlobals.h"
+#include "UObject/UObjectHash.h"
+#include "UnrealEdMisc.h"
+#include "WidgetBlueprint.h"
+#include "WidgetBlueprintCompiler.h"
+#include "Widgets/Docking/SDockTab.h"
+#include "WorkspaceMenuStructure.h"
+#include "WorkspaceMenuStructureModule.h"
+#include "EditorUtilityWidgetSettingsCustomization.h"
+#include "EditorUtilityWidgetProjectSettings.h"
+#include "PropertyEditorModule.h"
 
 #define LOCTEXT_NAMESPACE "AssetTypeActions"
 
 DEFINE_LOG_CATEGORY(LogEditorUtilityBlueprint);
 
 /////////////////////////////////////////////////////
-
-namespace BlutilityModule
-{
-}
 
 /////////////////////////////////////////////////////
 // FBlutilityModule 
@@ -52,35 +81,31 @@ namespace BlutilityModule
 class FBlutilityModule : public IBlutilityModule, public FGCObject
 {
 public:
-	/** Asset type actions for editor utility assets.  Cached here so that we can unregister it during shutdown. */
-	TSharedPtr<FAssetTypeActions_EditorUtilityBlueprint> EditorBlueprintAssetTypeActions;
-	TSharedPtr<FAssetTypeActions_EditorUtilityWidgetBlueprint> EditorWidgetBlueprintAssetTypeActions;
-
-public:
 	virtual void StartupModule() override
 	{
 		// Register the asset type
 		IAssetTools& AssetTools = FModuleManager::LoadModuleChecked<FAssetToolsModule>("AssetTools").Get();
 		EditorUtilityAssetCategory = AssetTools.RegisterAdvancedAssetCategory(FName(TEXT("EditorUtilities")), LOCTEXT("EditorUtilitiesAssetCategory", "Editor Utilities"));
-		EditorBlueprintAssetTypeActions = MakeShareable(new FAssetTypeActions_EditorUtilityBlueprint);
-		AssetTools.RegisterAssetTypeActions(EditorBlueprintAssetTypeActions.ToSharedRef());
-		EditorWidgetBlueprintAssetTypeActions = MakeShareable(new FAssetTypeActions_EditorUtilityWidgetBlueprint);
-		AssetTools.RegisterAssetTypeActions(EditorWidgetBlueprintAssetTypeActions.ToSharedRef());
 
 		FKismetCompilerContext::RegisterCompilerForBP(UEditorUtilityWidgetBlueprint::StaticClass(), &UWidgetBlueprint::GetCompilerForWidgetBP);
 
-		// Register widget blueprint compiler we do this no matter what.
+		// Register widget blueprint compiler we do this no matter what - @todo: can i remove this? we're double registering..
 		IUMGEditorModule& UMGEditorModule = FModuleManager::LoadModuleChecked<IUMGEditorModule>("UMGEditor");
 		IKismetCompilerInterface& KismetCompilerModule = FModuleManager::LoadModuleChecked<IKismetCompilerInterface>("KismetCompiler");
 		KismetCompilerModule.GetCompilers().Add(UMGEditorModule.GetRegisteredCompiler());
+		KismetCompilerModule.OverrideBPTypeForClass(AEditorUtilityActor::StaticClass(), UEditorUtilityBlueprint::StaticClass());
+		KismetCompilerModule.OverrideBPTypeForClass(AEditorUtilityCamera::StaticClass(), UEditorUtilityBlueprint::StaticClass());
+		KismetCompilerModule.OverrideBPTypeForClass(UEditorUtilityObject::StaticClass(), UEditorUtilityBlueprint::StaticClass());
+		KismetCompilerModule.OverrideBPTypeForClass(UEditorUtilityWidget::StaticClass(), UEditorUtilityWidgetBlueprint::StaticClass());
 
 		FBlutilityContentBrowserExtensions::InstallHooks();
 		FBlutilityLevelEditorExtensions::InstallHooks();
+		FBlutilityUMGEditorExtensions::InstallHooks();
 
 		ScriptedEditorWidgetsGroup = WorkspaceMenu::GetMenuStructure().GetToolsCategory()->AddGroup(
 			LOCTEXT("WorkspaceMenu_EditorUtilityWidgetsGroup", "Editor Utility Widgets"),
 			LOCTEXT("ScriptedEditorWidgetsGroupTooltipText", "Custom editor UI created with Blueprints or Python."),
-			FSlateIcon(FEditorStyle::GetStyleSetName(), "WorkspaceMenu.AdditionalUI"),
+			FSlateIcon(FAppStyle::GetAppStyleSetName(), "WorkspaceMenu.AdditionalUI"),
 			true);
 
 		FLevelEditorModule& LevelEditorModule = FModuleManager::LoadModuleChecked<FLevelEditorModule>(TEXT("LevelEditor"));
@@ -90,6 +115,9 @@ public:
 
 		FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
 		AssetRegistryModule.Get().OnAssetRemoved().AddRaw(this, &FBlutilityModule::HandleAssetRemoved);
+
+		FPropertyEditorModule& PropertyModule = FModuleManager::LoadModuleChecked<FPropertyEditorModule>("PropertyEditor");
+		PropertyModule.RegisterCustomClassLayout(UEditorUtilityWidgetProjectSettings::StaticClass()->GetFName(), FOnGetDetailCustomizationInstance::CreateStatic(&FEditorUtilityWidgetSettingsCustomization::MakeInstance));
 	}
 
 	void ReinitializeUIs()
@@ -101,7 +129,7 @@ public:
 		for (const FSoftObjectPath& BlueprintPath : EditorUtilitySubsystem->LoadedUIs)
 		{
 			UObject* BlueprintObject = BlueprintPath.TryLoad();
-			if (BlueprintObject && !BlueprintObject->IsPendingKillOrUnreachable())
+			if (BlueprintObject && IsValidChecked(BlueprintObject) && !BlueprintObject->IsUnreachable())
 			{
 				UEditorUtilityWidgetBlueprint* Blueprint = Cast<UEditorUtilityWidgetBlueprint>(BlueprintObject);
 				if (Blueprint)
@@ -111,7 +139,7 @@ public:
 						const UEditorUtilityWidget* CDO = Blueprint->GeneratedClass->GetDefaultObject<UEditorUtilityWidget>();
 						FName RegistrationName = FName(*(Blueprint->GetPathName() + LOCTEXT("ActiveTabSuffix", "_ActiveTab").ToString()));
 						Blueprint->SetRegistrationName(RegistrationName);
-						FText DisplayName = FText::FromString(Blueprint->GetName());
+						FText DisplayName = Blueprint->GetTabDisplayName();
 						if (LevelEditorTabManager && !LevelEditorTabManager->HasTabSpawner(RegistrationName))
 						{
 							LevelEditorTabManager->RegisterTabSpawner(RegistrationName, FOnSpawnTab::CreateUObject(Blueprint, &UEditorUtilityWidgetBlueprint::SpawnEditorUITab))
@@ -179,17 +207,7 @@ public:
 
 		FBlutilityLevelEditorExtensions::RemoveHooks();
 		FBlutilityContentBrowserExtensions::RemoveHooks();
-
-		// Only unregister if the asset tools module is loaded.  We don't want to forcibly load it during shutdown phase.
-		check( EditorBlueprintAssetTypeActions.IsValid() );
-		if (FModuleManager::Get().IsModuleLoaded("AssetTools"))
-		{
-			IAssetTools& AssetTools = FModuleManager::LoadModuleChecked<FAssetToolsModule>("AssetTools").Get();
-			AssetTools.UnregisterAssetTypeActions(EditorBlueprintAssetTypeActions.ToSharedRef());
-			AssetTools.UnregisterAssetTypeActions(EditorWidgetBlueprintAssetTypeActions.ToSharedRef());
-		}
-		EditorBlueprintAssetTypeActions.Reset();
-		EditorWidgetBlueprintAssetTypeActions.Reset();
+		FBlutilityUMGEditorExtensions::RemoveHooks();
 
 		FEditorSupportDelegates::PrepareToCleanseEditorObject.RemoveAll(this);
 	}
@@ -217,13 +235,20 @@ public:
 		return EditorUtilityAssetCategory;
 	}
 
+	virtual TConstArrayView<FAssetCategoryPath> GetAssetCategories() const override
+	{
+		static const TArray<FAssetCategoryPath, TFixedAllocator<1>> Categories = {
+			FAssetCategoryPath(LOCTEXT("EditorUtilities", "Editor Utilities"))
+		};
+		return Categories;
+	}
+
 	virtual void AddLoadedScriptUI(class UEditorUtilityWidgetBlueprint* InBlueprint) override
 	{
 		UEditorUtilitySubsystem* EditorUtilitySubsystem = GEditor->GetEditorSubsystem<UEditorUtilitySubsystem>();
 		EditorUtilitySubsystem->LoadedUIs.AddUnique(InBlueprint);
 		EditorUtilitySubsystem->SaveConfig();
 	}
-
 
 	virtual void RemoveLoadedScriptUI(class UEditorUtilityWidgetBlueprint* InBlueprint) override
 	{
@@ -236,6 +261,10 @@ protected:
 
 	virtual void AddReferencedObjects(FReferenceCollector& Collector) override
 	{
+	}
+	virtual FString GetReferencerName() const override
+	{
+		return TEXT("FBlutilityModule");
 	}
 
 	void OnPrepareToCleanseEditorObject(UObject* InObject)
@@ -276,9 +305,13 @@ protected:
 	void HandleAssetRemoved(const FAssetData& InAssetData)
 	{
 		bool bDeletingLoadedUI = false;
+		if (!GEditor || !GEditor->GetEditorSubsystem<UEditorUtilitySubsystem>())
+		{
+			return;
+		}
 		for (const FSoftObjectPath& LoadedUIPath : GEditor->GetEditorSubsystem<UEditorUtilitySubsystem>()->LoadedUIs)
 		{
-			if (LoadedUIPath.GetAssetPathName() == InAssetData.ObjectPath)
+			if (LoadedUIPath == InAssetData.GetSoftObjectPath())
 			{
 				bDeletingLoadedUI = true;
 				break;
@@ -287,7 +320,7 @@ protected:
 
 		if (bDeletingLoadedUI)
 		{
-			FName UIToCleanup = FName(*(InAssetData.ObjectPath.ToString() + LOCTEXT("ActiveTabSuffix", "_ActiveTab").ToString()));
+			FName UIToCleanup = FName(*(InAssetData.GetObjectPathString() + LOCTEXT("ActiveTabSuffix", "_ActiveTab").ToString()));
 			FLevelEditorModule& LevelEditorModule = FModuleManager::GetModuleChecked<FLevelEditorModule>(TEXT("LevelEditor"));
 			TSharedPtr<FTabManager> LevelEditorTabManager = LevelEditorModule.GetLevelEditorTabManager();
 			TSharedPtr<SDockTab> CurrentTab = LevelEditorTabManager->FindExistingLiveTab(UIToCleanup);

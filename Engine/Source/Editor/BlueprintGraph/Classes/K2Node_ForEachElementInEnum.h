@@ -3,22 +3,32 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
-#include "Textures/SlateIcon.h"
-#include "K2Node.h"
+#include "EdGraph/EdGraphNode.h"
 #include "EdGraph/EdGraphNodeUtils.h"
+#include "Internationalization/Text.h"
+#include "K2Node.h"
+#include "NodeDependingOnEnumInterface.h"
+#include "Textures/SlateIcon.h"
+#include "UObject/Class.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/UObjectGlobals.h"
+
 #include "K2Node_ForEachElementInEnum.generated.h"
 
 class FBlueprintActionDatabaseRegistrar;
+class FName;
 class UEdGraph;
+class UObject;
+struct FLinearColor;
 
 UCLASS(MinimalAPI)
-class UK2Node_ForEachElementInEnum : public UK2Node
+class UK2Node_ForEachElementInEnum : public UK2Node, public INodeDependingOnEnumInterface
 {
 	GENERATED_UCLASS_BODY()
 
 	UPROPERTY()
-	UEnum* Enum;
+	TObjectPtr<UEnum> Enum;
 
 	BLUEPRINTGRAPH_API static const FName InsideLoopPinName;
 	BLUEPRINTGRAPH_API static const FName EnumOuputPinName;
@@ -39,6 +49,12 @@ class UK2Node_ForEachElementInEnum : public UK2Node
 	virtual FText GetMenuCategory() const override;
 	virtual void PostPlacedNewNode() override;
 	//~ End UK2Node Interface
+
+	// INodeDependingOnEnumInterface
+	virtual class UEnum* GetEnum() const override { return Enum; }
+	virtual void ReloadEnum(class UEnum* InEnum) override;
+	virtual bool ShouldBeReconstructedAfterEnumChanged() const override { return false; }
+	// End of INodeDependingOnEnumInterface
 
 private:
 	/** Constructing FText strings can be costly, so we cache the node's title */

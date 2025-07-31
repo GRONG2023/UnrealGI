@@ -1,20 +1,47 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "K2Node_BreakStruct.h"
-#include "Engine/UserDefinedStruct.h"
-#include "EdGraphSchema_K2.h"
-#include "Kismet2/BlueprintEditorUtils.h"
-#include "EdGraphUtilities.h"
-#include "KismetCompilerMisc.h"
-#include "KismetCompiler.h"
-#include "BlueprintNodeBinder.h"
-#include "BlueprintActionFilter.h"
-#include "BlueprintFieldNodeSpawner.h"
-#include "EditorCategoryUtils.h"
-#include "BlueprintActionDatabaseRegistrar.h"
-#include "PropertyCustomizationHelpers.h"
+
+#include "BPTerminal.h"
 #include "BlueprintEditorSettings.h"
+#include "Containers/Array.h"
+#include "Containers/EnumAsByte.h"
+#include "Containers/Map.h"
+#include "Containers/UnrealString.h"
+#include "Delegates/Delegate.h"
+#include "EdGraph/EdGraphPin.h"
+#include "EdGraphSchema_K2.h"
+#include "EdGraphUtilities.h"
+#include "EditorCategoryUtils.h"
+#include "Engine/Blueprint.h"
+#include "Engine/UserDefinedStruct.h"
+#include "EngineLogs.h"
+#include "Internationalization/Internationalization.h"
+#include "K2Node_StructOperation.h"
 #include "Kismet/KismetMathLibrary.h"
+#include "Kismet2/BlueprintEditorUtils.h"
+#include "Kismet2/CompilerResultsLog.h"
+#include "KismetCompiledFunctionContext.h"
+#include "KismetCompiler.h"
+#include "KismetCompilerMisc.h"
+#include "Logging/LogCategory.h"
+#include "Logging/LogMacros.h"
+#include "Math/Rotator.h"
+#include "Math/UnrealMathSSE.h"
+#include "Math/Vector2D.h"
+#include "Misc/AssertionMacros.h"
+#include "PropertyCustomizationHelpers.h"
+#include "Serialization/Archive.h"
+#include "Styling/AppStyle.h"
+#include "Templates/Casts.h"
+#include "Trace/Detail/Channel.h"
+#include "UObject/Class.h"
+#include "UObject/NameTypes.h"
+#include "UObject/Object.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/ObjectSaveContext.h"
+#include "UObject/UnrealType.h"
+#include "UObject/WeakObjectPtrTemplates.h"
 
 #define LOCTEXT_NAMESPACE "K2Node_BreakStruct"
 
@@ -299,7 +326,7 @@ void UK2Node_BreakStruct::ValidateNodeDuringCompilation(class FCompilerResultsLo
 
 FSlateIcon UK2Node_BreakStruct::GetIconAndTint(FLinearColor& OutColor) const
 {
-	static FSlateIcon Icon("EditorStyle", "GraphEditor.BreakStruct_16x");
+	static FSlateIcon Icon(FAppStyle::GetAppStyleSetName(), "GraphEditor.BreakStruct_16x");
 	return Icon;
 }
 
@@ -322,6 +349,7 @@ UK2Node::ERedirectType UK2Node_BreakStruct::DoPinsMatchForReconstruction(const U
 	{
 		Result = ERedirectType_Name;
 	}
+
 	return Result;
 }
 
@@ -332,49 +360,30 @@ FNodeHandlingFunctor* UK2Node_BreakStruct::CreateNodeHandler(class FKismetCompil
 
 void UK2Node_BreakStruct::GetMenuActions(FBlueprintActionDatabaseRegistrar& ActionRegistrar) const
 {
-	struct GetMenuActions_Utils
-	{
-		static void SetNodeStruct(UEdGraphNode* NewNode, FFieldVariant /*StructField*/, TWeakObjectPtr<UScriptStruct> NonConstStructPtr)
-		{
-			UK2Node_BreakStruct* BreakNode = CastChecked<UK2Node_BreakStruct>(NewNode);
-			BreakNode->StructType = NonConstStructPtr.Get();
-		}
-
-		static void OverrideCategory(FBlueprintActionContext const& Context, IBlueprintNodeBinder::FBindingSet const& /*Bindings*/, FBlueprintActionUiSpec* UiSpecOut, TWeakObjectPtr<UScriptStruct> StructPtr)
-		{
-			for (UEdGraphPin* Pin : Context.Pins)
-			{
-				UScriptStruct* PinStruct = Cast<UScriptStruct>(Pin->PinType.PinSubCategoryObject.Get());
-				if ((PinStruct != nullptr) && (StructPtr.Get() == PinStruct) && (Pin->Direction == EGPD_Output))
-				{
-					UiSpecOut->Category = LOCTEXT("EmptyCategory", "|");
-					break;
-				}
-			}
-		}
-	};
-
-	UClass* NodeClass = GetClass();
-	ActionRegistrar.RegisterStructActions( FBlueprintActionDatabaseRegistrar::FMakeStructSpawnerDelegate::CreateLambda([NodeClass](const UScriptStruct* Struct)->UBlueprintNodeSpawner*
-	{
-		UBlueprintFieldNodeSpawner* NodeSpawner = nullptr;
-		
-		if (UK2Node_BreakStruct::CanBeBroken(Struct))
-		{
-			NodeSpawner = UBlueprintFieldNodeSpawner::Create(NodeClass, const_cast<UScriptStruct*>(Struct));
-			check(NodeSpawner != nullptr);
-			TWeakObjectPtr<UScriptStruct> NonConstStructPtr = MakeWeakObjectPtr(const_cast<UScriptStruct*>(Struct));
-			NodeSpawner->SetNodeFieldDelegate     = UBlueprintFieldNodeSpawner::FSetNodeFieldDelegate::CreateStatic(GetMenuActions_Utils::SetNodeStruct, NonConstStructPtr);
-			NodeSpawner->DynamicUiSignatureGetter = UBlueprintFieldNodeSpawner::FUiSpecOverrideDelegate::CreateStatic(GetMenuActions_Utils::OverrideCategory, NonConstStructPtr);
-
-		}
-		return NodeSpawner;
-	}) );
+	Super::SetupMenuActions(ActionRegistrar, FMakeStructSpawnerAllowedDelegate::CreateStatic(&UK2Node_BreakStruct::CanBeBroken), EGPD_Output);
 }
 
 FText UK2Node_BreakStruct::GetMenuCategory() const
 {
 	return FEditorCategoryUtils::GetCommonCategory(FCommonEditorCategory::Struct);
+}
+
+void UK2Node_BreakStruct::PreSave(FObjectPreSaveContext SaveContext)
+{
+	Super::PreSave(SaveContext);
+	UBlueprint* Blueprint = FBlueprintEditorUtils::FindBlueprintForNode(this);
+	if (Blueprint && !Blueprint->bBeingCompiled)
+	{
+		bMadeAfterOverridePinRemoval = true;
+	}
+}
+
+void UK2Node_BreakStruct::PostPlacedNewNode()
+{
+	Super::PostPlacedNewNode();
+
+	// New nodes automatically have this set.
+	bMadeAfterOverridePinRemoval = true;
 }
 
 void UK2Node_BreakStruct::Serialize(FArchive& Ar)
@@ -404,15 +413,6 @@ void UK2Node_BreakStruct::Serialize(FArchive& Ar)
 			}
 		}
 	}
-	else if (Ar.IsSaving() && !Ar.IsTransacting())
-	{
-		UBlueprint* Blueprint = FBlueprintEditorUtils::FindBlueprintForNode(this);
-
-		if (Blueprint && !Blueprint->bBeingCompiled)
-		{
-			bMadeAfterOverridePinRemoval = true;
-		}
-	}
 }
 
 void UK2Node_BreakStruct::ConvertDeprecatedNode(UEdGraph* Graph, bool bOnlySafeChanges)
@@ -440,12 +440,12 @@ void UK2Node_BreakStruct::ConvertDeprecatedNode(UEdGraph* Graph, bool bOnlySafeC
 		}
 		else if (StructType == TBaseStructure<FVector>::Get())
 		{
-			BreakNodeFunction = UKismetMathLibrary::StaticClass()->FindFunctionByName(GET_FUNCTION_NAME_CHECKED(UKismetMathLibrary, BreakVector));
+			BreakNodeFunction = UKismetMathLibrary::StaticClass()->FindFunctionByName(GET_FUNCTION_NAME_CHECKED_FourParams(UKismetMathLibrary, BreakVector, FVector, double&, double&, double&));
 			OldPinToNewPinMap.Add(TEXT("Vector"), TEXT("InVec"));
 		}
 		else if (StructType == TBaseStructure<FVector2D>::Get())
 		{
-			BreakNodeFunction = UKismetMathLibrary::StaticClass()->FindFunctionByName(GET_FUNCTION_NAME_CHECKED(UKismetMathLibrary, BreakVector2D));
+			BreakNodeFunction = UKismetMathLibrary::StaticClass()->FindFunctionByName(GET_FUNCTION_NAME_CHECKED_ThreeParams(UKismetMathLibrary, BreakVector2D, FVector2D, double&, double&));
 			OldPinToNewPinMap.Add(TEXT("Vector2D"), TEXT("InVec"));
 		}
 		else

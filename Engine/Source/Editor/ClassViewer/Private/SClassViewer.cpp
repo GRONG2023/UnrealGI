@@ -1,85 +1,120 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "SClassViewer.h"
-#include "Misc/MessageDialog.h"
-#include "HAL/FileManager.h"
-#include "Misc/ConfigCacheIni.h"
-#include "Misc/FeedbackContext.h"
-#include "Modules/ModuleManager.h"
-#include "UObject/UObjectHash.h"
-#include "UObject/UObjectIterator.h"
-#include "UObject/CoreRedirects.h"
-#include "Misc/PackageName.h"
-#include "Widgets/SOverlay.h"
-#include "Layout/WidgetPath.h"
-#include "SlateOptMacros.h"
-#include "Framework/Application/SlateApplication.h"
-#include "Textures/SlateIcon.h"
-#include "Framework/Commands/UIAction.h"
-#include "Framework/Commands/UICommandList.h"
-#include "Widgets/Layout/SSeparator.h"
-#include "Widgets/Images/SImage.h"
-#include "Framework/MultiBox/MultiBoxBuilder.h"
-#include "Widgets/Input/SComboButton.h"
-#include "Framework/Docking/TabManager.h"
-#include "EditorStyleSet.h"
-#include "GameFramework/Actor.h"
-#include "Engine/BlueprintCore.h"
-#include "Engine/Blueprint.h"
-#include "Engine/Brush.h"
-#include "AssetData.h"
-#include "Editor/UnrealEdEngine.h"
-#include "Animation/AnimBlueprint.h"
-#include "Engine/BlueprintGeneratedClass.h"
-#include "EditorDirectories.h"
-#include "Dialogs/Dialogs.h"
-#include "UnrealEdGlobals.h"
-
-#include "EditorWidgetsModule.h"
-#include "Styling/SlateIconFinder.h"
-#include "DragAndDrop/ClassDragDropOp.h"
-#include "ContentBrowserDataDragDropOp.h"
-
-#include "IAssetTools.h"
-#include "ARFilter.h"
-#include "IContentBrowserSingleton.h"
-#include "ContentBrowserModule.h"
-
-#include "Kismet2/KismetEditorUtilities.h"
-#include "Editor.h"
-
-#include "PackageTools.h"
-#include "Logging/MessageLog.h"
-
-#include "AssetRegistryModule.h"
-#include "AssetToolsModule.h"
-
-#include "ClassViewerNode.h"
-
-#include "ClassViewerFilter.h"
-#include "UnloadedBlueprintData.h"
-
-#include "EditorClassUtils.h"
-#include "IDocumentation.h"
-
-#include "PropertyHandle.h"
 
 #include "AddToProjectConfig.h"
-#include "GameProjectGenerationModule.h"
-
-#include "SourceCodeNavigation.h"
-#include "Misc/HotReloadInterface.h"
-#include "Widgets/Input/SSearchBox.h"
-#include "Misc/TextFilterExpressionEvaluator.h"
-
-#include "SListViewSelectorDropdownMenu.h"
+#include "AssetDiscoveryIndicator.h"
+#include "AssetRegistry/AssetData.h"
+#include "AssetRegistry/AssetRegistryModule.h"
+#include "AssetRegistry/IAssetRegistry.h"
+#include "AssetToolsModule.h"
+#include "Blueprint/BlueprintSupport.h"
+#include "ClassViewerFilter.h"
+#include "ClassViewerNode.h"
 #include "ClassViewerProjectSettings.h"
-#include "Widgets/Layout/SScrollBorder.h"
+#include "Containers/ArrayView.h"
+#include "Containers/UnrealString.h"
+#include "ContentBrowserDataDragDropOp.h"
+#include "ContentBrowserModule.h"
+#include "CoreGlobals.h"
+#include "CoreTypes.h"
+#include "Dialogs/Dialogs.h"
+#include "DragAndDrop/ClassDragDropOp.h"
+#include "Editor.h"
+#include "Editor/EditorEngine.h"
+#include "Editor/UnrealEdEngine.h"
+#include "EditorClassUtils.h"
+#include "EditorDirectories.h"
+#include "EditorWidgetsModule.h"
+#include "Engine/Blueprint.h"
+#include "Engine/BlueprintGeneratedClass.h"
+#include "Fonts/SlateFontInfo.h"
+#include "Framework/Application/SlateApplication.h"
+#include "Framework/Commands/UIAction.h"
+#include "Framework/Commands/UICommandInfo.h"
+#include "Framework/Docking/TabManager.h"
+#include "Framework/MultiBox/MultiBoxBuilder.h"
+#include "Framework/SlateDelegates.h"
+#include "Framework/Views/ITypedTableView.h"
+#include "GameProjectGenerationModule.h"
+#include "HAL/PlatformMisc.h"
+#include "IAssetTools.h"
+#include "IContentBrowserSingleton.h"
+#include "IDocumentation.h"
+#include "Input/Events.h"
+#include "InputCoreTypes.h"
+#include "Internationalization/Internationalization.h"
+#include "Kismet2/KismetEditorUtilities.h"
+#include "Layout/Children.h"
+#include "Layout/Margin.h"
+#include "Layout/Visibility.h"
+#include "Layout/WidgetPath.h"
+#include "Logging/LogCategory.h"
+#include "Logging/LogMacros.h"
+#include "Logging/MessageLog.h"
+#include "Math/Color.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/Attribute.h"
+#include "Misc/CString.h"
+#include "Misc/FeedbackContext.h"
+#include "Misc/MessageDialog.h"
+#include "Misc/PackageName.h"
+#include "Misc/Paths.h"
+#include "Misc/TextFilterExpressionEvaluator.h"
+#include "Modules/ModuleManager.h"
+#include "PackageTools.h"
+#include "PropertyHandle.h"
+#include "SListViewSelectorDropdownMenu.h"
+#include "SlateOptMacros.h"
+#include "SlotBase.h"
+#include "SourceCodeNavigation.h"
+#include "Styling/AppStyle.h"
+#include "Styling/ISlateStyle.h"
+#include "Styling/SlateColor.h"
+#include "Styling/SlateIconFinder.h"
 #include "Subsystems/AssetEditorSubsystem.h"
+#include "Templates/Casts.h"
+#include "Textures/SlateIcon.h"
+#include "Trace/Detail/Channel.h"
+#include "Types/SlateStructs.h"
+#include "UObject/Class.h"
+#include "UObject/CoreRedirects.h"
+#include "UObject/Object.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/Package.h"
+#include "UObject/SoftObjectPath.h"
+#include "UObject/TopLevelAssetPath.h"
+#include "UObject/UObjectBase.h"
+#include "UObject/UObjectGlobals.h"
+#include "UObject/UObjectIterator.h"
+#include "UObject/UnrealNames.h"
+#include "UObject/WeakObjectPtr.h"
+#include "UObject/WeakObjectPtrTemplates.h"
+#include "UnloadedBlueprintData.h"
+#include "UnrealEdGlobals.h"
+#include "Widgets/Images/SImage.h"
+#include "Widgets/Input/SComboButton.h"
+#include "Widgets/Input/SSearchBox.h"
+#include "Widgets/Layout/SBorder.h"
+#include "Widgets/Layout/SBox.h"
+#include "Widgets/Layout/SScrollBorder.h"
+#include "Widgets/Layout/SSeparator.h"
+#include "Widgets/SBoxPanel.h"
+#include "Widgets/SNullWidget.h"
+#include "Widgets/SOverlay.h"
+#include "Widgets/SToolTip.h"
+#include "Widgets/Text/STextBlock.h"
+#include "Widgets/Views/SExpanderArrow.h"
+#include "Widgets/Views/SHeaderRow.h"
+#include "Widgets/Views/STableRow.h"
+
+class FUICommandList;
+class ITableRow;
+class SWidget;
+struct FGeometry;
+struct FSlateBrush;
 
 #define LOCTEXT_NAMESPACE "SClassViewer"
-
-DEFINE_LOG_CATEGORY_STATIC(LogEditorClassViewer, Log, All);
 
 //////////////////////////////////////////////////////////////
 
@@ -109,7 +144,7 @@ public:
 	FClassHierarchy();
 	~FClassHierarchy();
 
-	/** Populates the class hierarchy tree, pulling all the loaded and unloaded classes into a master tree. */
+	/** Populates the class hierarchy tree, pulling in all the loaded and unloaded classes. */
 	void PopulateClassHierarchy();
 	void PopulateClassHierarchy(const FAssetData& InAssetData) { PopulateClassHierarchy(); }
 
@@ -136,46 +171,39 @@ public:
 	 *
 	 *	@return The parent node.
 	 */
-	TSharedPtr< FClassViewerNode > FindParent(const TSharedPtr< FClassViewerNode >& InRootNode, FName InParentClassname, const UClass* InParentClass);
+	TSharedPtr< FClassViewerNode > FindParent(const TSharedPtr< FClassViewerNode >& InRootNode, FTopLevelAssetPath InParentClassname, const UClass* InParentClass);
 
 	/** Updates the Class of a node. Uses the generated class package name to find the node.
 	 *	@param InGeneratedClassPath		The path of the generated class to find the node for.
 	 *	@param InNewClass				The class to update the node with.
 	*/
-	void UpdateClassInNode(FName InGeneratedClassPath, UClass* InNewClass, UBlueprint* InNewBluePrint );
+	void UpdateClassInNode(FTopLevelAssetPath InGeneratedClassPath, UClass* InNewClass, UBlueprint* InNewBluePrint );
 
 	/** Finds the node, recursively going deeper into the hierarchy. Does so by comparing generated class package names.
 	 *	@param InGeneratedClassPath		The path of the generated class to find the node for.
 	 *
 	 *	@return The node.
 	 */
-	TSharedPtr< FClassViewerNode > FindNodeByGeneratedClassPath(const TSharedPtr< FClassViewerNode >& InRootNode, FName InGeneratedClassPath);
+	TSharedPtr< FClassViewerNode > FindNodeByGeneratedClassPath(const TSharedPtr< FClassViewerNode >& InRootNode, FTopLevelAssetPath InGeneratedClassPath);
 
 private:
 	/** Adds UClass information to The node in InOutClassPathToNode for every loaded class, creating the node if it does not exist. Does not filter classes.
 	 *	@param OutRootNode						Out parameter that receives the node pointer for the root UClass.
 	 *  @param InOutClassPathToNode				Map containing all nodes.
 	 */	
-	void CreateNodesForLoadedClasses( TSharedPtr<FClassViewerNode>& OutRootNode, TMap<FName, TSharedPtr< FClassViewerNode >>& InOutClassPathToNode );
+	void CreateNodesForLoadedClasses( TSharedPtr<FClassViewerNode>& OutRootNode, TMap<FTopLevelAssetPath, TSharedPtr< FClassViewerNode >>& InOutClassPathToNode );
 
-	/** Called when hot reload has finished */
-	void OnHotReload( bool bWasTriggeredAutomatically );
+	/** Called when reload has finished */
+	void OnReloadComplete( EReloadCompleteReason Reason );
 
 	/** 
-	 * Loads the tag data for an unloaded blueprint asset.
+	 * Makes or updates a class viewer node with the data for an unloaded blueprint asset.
 	 *
 	 * @param InOutClassViewerNode		The node to save all the data into.
 	 * @param InAssetData				The asset data to pull the tags from.
+	 * @parma InClassPath				The class path
 	 */
-	void LoadUnloadedTagData(TSharedPtr<FClassViewerNode>& InOutClassViewerNode, const FAssetData& InAssetData);
-
-	/**
-	 * Sets the fields calculated from AssetData on the given Node, if not already set
-	 *
-	 * @param InOutClassViewerNode		The node to save all the data into.
-	 * @param InAssetData				The asset data to pull the tags from.
-	 */
-	void SetAssetDataFields(TSharedPtr<FClassViewerNode>& InOutClassViewerNode, const FAssetData& InAssetData);
+	void CreateOrUpdateUnloadedClassNode(TSharedPtr<FClassViewerNode>& InOutClassViewerNode, const FAssetData& InAssetData, FTopLevelAssetPath InClassPath);
 
 	/**
 	 * Finds the UClass and UBlueprint for the passed in node, utilizing unloaded data to find it.
@@ -195,13 +223,16 @@ private:
 	 *
 	 * @return Returns true if the asset was found and deleted successfully.
 	 */
-	bool FindAndRemoveNodeByClassPath(const TSharedPtr< FClassViewerNode >& InRootNode, FName InClassPath);
+	bool FindAndRemoveNodeByClassPath(const TSharedPtr< FClassViewerNode >& InRootNode, FTopLevelAssetPath InClassPath);
 
 	/** Callback registered to the Asset Registry to be notified when an asset is added. */
 	void AddAsset(const FAssetData& InAddedAssetData);
 
 	/** Callback registered to the Asset Registry to be notified when an asset is removed. */
 	void RemoveAsset(const FAssetData& InRemovedAssetData);
+
+	/** Apply CoreRedirects on TopLevelAssetPath. */
+	void FixupClassCoreRedirects(FTopLevelAssetPath& InOutClassPath);
 private:
 	/** The "Object" class node that is used as a rooting point for the Class Viewer. */
 	TSharedPtr< FClassViewerNode > ObjectClassRoot;
@@ -229,7 +260,7 @@ namespace ClassViewer
 
 		// Pre-declare these functions.
 		static UBlueprint* GetBlueprint( UClass* InClass );
-		static void UpdateClassInNode(FName InGeneratedClassPath, UClass* InNewClass, UBlueprint* InNewBluePrint );
+		static void UpdateClassInNode(FTopLevelAssetPath InGeneratedClassPath, UClass* InNewClass, UBlueprint* InNewBluePrint );
 
 		/** Util class to checks if a particular class can be made into a Blueprint, ignores deprecation
 		 *
@@ -635,7 +666,7 @@ namespace ClassViewer
 			{
 				FMessageLog EditorErrors("EditorErrors");
 				FFormatNamedArguments Arguments;
-				Arguments.Add(TEXT("ObjectName"), FText::FromName(InOutClassNode->ClassPath));
+				Arguments.Add(TEXT("ObjectName"), FText::FromString(InOutClassNode->ClassPath.ToString()));
 				EditorErrors.Error(FText::Format(LOCTEXT("PackageLoadFail", "Failed to load class {ObjectName}"), Arguments));
 			}
 		}
@@ -691,7 +722,7 @@ namespace ClassViewer
 		*	@param InGeneratedClassPath			The name of the generated class to find the node for.
 		*	@param InNewClass					The class to update the node with.
 		*/
-		static void UpdateClassInNode(FName InGeneratedClassPath, UClass* InNewClass, UBlueprint* InNewBluePrint )
+		static void UpdateClassInNode(FTopLevelAssetPath InGeneratedClassPath, UClass* InNewClass, UBlueprint* InNewBluePrint )
 		{
 			ClassHierarchy->UpdateClassInNode(InGeneratedClassPath, InNewClass, InNewBluePrint );
 		}
@@ -774,7 +805,7 @@ public:
 		, _bIsInClassViewer( true )
 		, _bDynamicClassLoading( true )
 		, _HighlightText()
-		, _TextColor(FLinearColor(1.0f, 1.0f, 1.0f, 1.0f))
+		, _Font(FAppStyle::Get().GetFontStyle("NormalFont"))
 		{}
 
 		/** The classname this item contains. */
@@ -787,8 +818,8 @@ public:
 		SLATE_ARGUMENT( bool, bDynamicClassLoading )
 		/** The text this item should highlight, if any. */
 		SLATE_ARGUMENT( FText, HighlightText )
-		/** The color text this item will use. */
-		SLATE_ARGUMENT( FSlateColor, TextColor )
+		/** The font this item will use. */
+		SLATE_ARGUMENT( FSlateFontInfo, Font )
 		/** The node this item is associated with. */
 		SLATE_ARGUMENT( TSharedPtr<FClassViewerNode>, AssociatedNode)
 		/** the delegate for handling double clicks outside of the SClassItem */
@@ -837,9 +868,9 @@ public:
 					UPackage*  Package  = Class->GetOutermost();
 					ToolTip = FEditorClassUtils::GetTooltip(Class);
 				}
-				else if (AssociatedNode->ClassPath != NAME_None)
+				else if (!AssociatedNode->ClassPath.IsNull())
 				{
-					ToolTip = SNew(SToolTip).Text(FText::FromName(AssociatedNode->ClassPath));
+					ToolTip = SNew(SToolTip).Text(FText::FromString(AssociatedNode->ClassPath.ToString()));
 				}
 
 				return ToolTip;
@@ -862,11 +893,12 @@ public:
 
 			+SHorizontalBox::Slot()
 				.AutoWidth()
+				.VAlign(VAlign_Center)
 				.Padding( 0.0f, 2.0f, 6.0f, 2.0f )
 				[
 					SNew( SImage )
 					.Image(	ClassIcon )
-					.Visibility( ClassIcon != FEditorStyle::GetDefaultBrush()? EVisibility::Visible : EVisibility::Collapsed )
+					.Visibility( ClassIcon != FAppStyle::GetDefaultBrush()? EVisibility::Visible : EVisibility::Collapsed )
 				]
 
 			+SHorizontalBox::Slot()
@@ -876,8 +908,9 @@ public:
 				[
 					SNew( STextBlock )
 						.Text( FText::FromString(*ClassName.Get()) )
+						.Font(InArgs._Font)
 						.HighlightText(InArgs._HighlightText)
-						.ColorAndOpacity( this, &SClassItem::GetTextColor)
+						.ColorAndOpacity(FSlateColor::UseForeground())
 						.ToolTip(Local::GetToolTip(AssociatedNode))
 						.IsEnabled(!bIsRestricted)
 				]
@@ -886,7 +919,7 @@ public:
 				.AutoWidth()
 				.HAlign(HAlign_Right)
 				.VAlign(VAlign_Center)
-				.Padding( 0.0f, 0.0f, 6.0f, 0.0f )
+				.Padding( 0.0f, 1.0f, 6.0f, 1.0f )
 				[
 					SNew( SComboButton )
 						.ContentPadding(FMargin(2.0f))
@@ -894,8 +927,6 @@ public:
 						.OnGetMenuContent(this, &SClassItem::GenerateDropDown)
 				]
 		];
-		
-		TextColor = InArgs._TextColor;
 
 		UE_LOG(LogEditorClassViewer, VeryVerbose, TEXT("CLASS [%s]"), **ClassName);
 
@@ -909,7 +940,7 @@ public:
 	}
 
 private:
-	FReply OnMouseButtonDoubleClick( const FGeometry& InMyGeometry, const FPointerEvent& InMouseEvent )
+	virtual FReply OnMouseButtonDoubleClick( const FGeometry& InMyGeometry, const FPointerEvent& InMouseEvent ) override
 	{
 		// If in a Class Viewer and it has not been loaded, load the class when double-left clicking.
 		if ( bIsInClassViewer )
@@ -971,21 +1002,6 @@ private:
 		return SNullWidget::NullWidget;
 	}
 
-	/** Returns the text color for the item based on if it is selected or not. */
-	FSlateColor GetTextColor() const
-	{
-		const TSharedPtr< ITypedTableView< TSharedPtr<FString> > > OwnerWidget = OwnerTablePtr.Pin();
-		const TSharedPtr<FString>* MyItem = OwnerWidget->Private_ItemFromWidget( this );
-		const bool bIsSelected = OwnerWidget->Private_IsItemSelected( *MyItem );
-
-		if(bIsSelected)
-		{
-			return FSlateColor::UseForeground();
-		}
-
-		return TextColor;
-	}
-
 private:
 
 	/** The class name for which this item is associated with. */
@@ -999,9 +1015,6 @@ private:
 
 	/** true if dynamic class loading is permitted. */
 	bool bDynamicClassLoading;
-
-	/** The text color for this item. */
-	FSlateColor TextColor;
 
 	/** The Class Viewer Node this item is associated with. */
 	TSharedPtr< FClassViewerNode > AssociatedNode;
@@ -1018,14 +1031,13 @@ static void OnModulesChanged(FName ModuleThatChanged, EModuleChangeReason Reason
 FClassHierarchy::FClassHierarchy()
 {
 	// Register with the Asset Registry to be informed when it is done loading up files.
-	FAssetRegistryModule& AssetRegistryModule = FModuleManager::GetModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
-	OnFilesLoadedRequestPopulateClassHierarchyDelegateHandle = AssetRegistryModule.Get().OnFilesLoaded().AddStatic( ClassViewer::Helpers::RequestPopulateClassHierarchy );
-	AssetRegistryModule.Get().OnAssetAdded().AddRaw( this, &FClassHierarchy::AddAsset);
-	AssetRegistryModule.Get().OnAssetRemoved().AddRaw( this, &FClassHierarchy::RemoveAsset );
+	IAssetRegistry& AssetRegistry = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(AssetRegistryConstants::ModuleName).Get();
+	OnFilesLoadedRequestPopulateClassHierarchyDelegateHandle = AssetRegistry.OnFilesLoaded().AddStatic( ClassViewer::Helpers::RequestPopulateClassHierarchy );
+	AssetRegistry.OnAssetAdded().AddRaw( this, &FClassHierarchy::AddAsset);
+	AssetRegistry.OnAssetRemoved().AddRaw( this, &FClassHierarchy::RemoveAsset );
 
-	// Register to have Populate called when doing a Hot Reload.
-	IHotReloadInterface& HotReloadSupport = FModuleManager::LoadModuleChecked<IHotReloadInterface>("HotReload");
-	HotReloadSupport.OnHotReload().AddRaw( this, &FClassHierarchy::OnHotReload );
+	// Register to have Populate called when doing a Reload.
+	FCoreUObjectDelegates::ReloadCompleteDelegate.AddRaw( this, &FClassHierarchy::OnReloadComplete );
 
 	// Register to have Populate called when a Blueprint is compiled.
 	OnBlueprintCompiledRequestPopulateClassHierarchyDelegateHandle            = GEditor->OnBlueprintCompiled().AddStatic(ClassViewer::Helpers::RequestPopulateClassHierarchy);
@@ -1037,19 +1049,18 @@ FClassHierarchy::FClassHierarchy()
 FClassHierarchy::~FClassHierarchy()
 {
 	// Unregister with the Asset Registry to be informed when it is done loading up files.
-	if( FModuleManager::Get().IsModuleLoaded( TEXT("AssetRegistry") ) )
+	if (FAssetRegistryModule* AssetRegistryModule = FModuleManager::Get().GetModulePtr<FAssetRegistryModule>(AssetRegistryConstants::ModuleName))
 	{
-		FAssetRegistryModule& AssetRegistryModule = FModuleManager::GetModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
-		AssetRegistryModule.Get().OnFilesLoaded().Remove(OnFilesLoadedRequestPopulateClassHierarchyDelegateHandle);
-		AssetRegistryModule.Get().OnAssetAdded().RemoveAll( this );
-		AssetRegistryModule.Get().OnAssetRemoved().RemoveAll( this );
-
-		// Unregister to have Populate called when doing a Hot Reload.
-		if(FModuleManager::Get().IsModuleLoaded("HotReload"))
+		IAssetRegistry* AssetRegistry = AssetRegistryModule->TryGet();
+		if (AssetRegistry)
 		{
-			IHotReloadInterface& HotReloadSupport = FModuleManager::GetModuleChecked<IHotReloadInterface>("HotReload");
-			HotReloadSupport.OnHotReload().RemoveAll(this);
+			AssetRegistry->OnFilesLoaded().Remove(OnFilesLoadedRequestPopulateClassHierarchyDelegateHandle);
+			AssetRegistry->OnAssetAdded().RemoveAll(this);
+			AssetRegistry->OnAssetRemoved().RemoveAll(this);
 		}
+
+		// Unregister to have Populate called when doing a Reload.
+		FCoreUObjectDelegates::ReloadCompleteDelegate.RemoveAll(this);
 
 		if (GEditor)
 		{
@@ -1062,35 +1073,35 @@ FClassHierarchy::~FClassHierarchy()
 	FModuleManager::Get().OnModulesChanged().RemoveAll(this);
 }
 
-void FClassHierarchy::OnHotReload(bool bWasTriggeredAutomatically)
+void FClassHierarchy::OnReloadComplete(EReloadCompleteReason Reason)
 {
 	ClassViewer::Helpers::RequestPopulateClassHierarchy();
 }
 
-void FClassHierarchy::CreateNodesForLoadedClasses(TSharedPtr<FClassViewerNode>& OutRootNode, TMap<FName, TSharedPtr< FClassViewerNode >>& InOutClassPathToNode)
+void FClassHierarchy::CreateNodesForLoadedClasses(TSharedPtr<FClassViewerNode>& OutRootNode, TMap<FTopLevelAssetPath, TSharedPtr< FClassViewerNode >>& InOutClassPathToNode)
 {
 	for (TObjectIterator<UClass> ClassIt; ClassIt; ++ClassIt)
 	{
 		UClass* CurrentClass = *ClassIt;
 		// Ignore deprecated and temporary trash classes.
-		if (CurrentClass->HasAnyClassFlags(CLASS_Deprecated | CLASS_NewerVersionExists) ||
+		if (CurrentClass->HasAnyClassFlags(CLASS_Deprecated | CLASS_NewerVersionExists | CLASS_Hidden) ||
 			FKismetEditorUtilities::IsClassABlueprintSkeleton(CurrentClass))
 		{
 			continue;
 		}
-		TSharedPtr<FClassViewerNode>& Node = InOutClassPathToNode.FindOrAdd(FName(*CurrentClass->GetPathName()));
+		TSharedPtr<FClassViewerNode>& Node = InOutClassPathToNode.FindOrAdd(CurrentClass->GetClassPathName());
 		if (!Node)
 		{
 			Node = MakeShared<FClassViewerNode>(CurrentClass->GetName(), CurrentClass->GetDisplayNameText().ToString());
 		}
 		SetClassFields(Node, *CurrentClass);
 	}
-	TSharedPtr<FClassViewerNode>* ExistingRoot = InOutClassPathToNode.Find(FName(*UObject::StaticClass()->GetPathName()));
+	TSharedPtr<FClassViewerNode>* ExistingRoot = InOutClassPathToNode.Find(UObject::StaticClass()->GetClassPathName());
 	check(ExistingRoot && ExistingRoot->IsValid());
 	OutRootNode = *ExistingRoot;
 }
 
-TSharedPtr< FClassViewerNode > FClassHierarchy::FindParent(const TSharedPtr< FClassViewerNode >& InRootNode, FName InParentClassname, const UClass* InParentClass)
+TSharedPtr< FClassViewerNode > FClassHierarchy::FindParent(const TSharedPtr< FClassViewerNode >& InRootNode, FTopLevelAssetPath InParentClassname, const UClass* InParentClass)
 {
 	// Check if the current node is the parent classname that is being searched for.
 	if(InRootNode->ClassPath == InParentClassname)
@@ -1130,7 +1141,7 @@ TSharedPtr< FClassViewerNode > FClassHierarchy::FindParent(const TSharedPtr< FCl
 	return ReturnNode;
 }
 
-TSharedPtr< FClassViewerNode > FClassHierarchy::FindNodeByGeneratedClassPath(const TSharedPtr< FClassViewerNode >& InRootNode, FName InGeneratedClassPath)
+TSharedPtr< FClassViewerNode > FClassHierarchy::FindNodeByGeneratedClassPath(const TSharedPtr< FClassViewerNode >& InRootNode, FTopLevelAssetPath InGeneratedClassPath)
 {
 	if(InRootNode->ClassPath == InGeneratedClassPath)
 	{
@@ -1154,7 +1165,7 @@ TSharedPtr< FClassViewerNode > FClassHierarchy::FindNodeByGeneratedClassPath(con
 	return ReturnNode;
 }
 
-void FClassHierarchy::UpdateClassInNode(FName InGeneratedClassPath, UClass* InNewClass, UBlueprint* InNewBluePrint )
+void FClassHierarchy::UpdateClassInNode(FTopLevelAssetPath InGeneratedClassPath, UClass* InNewClass, UBlueprint* InNewBluePrint )
 {
 	TSharedPtr< FClassViewerNode > Node = FindNodeByGeneratedClassPath(ObjectClassRoot, InGeneratedClassPath);
 
@@ -1165,46 +1176,44 @@ void FClassHierarchy::UpdateClassInNode(FName InGeneratedClassPath, UClass* InNe
 	}
 }
 
-bool FClassHierarchy::FindAndRemoveNodeByClassPath(const TSharedPtr< FClassViewerNode >& InRootNode, FName InClassPath)
+bool FClassHierarchy::FindAndRemoveNodeByClassPath(const TSharedPtr< FClassViewerNode >& InRootNode, FTopLevelAssetPath InClassPath)
 {
-	bool bReturnValue = false;
+	FixupClassCoreRedirects(InClassPath);
 
-	// Search the children recursively, one of them might have the parent.
-	for(int32 ChildClassIndex = 0; ChildClassIndex < InRootNode->GetChildrenList().Num(); ChildClassIndex++)
-	{
-		if(InRootNode->GetChildrenList()[ChildClassIndex]->ClassPath == InClassPath)						   
+	TFunction<bool(const TSharedPtr<FClassViewerNode>&)> FindAndRemoveNodeRecursive;
+	FindAndRemoveNodeRecursive = [&InClassPath, &FindAndRemoveNodeRecursive](const TSharedPtr<FClassViewerNode>& InRootNode)
 		{
-			InRootNode->GetChildrenList().RemoveAt(ChildClassIndex);
-			return true;
-		}
-		// Check the child, then check the return to see if it is valid. If it is valid, end the recursion.
-		bReturnValue = FindAndRemoveNodeByClassPath(InRootNode->GetChildrenList()[ChildClassIndex], InClassPath);
+			// Search the children recursively, one of them might have the parent.
+			TArray<TSharedPtr<FClassViewerNode>>& ChildrenList = InRootNode->GetChildrenList();
+			for (int32 ChildClassIndex = 0; ChildClassIndex < ChildrenList.Num(); ChildClassIndex++)
+			{
+				if (ChildrenList[ChildClassIndex]->ClassPath == InClassPath)
+				{
+					ChildrenList.RemoveAt(ChildClassIndex);
+					return true;
+				}
 
-		if(bReturnValue)
-		{
-			break;
-		}
-	}
-	return bReturnValue;
+				// Check the child, then check the return to see if it is valid. If it is valid, end the recursion.
+				if (FindAndRemoveNodeRecursive(ChildrenList[ChildClassIndex]))
+				{
+					return true;
+				}
+			}
+
+			return false;
+		};
+
+	return FindAndRemoveNodeRecursive(InRootNode);
 }
 
 void FClassHierarchy::RemoveAsset(const FAssetData& InRemovedAssetData)
 {
-	FString ClassObjectPath;
-	if (InRemovedAssetData.GetTagValue(FBlueprintTags::GeneratedClassPath, ClassObjectPath))
-	{
-		ClassObjectPath = FPackageName::ExportTextPathToObjectPath(ClassObjectPath);
+	// BPGCs can be missing if it was already deleted prior to the notification being sent. 
+	// Let's try to reconstruct the generated class path from the BP object path.
+	bool bGenerateClassPathIfMissing = true;
+	const FTopLevelAssetPath ClassPath = FEditorClassUtils::GetClassPathNameFromAsset(InRemovedAssetData, bGenerateClassPathIfMissing);
 
-		if (ClassObjectPath == "None")
-		{
-			// This can happen if the generated class was already deleted prior to 
-			// the notification being sent. Let's try to reconstruct the generated
-			// class name from the object path.
-			ClassObjectPath = InRemovedAssetData.ObjectPath.ToString() + "_C";
-		}
-	}
-
-	if (FindAndRemoveNodeByClassPath(ObjectClassRoot, FName(*ClassObjectPath)))
+	if (!ClassPath.IsNull() && FindAndRemoveNodeByClassPath(ObjectClassRoot, ClassPath))
 	{
 		// All viewers must refresh.
 		ClassViewer::Helpers::RefreshAll();
@@ -1213,44 +1222,36 @@ void FClassHierarchy::RemoveAsset(const FAssetData& InRemovedAssetData)
 
 void FClassHierarchy::AddAsset(const FAssetData& InAddedAssetData)
 {
-	FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
-	if ( !AssetRegistryModule.Get().IsLoadingAssets() )
+	IAssetRegistry& AssetRegistry = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(AssetRegistryConstants::ModuleName).Get();
+	if (AssetRegistry.IsLoadingAssets())
 	{
-		TArray<FName> AncestorClassNames;
-		AssetRegistryModule.Get().GetAncestorClassNames(InAddedAssetData.AssetClass, AncestorClassNames);
+		return;
+	}
 
-		if( AncestorClassNames.Contains(UBlueprintCore::StaticClass()->GetFName()) )
+	const FTopLevelAssetPath ClassPath = FEditorClassUtils::GetClassPathNameFromAsset(InAddedAssetData);
+
+	// Make sure that the node does not already exist. There is a bit of double adding going on at times and this prevents it.
+	if (!ClassPath.IsNull() && !FindNodeByGeneratedClassPath(ObjectClassRoot, ClassPath).IsValid())
+	{
+		TSharedPtr<FClassViewerNode> NewNode;
+		CreateOrUpdateUnloadedClassNode(NewNode, InAddedAssetData, ClassPath);
+
+		// Find the blueprint if it's loaded.
+		FindClass(NewNode);
+
+		// Resolve the parent's class name locally and use it to find the parent's class.
+		FString ParentClassPath = NewNode->ParentClassPath.ToString();
+		UClass* ParentClass = FindObject<UClass>(nullptr, *ParentClassPath);
+		TSharedPtr< FClassViewerNode > ParentNode = FindParent(ObjectClassRoot, NewNode->ParentClassPath, ParentClass); 
+		if (ParentNode.IsValid())
 		{
-			FString ClassObjectPath;
-			if (InAddedAssetData.GetTagValue(FBlueprintTags::GeneratedClassPath, ClassObjectPath))
-			{
-				ClassObjectPath = FPackageName::ExportTextPathToObjectPath(ClassObjectPath);
-			}
+			ParentNode->AddChild(NewNode);
 
-			// Make sure that the node does not already exist. There is a bit of double adding going on at times and this prevents it.
-			if(!FindNodeByGeneratedClassPath(ObjectClassRoot, FName(*ClassObjectPath)).IsValid())
-			{
-				TSharedPtr< FClassViewerNode > NewNode;
-				LoadUnloadedTagData(NewNode, InAddedAssetData);
+			// Make sure the children are properly sorted.
+			SortChildren(ObjectClassRoot);
 
-				// Find the blueprint if it's loaded.
-				FindClass(NewNode);
-
-				// Resolve the parent's class name locally and use it to find the parent's class.
-				FString ParentClassPath = NewNode->ParentClassPath.ToString();
-				UClass* ParentClass = FindObject<UClass>(nullptr, *ParentClassPath);
-				TSharedPtr< FClassViewerNode > ParentNode = FindParent(ObjectClassRoot, NewNode->ParentClassPath, ParentClass); 
-				if (ParentNode.IsValid())
-				{
-					ParentNode->AddChild(NewNode);
-
-					// Make sure the children are properly sorted.
-					SortChildren(ObjectClassRoot);
-
-					// All Viewers must repopulate.
-					ClassViewer::Helpers::RefreshAll();
-				}
-			}
+			// All Viewers must repopulate.
+			ClassViewer::Helpers::RefreshAll();
 		}
 	}
 }
@@ -1287,15 +1288,15 @@ void FClassHierarchy::SetClassFields(TSharedPtr<FClassViewerNode>& InOutClassNod
 	}
 
 	// Fields that can als be set from FAssetData
-	if (InOutClassNode->ClassPath.IsNone())
+	if (InOutClassNode->ClassPath.IsNull())
 	{
-		InOutClassNode->ClassPath = FName(*Class.GetPathName());
+		InOutClassNode->ClassPath = Class.GetClassPathName();
 	}
-	if (InOutClassNode->ParentClassPath.IsNone())
+	if (InOutClassNode->ParentClassPath.IsNull())
 	{
 		if (Class.GetSuperClass())
 		{
-			InOutClassNode->ParentClassPath = FName(*Class.GetSuperClass()->GetPathName());
+			InOutClassNode->ParentClassPath = Class.GetSuperClass()->GetClassPathName();
 		}
 	}
 
@@ -1304,22 +1305,41 @@ void FClassHierarchy::SetClassFields(TSharedPtr<FClassViewerNode>& InOutClassNod
 	InOutClassNode->Class = &Class;
 }
 
-void FClassHierarchy::LoadUnloadedTagData(TSharedPtr<FClassViewerNode>& InOutClassViewerNode, const FAssetData& InAssetData)
+
+void FClassHierarchy::FixupClassCoreRedirects(FTopLevelAssetPath& InOutClassPath)
 {
-	const FString ClassName = InAssetData.AssetName.ToString();
-	FString ClassDisplayName = InAssetData.GetTagValueRef<FString>(FBlueprintTags::BlueprintDisplayName);
-	if (ClassDisplayName.IsEmpty())
+	const FCoreRedirectObjectName OldName = FCoreRedirectObjectName(InOutClassPath);
+	const FCoreRedirectObjectName NewName = FCoreRedirects::GetRedirectedName(ECoreRedirectFlags::Type_Class, OldName);
+	
+	if (OldName != NewName)
 	{
-		ClassDisplayName = ClassName;
+		const FString OldClassPath = InOutClassPath.ToString();
+
+		// Only do the fixup if the old class name isn't in memory.
+		const UClass* FoundOldClass = UClass::TryFindTypeSlow<UClass>(OldClassPath);
+		const FTopLevelAssetPath NewClassPath(NewName.ToString());
+
+		if (!FoundOldClass || FoundOldClass->GetClassPathName() == NewClassPath)
+		{
+			InOutClassPath = NewClassPath;
+		}
 	}
-	// Create the viewer node. We use the name without _C for both
-	InOutClassViewerNode = MakeShared<FClassViewerNode>(ClassName, ClassDisplayName);
-	SetAssetDataFields(InOutClassViewerNode, InAssetData);
 }
 
 
-void FClassHierarchy::SetAssetDataFields(TSharedPtr<FClassViewerNode>& InOutClassViewerNode, const FAssetData& InAssetData)
+void FClassHierarchy::CreateOrUpdateUnloadedClassNode(TSharedPtr<FClassViewerNode>& InOutClassViewerNode, const FAssetData& InAssetData, FTopLevelAssetPath InClassPath)
 {
+	if (!InOutClassViewerNode)
+	{
+		const FString ClassName = InAssetData.AssetName.ToString();
+		FString ClassDisplayName = InAssetData.GetTagValueRef<FString>(FBlueprintTags::BlueprintDisplayName);
+		if (ClassDisplayName.IsEmpty())
+		{
+			ClassDisplayName = ClassName;
+		}
+		InOutClassViewerNode = MakeShared<FClassViewerNode>(ClassName, ClassDisplayName);
+	}
+
 	if (InOutClassViewerNode->UnloadedBlueprintData.IsValid())
 	{
 		// Already set
@@ -1328,61 +1348,40 @@ void FClassHierarchy::SetAssetDataFields(TSharedPtr<FClassViewerNode>& InOutClas
 
 	// Fields that can also be set from UClass*
 
-	FString ClassObjectPath;
-	if (InOutClassViewerNode->ClassPath.IsNone())
-	{
-		if (InAssetData.GetTagValue(FBlueprintTags::GeneratedClassPath, ClassObjectPath))
-		{
-			InOutClassViewerNode->ClassPath = FName(*FPackageName::ExportTextPathToObjectPath(ClassObjectPath));
-		}
-	}
-	if (InOutClassViewerNode->ParentClassPath.IsNone())
+	InOutClassViewerNode->ClassPath = InClassPath;
+
+	if (InOutClassViewerNode->ParentClassPath.IsNull())
 	{
 		FString ParentClassPathString;
 		if (InAssetData.GetTagValue(FBlueprintTags::ParentClassPath, ParentClassPathString))
 		{
-			InOutClassViewerNode->ParentClassPath = FName(*FPackageName::ExportTextPathToObjectPath(ParentClassPathString));
+			FTopLevelAssetPath ParentClassPath(FTopLevelAssetPath(*FPackageName::ExportTextPathToObjectPath(ParentClassPathString)));
+			FixupClassCoreRedirects(ParentClassPath);
+			InOutClassViewerNode->ParentClassPath = ParentClassPath;
 		}
 	}
 
 	// Blueprint-specific fields
 
-	InOutClassViewerNode->BlueprintAssetPath = InAssetData.ObjectPath;
+	InOutClassViewerNode->BlueprintAssetPath = InAssetData.GetSoftObjectPath();
 
 	// It is an unloaded blueprint, so we need to create the structure that will hold the data.
-	TSharedPtr<FUnloadedBlueprintData> UnloadedBlueprintData = MakeShareable( new FUnloadedBlueprintData(InOutClassViewerNode) );
+	TSharedPtr<FUnloadedBlueprintData> UnloadedBlueprintData = MakeShareable(new FUnloadedBlueprintData(InOutClassViewerNode));
 	InOutClassViewerNode->UnloadedBlueprintData = UnloadedBlueprintData;
 
 	const bool bNormalBlueprintType = InAssetData.GetTagValueRef<FString>(FBlueprintTags::BlueprintType) == TEXT("BPType_Normal");
-	InOutClassViewerNode->UnloadedBlueprintData->SetNormalBlueprintType( bNormalBlueprintType );
+	InOutClassViewerNode->UnloadedBlueprintData->SetNormalBlueprintType(bNormalBlueprintType);
 
 	// Get the class flags.
 	const uint32 ClassFlags = InAssetData.GetTagValueRef<uint32>(FBlueprintTags::ClassFlags);
 	InOutClassViewerNode->UnloadedBlueprintData->SetClassFlags(ClassFlags);
 
-	const FString ImplementedInterfaces = InAssetData.GetTagValueRef<FString>(FBlueprintTags::ImplementedInterfaces);
-	if(!ImplementedInterfaces.IsEmpty())
+	// Get interface class paths.
+	TArray<FString> ImplementedInterfaces;
+	FEditorClassUtils::GetImplementedInterfaceClassPathsFromAsset(InAssetData, ImplementedInterfaces);
+	for (const FString& InterfacePath : ImplementedInterfaces)
 	{
-		FString FullInterface;
-		FString RemainingString;
-		FString InterfacePath;
-		FString CurrentString = *ImplementedInterfaces;
-		while(CurrentString.Split(TEXT(","), &FullInterface, &RemainingString))
-		{
-			if (!CurrentString.StartsWith(TEXT("Graphs=(")))
-			{
-				if (FullInterface.Split(TEXT("\""), &CurrentString, &InterfacePath, ESearchCase::CaseSensitive))
-				{
-					// The interface paths in metadata end with "', so remove those
-					InterfacePath.RemoveFromEnd(TEXT("\"'"));
-
-					FCoreRedirectObjectName ResolvedInterfaceName = FCoreRedirects::GetRedirectedName(ECoreRedirectFlags::Type_Class, FCoreRedirectObjectName(InterfacePath));
-					UnloadedBlueprintData->AddImplementedInterface(ResolvedInterfaceName.ObjectName.ToString());
-				}
-			}
-			
-			CurrentString = RemainingString;
-		}
+		UnloadedBlueprintData->AddImplementedInterface(InterfacePath);
 	}
 }
 
@@ -1391,53 +1390,50 @@ void FClassHierarchy::PopulateClassHierarchy()
 	// Fetch all classes from AssetRegistry blueprint data (which covers unloaded classes), and in-memory UClasses.
 	// Create a node for each one with unioned data from the AssetRegistry or UClass for that class.
 	// Set parent/child pointers to create a tree, and store this tree in this->ObjectClassRoot
-	TMap<FName, TSharedPtr<FClassViewerNode>> ClassPathToNode;
-
+	TMap<FTopLevelAssetPath, TSharedPtr<FClassViewerNode>> ClassPathToNode;
 
 	// Create a node for every Blueprint class listed in the AssetRegistry and set the Blueprint fields
 	// Retrieve all blueprint classes 
-	FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
-	TArray<FAssetData> BlueprintList;
-	FARFilter Filter;
-	Filter.ClassNames.Add(UBlueprint::StaticClass()->GetFName());
-	Filter.ClassNames.Add(UAnimBlueprint::StaticClass()->GetFName());
-	Filter.ClassNames.Add(UBlueprintGeneratedClass::StaticClass()->GetFName());
-	// Include any Blueprint based objects as well, this includes things like Blutilities, UMG, and GameplayAbility objects
-	Filter.bRecursiveClasses = true;
-	AssetRegistryModule.Get().GetAssets(Filter, BlueprintList);
-	FString ClassPathString;
-	for (FAssetData& AssetData : BlueprintList)
 	{
-		FName ClassPath;
-		if (AssetData.GetTagValue(FBlueprintTags::GeneratedClassPath, ClassPathString))
+		IAssetRegistry& AssetRegistry = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(AssetRegistryConstants::ModuleName).Get();
+		FString ClassPathString;
+
+		TArray<FAssetData> Assets;
+		AssetRegistry.GetAssetsByClass(UBlueprint::StaticClass()->GetClassPathName(), Assets, /*bSearchSubClasses=*/true);
+
+		for (const FAssetData& AssetData : Assets)
 		{
-			ClassPath = FName(*FPackageName::ExportTextPathToObjectPath(ClassPathString));
-		}
-		if (ClassPath.IsNone())
-		{
-			UE_LOG(LogEditorClassViewer, Warning, TEXT("AssetRegistry Blueprint %s is missing tag value for %s. Blueprint will not be available to ClassViewer when unloaded."),
-				*AssetData.ObjectPath.ToString(), *FBlueprintTags::GeneratedClassPath.ToString());
-			continue;
-		}
-		TSharedPtr<FClassViewerNode>& Node = ClassPathToNode.FindOrAdd(ClassPath);
-		if (!Node)
-		{
-			const FString ClassName = AssetData.AssetName.ToString();
-			FString ClassDisplayName = AssetData.GetTagValueRef<FString>(FBlueprintTags::BlueprintDisplayName);
-			if (ClassDisplayName.IsEmpty())
+			FTopLevelAssetPath ClassPath = FEditorClassUtils::GetClassPathNameFromAssetTag(AssetData);
+			if (!ClassPath.IsNull())
 			{
-				ClassDisplayName = ClassName;
+				FixupClassCoreRedirects(ClassPath);
+				TSharedPtr<FClassViewerNode>& Node = ClassPathToNode.FindOrAdd(ClassPath);
+				CreateOrUpdateUnloadedClassNode(Node, AssetData, ClassPath);
 			}
-			Node = MakeShared<FClassViewerNode>(ClassName, ClassDisplayName);
+			else
+			{
+				UE_LOG(LogEditorClassViewer, Warning, TEXT("AssetRegistry Blueprint %s is missing tag value for %s. Blueprint will not be available to ClassViewer when unloaded."),
+					*AssetData.GetObjectPathString(), *FBlueprintTags::GeneratedClassPath.ToString());
+			}
 		}
-		SetAssetDataFields(Node, AssetData);
+
+		Assets.Reset();
+		AssetRegistry.GetAssetsByClass(UBlueprintGeneratedClass::StaticClass()->GetClassPathName(), Assets, /*bSearchSubClasses=*/true);
+
+		for (const FAssetData& AssetData : Assets)
+		{
+			FTopLevelAssetPath ClassPathNameFromAssetPath = AssetData.GetSoftObjectPath().GetAssetPath();
+			FixupClassCoreRedirects(ClassPathNameFromAssetPath);
+			TSharedPtr<FClassViewerNode>& Node = ClassPathToNode.FindOrAdd(ClassPathNameFromAssetPath);
+			CreateOrUpdateUnloadedClassNode(Node, AssetData, ClassPathNameFromAssetPath);
+		}
 	}
 
 	// FindOrCreate a node for every loaded UClass, and set the UClass fields
 	CreateNodesForLoadedClasses(ObjectClassRoot, ClassPathToNode);
 
 	// Set the parent and child pointers
-	for (TPair<FName, TSharedPtr<FClassViewerNode>>& KVPair : ClassPathToNode)
+	for (TPair<FTopLevelAssetPath, TSharedPtr<FClassViewerNode>>& KVPair : ClassPathToNode)
 	{
 		TSharedPtr<FClassViewerNode>& Node = KVPair.Value;
 		if (Node == ObjectClassRoot)
@@ -1446,7 +1442,7 @@ void FClassHierarchy::PopulateClassHierarchy()
 			continue;
 		}
 		TSharedPtr<FClassViewerNode>* ParentNodePtr = nullptr;
-		if (!Node->ParentClassPath.IsNone())
+		if (!Node->ParentClassPath.IsNull())
 		{
 			ParentNodePtr = ClassPathToNode.Find(Node->ParentClassPath);
 		}
@@ -1504,13 +1500,28 @@ void SClassViewer::Construct(const FArguments& InArgs, const FClassViewerInitial
 		}
 	}
 
+	// Clear out the current set of custom filter options.
+	CustomClassFilterOptions.Empty(InitOptions.ClassFilters.Num());
+
+	// Gather additional filter options from any custom filters.
+	TArray<TSharedRef<FClassViewerFilterOption>> FilterOptions;
+	for (TSharedRef<IClassViewerFilter> CustomFilter : InitOptions.ClassFilters)
+	{
+		// Append this filter's options to the current set.
+		CustomFilter->GetFilterOptions(FilterOptions);
+		CustomClassFilterOptions.Append(FilterOptions);
+
+		// Reset the temp array for the next pass.
+		FilterOptions.Reset();
+	}
+
 	TSharedRef<SWidget> FiltersWidget = SNullWidget::NullWidget;
 	// Build the top menu
 	if(InitOptions.Mode == EClassViewerMode::ClassBrowsing)
 	{
 		FiltersWidget = 
 		SNew(SComboButton)
-		.ComboButtonStyle(FEditorStyle::Get(), "GenericFilters.ComboButtonStyle")
+		.ComboButtonStyle(FAppStyle::Get(), "GenericFilters.ComboButtonStyle")
 		.ForegroundColor(FLinearColor::White)
 		.ContentPadding(0)
 		.ToolTipText(LOCTEXT("Filters_Tooltip", "Filter options for the Class Viewer."))
@@ -1524,8 +1535,8 @@ void SClassViewer::Construct(const FArguments& InArgs, const FClassViewerInitial
 			.AutoWidth()
 			[
 				SNew(STextBlock)
-				.TextStyle(FEditorStyle::Get(), "GenericFilters.TextStyle")
-				.Font(FEditorStyle::Get().GetFontStyle("FontAwesome.9"))
+				.TextStyle(FAppStyle::Get(), "GenericFilters.TextStyle")
+				.Font(FAppStyle::Get().GetFontStyle("FontAwesome.9"))
 				.Text(FText::FromString(FString(TEXT("\xf0b0"))) /*fa-filter*/)
 			]
 			+ SHorizontalBox::Slot()
@@ -1533,7 +1544,7 @@ void SClassViewer::Construct(const FArguments& InArgs, const FClassViewerInitial
 			.Padding(2, 0, 0, 0)
 			[
 				SNew(STextBlock)
-				.TextStyle(FEditorStyle::Get(), "GenericFilters.TextStyle")
+				.TextStyle(FAppStyle::Get(), "GenericFilters.TextStyle")
 				.Text(LOCTEXT("Filters", "Filters"))
 			]
 		];
@@ -1604,7 +1615,7 @@ void SClassViewer::Construct(const FArguments& InArgs, const FClassViewerInitial
 	.MaxDesiredHeight(800.0f)
 	[
 		SNew(SBorder)
-		.BorderImage(FEditorStyle::GetBrush(InitOptions.bShowBackgroundBorder ? "ToolPanel.GroupBorder" : "NoBorder"))
+		.BorderImage(FAppStyle::GetBrush(InitOptions.bShowBackgroundBorder ? "ToolPanel.GroupBorder" : "NoBorder"))
 		[
 			SNew(SVerticalBox)
 			+SVerticalBox::Slot()
@@ -1617,10 +1628,11 @@ void SClassViewer::Construct(const FArguments& InArgs, const FClassViewerInitial
 				[
 					SNew(STextBlock)
 					.Visibility(bHasTitle ? EVisibility::Visible : EVisibility::Collapsed)
-					.ColorAndOpacity(FEditorStyle::GetColor("MultiboxHookColor"))
+					.ColorAndOpacity(FAppStyle::GetColor("MultiboxHookColor"))
 					.Text(InitOptions.ViewerTitleString)
 				]
 			]
+
 			+SVerticalBox::Slot()
 			.AutoHeight()
 			[
@@ -1632,11 +1644,29 @@ void SClassViewer::Construct(const FArguments& InArgs, const FClassViewerInitial
 					FiltersWidget
 				]
 				+ SHorizontalBox::Slot()
-				.Padding(2.0f, 2.0f)
+				.Padding(2.0f, 2.0f, 6.0f, 2.0f)
 				[
 					SAssignNew(SearchBox, SSearchBox)
 					.OnTextChanged( this, &SClassViewer::OnFilterTextChanged )
 					.OnTextCommitted( this, &SClassViewer::OnFilterTextCommitted )
+				]
+				// View mode combo button
+				+ SHorizontalBox::Slot()
+				.AutoWidth()
+				.Padding(2.0f, 2.0f)
+				[
+					SAssignNew(ViewOptionsComboButton, SComboButton)
+					.ContentPadding(0)
+					.ForegroundColor(FSlateColor::UseForeground())
+					.ComboButtonStyle(FAppStyle::Get(), "SimpleComboButton")
+					.HasDownArrow(false)
+					.OnGetMenuContent(this, &SClassViewer::GetViewButtonContent)
+					.ButtonContent()
+					[
+						SNew(SImage)
+						.Image(FAppStyle::Get().GetBrush("Icons.Settings"))
+						.ColorAndOpacity(FSlateColor::UseForeground())
+					]
 				]
 			]
 
@@ -1692,47 +1722,11 @@ void SClassViewer::Construct(const FArguments& InArgs, const FClassViewerInitial
 			// Bottom panel
 			+ SVerticalBox::Slot()
 			.AutoHeight()
+			.VAlign(VAlign_Center)
+			.Padding(4.0f)
 			[
-				SNew(SHorizontalBox)
-
-				// Asset count
-				+ SHorizontalBox::Slot()
-				.FillWidth(1.f)
-				.VAlign(VAlign_Center)
-				.Padding(8, 0)
-				[
-					SNew(STextBlock)
-					.Text(this, &SClassViewer::GetClassCountText)
-				]
-
-				// View mode combo button
-				+ SHorizontalBox::Slot()
-				.AutoWidth()
-				[
-					SAssignNew(ViewOptionsComboButton, SComboButton)
-					.ContentPadding(0)
-					.ForegroundColor(this, &SClassViewer::GetViewButtonForegroundColor)
-					.ButtonStyle(FEditorStyle::Get(), "ToggleButton") // Use the tool bar item style for this button
-					.OnGetMenuContent(this, &SClassViewer::GetViewButtonContent)
-					.ButtonContent()
-					[
-						SNew(SHorizontalBox)
-							+ SHorizontalBox::Slot()
-						.AutoWidth()
-						.VAlign(VAlign_Center)
-						[
-							SNew(SImage).Image(FEditorStyle::GetBrush("GenericViewButton"))
-						]
-
-						+ SHorizontalBox::Slot()
-						.AutoWidth()
-						.Padding(2, 0, 0, 0)
-						.VAlign(VAlign_Center)
-						[
-							SNew(STextBlock).Text(LOCTEXT("ViewButton", "View Options"))
-						]
-					]
-				]
+				SNew(STextBlock)
+				.Text(this, &SClassViewer::GetClassCountText)
 			]
 		]
 	];
@@ -1830,6 +1824,9 @@ void SClassViewer::OnClassViewerSelectionChanged( TSharedPtr<FClassViewerNode> I
 		if ( bEnableClassDynamicLoading && !Class && Item->UnloadedBlueprintData.IsValid() )
 		{
 			ClassViewer::Helpers::LoadClass( Item );
+
+			// Populate the tree/list so any changes to previously unloaded classes will be reflected.
+			Refresh();
 		}
 
 		// Check if the item passes the filter
@@ -1921,7 +1918,7 @@ TSharedRef< ITableRow > SClassViewer::OnGenerateRowForClassViewer( TSharedPtr<FC
 		.ClassName(ClassNameDisplay)
 		.bIsPlaceable(Item->IsClassPlaceable())
 		.HighlightText(SearchBoxTextForHighlight)
-		.TextColor(Item->IsClassPlaceable()? FLinearColor(0.2f, 0.4f, 0.6f, AlphaValue) : FLinearColor(1.0f, 1.0f, 1.0f, AlphaValue))
+		.Font(Item->IsClassPlaceable()? FCoreStyle::Get().GetFontStyle("NormalFontItalic") : FCoreStyle::Get().GetFontStyle("NormalFont"))
 		.AssociatedNode(Item)
 		.bIsInClassViewer( InitOptions.Mode == EClassViewerMode::ClassBrowsing )
 		.bDynamicClassLoading( bEnableClassDynamicLoading )
@@ -1957,14 +1954,6 @@ const int SClassViewer::GetNumItems() const
 	return NumClasses;
 }
 
-FSlateColor SClassViewer::GetViewButtonForegroundColor() const
-{
-	static const FName InvertedForegroundName("InvertedForeground");
-	static const FName DefaultForegroundName("DefaultForeground");
-
-	return ViewOptionsComboButton->IsHovered() ? FEditorStyle::GetSlateColor(InvertedForegroundName) : FEditorStyle::GetSlateColor(DefaultForegroundName);
-}
-
 TSharedRef<SWidget> SClassViewer::GetViewButtonContent()
 {
 	// Get all menu extenders for this context menu from the content browser module
@@ -1988,6 +1977,22 @@ TSharedRef<SWidget> SClassViewer::GetViewButtonContent()
 			NAME_None,
 			EUserInterfaceActionType::ToggleButton
 			);
+
+		for (const TSharedRef<FClassViewerFilterOption>& FilterOption : CustomClassFilterOptions)
+		{
+			MenuBuilder.AddMenuEntry(
+				FilterOption->LabelText,
+				FilterOption->ToolTipText,
+				FSlateIcon(),
+				FUIAction(
+					FExecuteAction::CreateSP(this, &SClassViewer::ToggleCustomFilterOption, FilterOption),
+					FCanExecuteAction(),
+					FIsActionChecked::CreateSP(this, &SClassViewer::IsCustomFilterOptionEnabled, FilterOption)
+				),
+				NAME_None,
+				EUserInterfaceActionType::ToggleButton
+			);
+		}
 	}
 	MenuBuilder.EndSection();
 
@@ -2034,8 +2039,6 @@ TSharedRef<SWidget> SClassViewer::GetViewButtonContent()
 
 	}
 	MenuBuilder.EndSection();
-
-	return MenuBuilder.MakeWidget();
 
 	return MenuBuilder.MakeWidget();
 }
@@ -2150,12 +2153,12 @@ FReply SClassViewer::OnDragDetected( const FGeometry& Geometry, const FPointerEv
 					return FReply::Handled().BeginDragDrop(FClassDragDropOp::New(MakeWeakObjectPtr(Class)));
 				}	
 			}
-			else if (Item->BlueprintAssetPath != NAME_None)
+			else if (!Item->BlueprintAssetPath.IsNull())
 			{
-				FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
+				IAssetRegistry& AssetRegistry = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(AssetRegistryConstants::ModuleName).Get();
 
 				// Pull asset data out of asset registry
-				const FAssetData AssetData = AssetRegistryModule.Get().GetAssetByObjectPath(Item->BlueprintAssetPath);
+				const FAssetData AssetData = AssetRegistry.GetAssetByObjectPath(Item->BlueprintAssetPath);
 				return FReply::Handled().BeginDragDrop(FContentBrowserDataDragDropOp::Legacy_New(MakeArrayView(&AssetData, 1)));
 			}
 		}
@@ -2383,7 +2386,7 @@ int32 SClassViewer::CountTreeItems(FClassViewerNode* Node)
 
 void SClassViewer::Populate()
 {
-	TArray<FName> PreviousSelection;
+	TArray<FTopLevelAssetPath> PreviousSelection;
 	{
 		TArray<TSharedPtr<FClassViewerNode>> SelectedItems = GetSelectedItems();
 		if (SelectedItems.Num() > 0)
@@ -2436,7 +2439,7 @@ void SClassViewer::Populate()
 		// Take the package names for the internal only classes and convert them into their UClass
 		for (int i = 0; i < InternalClassNames.Num(); i++)
 		{
-			FName PackageClassName = *InternalClassNames[i].ToString();
+			FTopLevelAssetPath PackageClassName(InternalClassNames[i].ToString());
 			const TSharedPtr<FClassViewerNode> ClassNode = ClassViewer::Helpers::ClassHierarchy->FindNodeByGeneratedClassPath(ClassViewer::Helpers::ClassHierarchy->GetObjectRootNode(), PackageClassName);
 
 			if (ClassNode.IsValid())
@@ -2516,7 +2519,7 @@ void SClassViewer::Populate()
 		if (PreviousSelection.Num() > 0)
 		{
 			ClassNode = ClassViewer::Helpers::ClassHierarchy->FindNodeByGeneratedClassPath(RootNode, PreviousSelection[0]);
-			ExpandNode = ClassNode ? ClassNode->ParentNode.Pin() : nullptr;
+			ExpandNode = ClassNode ? ClassNode->GetParentNode() : nullptr;
 		}
 		else if (InitOptions.InitiallySelectedClass)
 		{
@@ -2546,7 +2549,7 @@ void SClassViewer::Populate()
 			ExpandNode = ClassNode;
 		}
 
-		for (; ExpandNode; ExpandNode = ExpandNode->ParentNode.Pin())
+		for (; ExpandNode; ExpandNode = ExpandNode->GetParentNode())
 		{
 			ClassTree->SetItemExpansion(ExpandNode, true);
 		}
@@ -2561,8 +2564,20 @@ void SClassViewer::Populate()
 		// Get the class list, passing in certain filter options.
 		ClassViewer::Helpers::GetClassList(RootTreeItems, ClassFilter, InitOptions);
 
-		// Sort the list alphabetically.
-		RootTreeItems.Sort(FClassViewerNodeNameLess(InitOptions.NameTypeToDisplay));
+		if (InitOptions.ClassViewerSortPredicate)
+		{
+			RootTreeItems.Sort([this](const TSharedPtr<FClassViewerNode>& A, const TSharedPtr<FClassViewerNode>& B)
+			{
+				FClassViewerSortElementInfo InfoA (A->Class, A->GetClassName(false), A->GetClassName(true));
+				FClassViewerSortElementInfo InfoB (B->Class, B->GetClassName(false), B->GetClassName(true));
+				return InitOptions.ClassViewerSortPredicate(InfoA, InfoB);
+			});
+		}
+		else
+		{
+			// Sort the list alphabetically.
+			RootTreeItems.Sort(FClassViewerNodeNameLess(InitOptions.NameTypeToDisplay));
+		}
 
 		// Only display this option if the user wants it and in Picker Mode.
 		if(InitOptions.bShowNoneOption && InitOptions.Mode == EClassViewerMode::ClassPicker)
@@ -2624,6 +2639,11 @@ bool SClassViewer::SupportsKeyboardFocus() const
 	return true;
 }
 
+void SClassViewer::RequestPopulateClassHierarchy()
+{
+	ClassViewer::Helpers::RequestPopulateClassHierarchy();
+}
+
 void SClassViewer::DestroyClassHierarchy()
 {
 	ClassViewer::Helpers::DestroyClassHierachy();
@@ -2667,6 +2687,11 @@ void SClassViewer::Tick( const FGeometry& AllottedGeometry, const double InCurre
 		if (InitOptions.bExpandRootNodes)
 		{
 			ExpandRootNodes();
+		}
+
+		if (InitOptions.bExpandAllNodes)
+		{
+			SetAllExpansionStates(true);
 		}
 
 		// Scroll the first item into view if applicable
@@ -2719,6 +2744,23 @@ bool SClassViewer::IsShowingInternalClasses() const
 		return true;
 	}
 	return IsToggleShowInternalClassesAllowed() ? GetDefault<UClassViewerSettings>()->DisplayInternalClasses : false;
+}
+
+void SClassViewer::ToggleCustomFilterOption(TSharedRef<FClassViewerFilterOption> FilterOption)
+{
+	FilterOption->bEnabled = !FilterOption->bEnabled;
+
+	if (FilterOption->OnOptionChanged.IsBound())
+	{
+		FilterOption->OnOptionChanged.Execute(FilterOption->bEnabled);
+	}
+
+	Refresh();
+}
+
+bool SClassViewer::IsCustomFilterOptionEnabled(TSharedRef<FClassViewerFilterOption> FilterOption) const
+{
+	return FilterOption->bEnabled;
 }
 
 #undef LOCTEXT_NAMESPACE

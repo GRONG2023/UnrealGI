@@ -2,6 +2,8 @@
 
 #include "DocumentationPage.h"
 
+#include "Containers/Set.h"
+
 TSharedRef< IDocumentationPage > FDocumentationPage::Create( const FString& Link, const TSharedRef< FUDNParser >& Parser ) 
 {
 	return MakeShareable( new FDocumentationPage( Link, Parser ) );
@@ -14,6 +16,13 @@ FDocumentationPage::~FDocumentationPage()
 
 bool FDocumentationPage::GetExcerptContent( FExcerpt& Excerpt )
 {
+	if (FString* AliasName = StoredMetadata.ExcerptAliases.Find(Excerpt.Name))
+	{
+		if (HasExcerpt(*AliasName))
+		{
+			Excerpt.Name = *AliasName;
+		}
+	}
 	for (int32 Index = 0; Index < StoredExcerpts.Num(); ++Index)
 	{
 		if ( Excerpt.Name == StoredExcerpts[ Index ].Name )

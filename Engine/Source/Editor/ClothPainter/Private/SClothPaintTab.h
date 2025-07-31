@@ -2,14 +2,20 @@
 
 #pragma once
 
-#include "Toolkits/AssetEditorToolkit.h"
+#include "HAL/Platform.h"
+#include "Templates/SharedPointer.h"
+#include "UObject/WeakObjectPtrTemplates.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
+#include "Widgets/SCompoundWidget.h"
 
-class UClothingAssetCommon;
-class SClothPaintWidget;
-class SClothAssetSelector;
 class IDetailsView;
-class ISkeletalMeshEditor;
 class IPersonaToolkit;
+class ISkeletalMeshEditor;
+class SClothAssetSelector;
+class SClothPaintWidget;
+class SScrollBox;
+class UClothingAssetCommon;
+struct FGeometry;
 
 class CLOTHPAINTER_API SClothPaintTab : public SCompoundWidget
 {
@@ -26,16 +32,11 @@ public:
 	void Construct(const FArguments& InArgs);
 	virtual void Tick(const FGeometry& AllottedGeometry, const double InCurrentTime, const float InDeltaTime) override;
 
-	/** Toggles cloth paint mode */
-	void TogglePaintMode();
-
-	/** Gets whether cloth paint mode is active */
-	bool IsPaintModeActive() const;
+	/** Setup and teardown the cloth paint UI */
+	void EnterPaintMode();
+	void ExitPaintMode();
 
 protected:
-
-	/** Called as the tool selection changes to enable/disable painting */
-	void UpdatePaintTools();
 
 	/** Called from the selector when the asset selection changes (Asset, LOD, Mask) */
 	void OnAssetSelectionChanged(TWeakObjectPtr<UClothingAssetCommon> InAssetPtr, int32 InLodIndex, int32 InMaskIndex);
@@ -51,9 +52,8 @@ protected:
 	
 	TSharedPtr<SClothAssetSelector> SelectorWidget;
 	TSharedPtr<SClothPaintWidget> ModeWidget;
-	TSharedPtr<SVerticalBox> ContentBox;
+	TSharedPtr<SScrollBox> ContentBox;
 	TSharedPtr<IDetailsView> DetailsView;
 
 	bool bModeApplied;
-	bool bPaintModeEnabled;
 };

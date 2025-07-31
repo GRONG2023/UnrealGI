@@ -17,8 +17,11 @@ UReimportSoundFactory::UReimportSoundFactory(const FObjectInitializer& ObjectIni
 
 #if WITH_SNDFILE_IO
 	Formats.Add(TEXT("aif;Audio Interchange File"));
+	Formats.Add(TEXT("aiff;Audio Interchange File Format"));
 	Formats.Add(TEXT("ogg;OGG Vorbis bitstream format"));
 	Formats.Add(TEXT("flac;Free Lossless Audio Codec"));
+	Formats.Add(TEXT("opus;OGG OPUS bitstream format"));
+	Formats.Add(TEXT("mp3;MPEG Layer 3 Audio"));
 #endif // WITH_SNDFILE_IO
 
 	OverwriteOtherAssetTypes = -1;
@@ -29,6 +32,7 @@ UReimportSoundFactory::UReimportSoundFactory(const FObjectInitializer& ObjectIni
 	bIncludeModulatorNode = false;
 	bIncludeLoopingNode = false;
 	CueVolume = 0.75f;
+	ImportPriority = 1;
 }
 
 bool UReimportSoundFactory::CanReimport(UObject* Obj, TArray<FString>& OutFilenames)
@@ -82,7 +86,9 @@ EReimportResult::Type UReimportSoundFactory::Reimport(UObject* Obj)
 	const bool bIsSupportedExtension = FCString::Stricmp(*FileExtension, TEXT("WAV")) == 0
 		|| FCString::Stricmp(*FileExtension, TEXT("AIF")) == 0
 		|| FCString::Stricmp(*FileExtension, TEXT("FLAC")) == 0
-		|| FCString::Stricmp(*FileExtension, TEXT("OGG")) == 0;
+		|| FCString::Stricmp(*FileExtension, TEXT("OGG")) == 0
+		|| FCString::Stricmp(*FileExtension, TEXT("OPUS")) == 0
+		|| FCString::Stricmp(*FileExtension, TEXT("MP3")) == 0;
 #else
 	const bool bIsSupportedExtension = FCString::Stricmp(*FileExtension, TEXT("WAV")) == 0;
 #endif //WITH_SNDFILE_IO
@@ -133,7 +139,7 @@ EReimportResult::Type UReimportSoundFactory::Reimport(UObject* Obj)
 	SoundWave->FreeResources();
 	SoundWave->UpdatePlatformData();
 	SoundWave->MarkPackageDirty();
-	SoundWave->bNeedsThumbnailGeneration = true;
+	SoundWave->SetRedrawThumbnail(true);
 
 	return EReimportResult::Succeeded;
 }

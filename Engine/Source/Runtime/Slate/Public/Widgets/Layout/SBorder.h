@@ -21,8 +21,10 @@ class FSlateWindowElementList;
  * Border also has a Content() slot as well as some parameters controlling the
  * arrangement of said content.
  */
-class SLATE_API SBorder : public SCompoundWidget
+class SBorder : public SCompoundWidget
 {
+	SLATE_DECLARE_WIDGET_API(SBorder, SCompoundWidget, SLATE_API)
+
 public:
 
 	SLATE_BEGIN_ARGS(SBorder)
@@ -72,75 +74,121 @@ public:
 
 		/** Flips the background image if the localization's flow direction is RightToLeft */
 		SLATE_ARGUMENT(bool, FlipForRightToLeftFlowDirection)
+
+		FArguments& Padding(float Uniform)
+		{
+			_Padding = FMargin(Uniform);
+			return *this;
+		}
+
+		FArguments& Padding(float Horizontal, float Vertical)
+		{
+			_Padding = FMargin(Horizontal, Vertical);
+			return *this;
+		}
+
+		FArguments& Padding(float Left, float Top, float Right, float Bottom)
+		{
+			_Padding = FMargin(Left, Top, Right, Bottom);
+			return *this;
+		}
+
 	SLATE_END_ARGS()
 
 	/**
 	 * Default constructor.
 	 */
-	SBorder();
+	SLATE_API SBorder();
 
 	/**
 	 * Construct this widget
 	 *
 	 * @param	InArgs	The declaration data for this widget
 	 */
-	void Construct( const FArguments& InArgs );
+	SLATE_API void Construct( const FArguments& InArgs );
 
 	/**
 	 * Sets the content for this border
 	 *
 	 * @param	InContent	The widget to use as content for the border
 	 */
-	virtual void SetContent( TSharedRef< SWidget > InContent );
+	SLATE_API virtual void SetContent( TSharedRef< SWidget > InContent );
 
 	/**
 	 * Gets the content for this border
 	 *
 	 * @return The widget used as content for the border
 	 */
-	const TSharedRef< SWidget >& GetContent() const;
+	SLATE_API const TSharedRef< SWidget >& GetContent() const;
 
 	/** Clears out the content for the border */
-	void ClearContent();
+	SLATE_API void ClearContent();
 
 	/** Sets the color and opacity of the background image of this border. */
-	void SetBorderBackgroundColor(const TAttribute<FSlateColor>& InColorAndOpacity);
+	SLATE_API void SetBorderBackgroundColor(TAttribute<FSlateColor> InColorAndOpacity);
+
+	/** Gets the color and opacity of the background image of this border. */
+	FSlateColor GetBorderBackgroundColor() const { return BorderBackgroundColorAttribute.Get(); }
 
 	/** Set the desired size scale multiplier */
-	void SetDesiredSizeScale(const TAttribute<FVector2D>& InDesiredSizeScale);
+	SLATE_API void SetDesiredSizeScale(TAttribute<FVector2D> InDesiredSizeScale);
 	
 	/** See HAlign argument */
-	void SetHAlign(EHorizontalAlignment HAlign);
+	SLATE_API void SetHAlign(EHorizontalAlignment HAlign);
 
 	/** See VAlign argument */
-	void SetVAlign(EVerticalAlignment VAlign);
+	SLATE_API void SetVAlign(EVerticalAlignment VAlign);
 
 	/** See Padding attribute */
-	void SetPadding(const TAttribute<FMargin>& InPadding);
+	SLATE_API void SetPadding(TAttribute<FMargin> InPadding);
 
-	/** See ShowEffectWhenDisabled attribute */
-	void SetShowEffectWhenDisabled(const TAttribute<bool>& InShowEffectWhenDisabled);
+	/** Set whether or not to show the disabled effect when this border is disabled */
+	SLATE_API void SetShowEffectWhenDisabled(TAttribute<bool> InShowEffectWhenDisabled);
 
-	/** See BorderImage attribute */
-	void SetBorderImage(const TAttribute<const FSlateBrush*>& InBorderImage);
+	/** Set the image to draw for this border. */
+	SLATE_API void SetBorderImage(TAttribute<const FSlateBrush*> InBorderImage);
+
+	/** Get the image to draw for this border. */
+	const FSlateBrush* GetBorderImage() const { return BorderImageAttribute.Get(); }
 
 public:
 	// SWidget interface
-	virtual int32 OnPaint( const FPaintArgs& Args, const FGeometry& AllottedGeometry, const FSlateRect& MyCullingRect, FSlateWindowElementList& OutDrawElements, int32 LayerId, const FWidgetStyle& InWidgetStyle, bool bParentEnabled ) const override;
-	virtual bool ComputeVolatility() const override;
+	SLATE_API virtual int32 OnPaint( const FPaintArgs& Args, const FGeometry& AllottedGeometry, const FSlateRect& MyCullingRect, FSlateWindowElementList& OutDrawElements, int32 LayerId, const FWidgetStyle& InWidgetStyle, bool bParentEnabled ) const override;
 	// End of SWidget interface
 
 protected:
-	// Begin SWidget overrides.
-	virtual FVector2D ComputeDesiredSize(float) const override;
-	// End SWidget overrides.
+	//~Begin SWidget overrides.
+	SLATE_API virtual FVector2D ComputeDesiredSize(float) const override;
+	//~End SWidget overrides.
 
- protected:
+	/** Get whether or not to show the disabled effect when this border is disabled */
+	bool GetShowDisabledEffect() const { return ShowDisabledEffectAttribute.Get(); }
+
+	/** Get the desired size scale multiplier */
+	FVector2D GetDesiredSizeScale() const { return DesiredSizeScaleAttribute.Get(); }
+
+	TSlateAttributeRef<const FSlateBrush*> GetBorderImageAttribute() const { return TSlateAttributeRef<const FSlateBrush*>(SharedThis(this), BorderImageAttribute); }
+	TSlateAttributeRef<FSlateColor> GetBorderBackgroundColorAttribute() const { return TSlateAttributeRef<FSlateColor>(SharedThis(this), BorderBackgroundColorAttribute); }
+	TSlateAttributeRef<FVector2D> GetDesiredSizeScaleAttribute() const { return TSlateAttributeRef<FVector2D>(SharedThis(this), DesiredSizeScaleAttribute); }
+	TSlateAttributeRef<bool> GetShowDisabledEffectAttribute() const { return TSlateAttributeRef<bool>(SharedThis(this), ShowDisabledEffectAttribute); }
+
+#if WITH_EDITORONLY_DATA
+	UE_DEPRECATED(5.0, "Direct access to BorderImage is now deprecated. Use the setter or getter.")
 	FInvalidatableBrushAttribute BorderImage;
-	TAttribute<FSlateColor> BorderBackgroundColor;
-	TAttribute<FVector2D> DesiredSizeScale;
+	UE_DEPRECATED(5.0, "Direct access to BorderBackgroundColor is now deprecated. Use the setter or getter.")
+	TSlateDeprecatedTAttribute<FSlateColor> BorderBackgroundColor;
+	UE_DEPRECATED(5.0, "Direct access to DesiredSizeScale is now deprecated. Use the setter or getter.")
+	TSlateDeprecatedTAttribute<FVector2D> DesiredSizeScale;
+	UE_DEPRECATED(5.0, "Direct access to ShowDisabledEffect is now deprecated. Use the setter or getter.")
+	TSlateDeprecatedTAttribute<bool> ShowDisabledEffect;
+#endif
+
+ private:
+	TSlateAttribute<const FSlateBrush*> BorderImageAttribute;
+	TSlateAttribute<FSlateColor> BorderBackgroundColorAttribute;
+	TSlateAttribute<FVector2D> DesiredSizeScaleAttribute;
 	/** Whether or not to show the disabled effect when this border is disabled */
-	TAttribute<bool> ShowDisabledEffect;
+	TSlateAttribute<bool> ShowDisabledEffectAttribute;
 
 	/** Flips the image if the localization's flow direction is RightToLeft */
 	bool bFlipForRightToLeftFlowDirection;

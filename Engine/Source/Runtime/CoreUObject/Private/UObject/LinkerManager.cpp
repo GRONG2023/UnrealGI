@@ -26,7 +26,7 @@ FLinkerManager::~FLinkerManager()
 {
 }
 
-bool FLinkerManager::Exec(class UWorld* InWorld, const TCHAR* Cmd, FOutputDevice& Ar)
+bool FLinkerManager::Exec_Dev(class UWorld* InWorld, const TCHAR* Cmd, FOutputDevice& Ar)
 {
 #if !UE_BUILD_SHIPPING
 	if (FParse::Command(&Cmd, TEXT("LinkerLoadList")))
@@ -34,19 +34,19 @@ bool FLinkerManager::Exec(class UWorld* InWorld, const TCHAR* Cmd, FOutputDevice
 		UE_LOG(LogLinker, Display, TEXT("ObjectLoaders: %d"), ObjectLoaders.Num());
 		for (auto Linker : ObjectLoaders)
 		{
-			UE_LOG(LogLinker, Display, TEXT("%s"), *Linker->Filename);
+			UE_LOG(LogLinker, Display, TEXT("%s"), *Linker->GetDebugName());
 		}
 
 		UE_LOG(LogLinker, Display, TEXT("LoadersWithNewImports: %d"), LoadersWithNewImports.Num());
 		for (auto Linker : LoadersWithNewImports)
 		{
-			UE_LOG(LogLinker, Display, TEXT("%s"), *Linker->Filename);
+			UE_LOG(LogLinker, Display, TEXT("%s"), *Linker->GetDebugName());
 		}
 #if !UE_BUILD_SHIPPING && !UE_BUILD_TEST
 		UE_LOG(LogLinker, Display, TEXT("LiveLinkers: %d"), LiveLinkers.Num());
 		for (auto Linker : LiveLinkers)
 		{
-			UE_LOG(LogLinker, Display, TEXT("%s"), *Linker->Filename);
+			UE_LOG(LogLinker, Display, TEXT("%s"), *Linker->GetDebugName());
 		}
 #endif
 		return true;
@@ -67,7 +67,7 @@ bool FLinkerManager::Exec(class UWorld* InWorld, const TCHAR* Cmd, FOutputDevice
 			Ar.Logf
 				(
 				TEXT("%s (%s): Names=%i (%iK/%iK) Text=%i (%iK) Imports=%i (%iK) Exports=%i (%iK) Gen=%i Bulk=%i"),
-				*Linker->Filename,
+				*Linker->GetDebugName(),
 				*Linker->LinkerRoot->GetFullName(),
 				Linker->NameMap.Num(),
 				Linker->NameMap.Num() * sizeof(FName) / 1024,
@@ -94,16 +94,31 @@ bool FLinkerManager::Exec(class UWorld* InWorld, const TCHAR* Cmd, FOutputDevice
 	return false;
 }
 
+void FLinkerManager::ResetLinkerExports(UPackage* InPackage)
+{
+	if (FLinkerLoad* LinkerToReset = FLinkerLoad::FindExistingLinkerForPackage(InPackage))
+	{
+		// if the linker owner thread is not the main thread, we need to flush async loading (todo: for that package) before we can reset the linker
+		if (LinkerToReset->GetOwnerThreadId() != GGameThreadId)
+		{
+			FlushAsyncLoading();
+		}
+		LinkerToReset->DetachExports();
+	}
+}
+
 void FLinkerManager::ResetLoaders(UObject* InPkg)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(FLinkerManager::ResetLoaders);
+
 	// Top level package to reset loaders for.
-	UObject*		TopLevelPackage = InPkg ? InPkg->GetOutermost() : NULL;
+	UObject*		TopLevelPackage = InPkg ? InPkg->GetOutermost() : nullptr;
 
 	// Find loader/ linker associated with toplevel package. We do this upfront as Detach resets LinkerRoot.
 	if (TopLevelPackage)
 	{
 		// Linker to reset/ detach.
-		auto LinkerToReset = FLinkerLoad::FindExistingLinkerForPackage(CastChecked<UPackage>(TopLevelPackage));
+		FLinkerLoad* LinkerToReset = FLinkerLoad::FindExistingLinkerForPackage(CastChecked<UPackage>(TopLevelPackage));
 		if (LinkerToReset)
 		{
 			{
@@ -117,10 +132,22 @@ void FLinkerManager::ResetLoaders(UObject* InPkg)
 					{
 						for (auto& Import : Linker->ImportMap)
 						{
-							if (Import.SourceLinker == LinkerToReset)
+							if (Import.SourceLinker)
 							{
-								Import.SourceLinker = NULL;
-								Import.SourceIndex = INDEX_NONE;
+								// This code is a N^2 loop, searching the ImportMap's of all Loaders, looking for references
+								// that matched the loader we are resetting, and nulling them.
+								// But it looks as though all Loaders have their ImportrMaps null'd in DissociateImportsAndForcedExports.
+								// So this ended up being a time consuming loop that did nothing.
+								// To gain some confidence that this code is not needed, I've added these ensureMsgf's.
+								// If these don't go off, then this code, and the back links may be removed.
+								// 
+								// Soaking to see if this code is actually needed.
+								//ensureMsgf(false, TEXT("ResetLoaders has a non null SourceLinker! Linker %p, Import.SourceLinker %p, LinkerToReset = %p"), Linker, Import.SourceLinker, LinkerToReset);
+								if (Import.SourceLinker == LinkerToReset)
+								{
+									Import.SourceLinker = nullptr;
+									Import.SourceIndex = INDEX_NONE;
+								}
 							}
 						}
 					}
@@ -152,8 +179,17 @@ void FLinkerManager::ResetLoaders(UObject* InPkg)
 	}
 }
 
+void FLinkerManager::ResetLoaders(TConstArrayView<FLinkerLoad*> InLinkerLoad)
+{
+	TSet<FLinkerLoad*> LinkerLoads; 
+	LinkerLoads.Append(InLinkerLoad);
+	ResetLoaders(LinkerLoads);
+}
+
 void FLinkerManager::ResetLoaders(const TSet<FLinkerLoad*>& InLinkerLoads)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(FLinkerManager::ResetLoaders_Set);
+
 	// Remove import references
 	{
 #if THREADSAFE_UOBJECTS
@@ -165,11 +201,22 @@ void FLinkerManager::ResetLoaders(const TSet<FLinkerLoad*>& InLinkerLoads)
 			if (!InLinkerLoads.Contains(Linker))
 			{
 				for (auto& Import : Linker->ImportMap)
-				{
-					if (InLinkerLoads.Contains(Import.SourceLinker))
+				{			
+					if (Import.SourceLinker)
 					{
-						Import.SourceLinker = NULL;
-						Import.SourceIndex = INDEX_NONE;
+						// It looks as though all Loaders have their ImportrMaps null'd in DissociateImportsAndForcedExports.
+						// So this ends up being a time consuming loop that does nothing.
+						// To gain some confidence that this code is not needed, I've added these ensureMsgf's.
+						// If these don't go off, then this code, and the back links may be removed.
+						// 
+						// Soaking to see if this code is actually needed.
+						//ensureMsgf(false, TEXT("ResetLoaders has a non null SourceLinker! Linker %p, Import.SourceLinker %p"), Linker, Import.SourceLinker);
+
+						if (InLinkerLoads.Contains(Import.SourceLinker))
+						{
+							Import.SourceLinker = NULL;
+							Import.SourceIndex = INDEX_NONE;
+						}
 					}
 				}
 			}

@@ -2,24 +2,26 @@
 
 #include "SoundClassEditor.h"
 #include "Modules/ModuleManager.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "EdGraph/EdGraph.h"
 #include "SoundClassGraph/SoundClassGraph.h"
 #include "SoundClassGraph/SoundClassGraphNode.h"
 #include "SoundClassGraph/SoundClassGraphSchema.h"
 #include "Sound/SoundClass.h"
 #include "Editor.h"
+#include "EngineAnalytics.h"
 
 #include "PropertyEditorModule.h"
 #include "IDetailsView.h"
-#include "AssetRegistryModule.h"
+#include "AssetRegistry/AssetRegistryModule.h"
 
-#include "Editor/WorkspaceMenuStructure/Public/WorkspaceMenuStructureModule.h"
+#include "WorkspaceMenuStructureModule.h"
 
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "ScopedTransaction.h"
 #include "SSoundClassActionMenu.h"
 #include "Widgets/Docking/SDockTab.h"
+#include "Framework/Application/SlateApplication.h"
 #include "Framework/Commands/GenericCommands.h"
 #include "Framework/MultiBox/MultiBoxBuilder.h"
 #include "AudioEditorModule.h"
@@ -78,12 +80,12 @@ void FSoundClassEditor::RegisterTabSpawners(const TSharedRef<class FTabManager>&
 	InTabManager->RegisterTabSpawner( GraphCanvasTabId, FOnSpawnTab::CreateSP(this, &FSoundClassEditor::SpawnTab_GraphCanvas) )
 		.SetDisplayName( LOCTEXT( "GraphCanvasTab", "Graph" ) )
 		.SetGroup( WorkspaceMenuCategoryRef )
-		.SetIcon(FSlateIcon(FEditorStyle::GetStyleSetName(), "GraphEditor.EventGraph_16x"));
+		.SetIcon(FSlateIcon(FAppStyle::GetAppStyleSetName(), "GraphEditor.EventGraph_16x"));
 
 	InTabManager->RegisterTabSpawner( PropertiesTabId, FOnSpawnTab::CreateSP(this, &FSoundClassEditor::SpawnTab_Properties) )
 		.SetDisplayName( LOCTEXT( "PropertiesTab", "Details" ) )
 		.SetGroup( WorkspaceMenuCategoryRef )
-		.SetIcon(FSlateIcon(FEditorStyle::GetStyleSetName(), "LevelEditor.Tabs.Details"));
+		.SetIcon(FSlateIcon(FAppStyle::GetAppStyleSetName(), "LevelEditor.Tabs.Details"));
 }
 
 void FSoundClassEditor::UnregisterTabSpawners(const TSharedRef<class FTabManager>& InTabManager)
@@ -123,17 +125,10 @@ void FSoundClassEditor::InitSoundClassEditor( const EToolkitMode::Type Mode, con
 
 	CreateInternalWidgets();
 
-	TSharedRef<FTabManager::FLayout> StandaloneDefaultLayout = FTabManager::NewLayout( "Standalone_SoundClassEditor_Layout_v2" )
+	TSharedRef<FTabManager::FLayout> StandaloneDefaultLayout = FTabManager::NewLayout( "Standalone_SoundClassEditor_Layout_v3" )
 	->AddArea
 	(
 		FTabManager::NewPrimaryArea() ->SetOrientation(Orient_Vertical)
-		->Split
-		(
-			FTabManager::NewStack()
-			->SetSizeCoefficient(0.1f)
-			->SetHideTabWell( true )
-			->AddTab(GetToolbarTabId(), ETabState::OpenedTab)
-		)
 		->Split
 		(
 			FTabManager::NewSplitter()
@@ -162,10 +157,12 @@ void FSoundClassEditor::InitSoundClassEditor( const EToolkitMode::Type Mode, con
 	ExtendToolbar();
 	RegenerateMenusAndToolbars();
 			
+#if ENABLE_AUDIO_DEBUG
 	if (GEditor->GetAudioDeviceManager())
 	{
 		Debugger = &GEditor->GetAudioDeviceManager()->GetDebugger();
 	}	
+#endif
 
 	GraphEditor->SelectAllNodes();
 	for (UObject* SelectedNode : GraphEditor->GetSelectedNodes())
@@ -208,7 +205,9 @@ void FSoundClassEditor::BindCommands()
 
 FSoundClassEditor::FSoundClassEditor()
 	: SoundClass(nullptr)
+#if ENABLE_AUDIO_DEBUG
 	, Debugger(nullptr)
+#endif
 {
 }
 
@@ -241,7 +240,6 @@ TSharedRef<SDockTab> FSoundClassEditor::SpawnTab_Properties(const FSpawnTabArgs&
 	check( Args.GetTabId() == PropertiesTabId );
 
 	TSharedRef<SDockTab> SpawnedTab = SNew(SDockTab)
-		.Icon( FEditorStyle::GetBrush("SoundClassEditor.Tabs.Properties") )
 		.Label( LOCTEXT( "SoundClassPropertiesTitle", "Details" ) )
 		[
 			DetailsView.ToSharedRef()
@@ -275,7 +273,8 @@ void FSoundClassEditor::CreateInternalWidgets()
 	GraphEditor = CreateGraphEditorWidget();
 
 	FPropertyEditorModule& PropertyEditorModule = FModuleManager::GetModuleChecked<FPropertyEditorModule>( "PropertyEditor" );
-	const FDetailsViewArgs DetailsViewArgs( false, false, true, FDetailsViewArgs::HideNameArea, false );
+	FDetailsViewArgs DetailsViewArgs;
+	DetailsViewArgs.NameAreaSettings = FDetailsViewArgs::HideNameArea;
 	DetailsView = PropertyEditorModule.CreateDetailView( DetailsViewArgs );
 	DetailsView->SetObject( SoundClass );
 }
@@ -397,40 +396,76 @@ void FSoundClassEditor::RedoGraphAction()
 
 void FSoundClassEditor::ToggleSolo()
 {
+#if ENABLE_AUDIO_DEBUG
 	if (Debugger)
 	{
 		Debugger->ToggleSoloSoundClass(SoundClass->GetFName());
 	}
+#endif
 }
 
 bool FSoundClassEditor::CanExcuteToggleSolo() const
 {
-	// Enable solo if we are not Muted	
-	return Debugger ? !Debugger->IsMuteSoundClass(SoundClass->GetFName()) : false;
+#if ENABLE_AUDIO_DEBUG
+	// Enable solo if we are in PIE and not Muted 
+	if (Debugger)
+	{
+		bool bIsInPIE = (GEditor != nullptr && GEditor->PlayWorld != nullptr) || GIsPlayInEditorWorld;
+		if (bIsInPIE) 
+		{
+			return !Debugger->IsMuteSoundClass(SoundClass->GetFName());
+		}
+	}
+#endif
+	return false;
 }
 
 bool FSoundClassEditor::IsSoloToggled() const
 {
-	return Debugger ? Debugger->IsSoloSoundClass(SoundClass->GetFName()) : false;
+#if ENABLE_AUDIO_DEBUG
+	if (Debugger)
+	{
+		return Debugger->IsSoloSoundClass(SoundClass->GetFName());
+	}
+#endif	
+	return false;
 }
 
 void FSoundClassEditor::ToggleMute()
 {
+#if ENABLE_AUDIO_DEBUG
 	if (Debugger)
 	{
 		Debugger->ToggleMuteSoundClass(SoundClass->GetFName());
 	}
+#endif
 }
 
 bool FSoundClassEditor::CanExcuteToggleMute() const
 {
-	// Enable mute if we are not Soloed
-	return Debugger ? !Debugger->IsSoloSoundClass(SoundClass->GetFName()) : false;
+#if ENABLE_AUDIO_DEBUG
+	// Enable mute if we are in PIE and not Soloed
+	if (Debugger)
+	{
+		bool bIsInPIE = (GEditor != nullptr && GEditor->PlayWorld != nullptr) || GIsPlayInEditorWorld;
+		if (bIsInPIE)
+		{
+			return !Debugger->IsSoloSoundClass(SoundClass->GetFName());
+		}
+	}
+#endif
+	return false;
 }
 
 bool FSoundClassEditor::IsMuteToggled() const
 {	
-	return Debugger ? Debugger->IsMuteSoundClass(SoundClass->GetFName()) : false;
+#if ENABLE_AUDIO_DEBUG
+	if (Debugger)
+	{
+		return Debugger->IsMuteSoundClass(SoundClass->GetFName());
+	}
+#endif
+	return false;
 }
 
 void FSoundClassEditor::CreateSoundClass(UEdGraphPin* FromPin, const FVector2D& Location, const FString& Name)

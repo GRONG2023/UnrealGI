@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include "AudioDefines.h"
 #include "CoreMinimal.h"
 #include "UObject/GCObject.h"
 #include "Toolkits/IToolkitHost.h"
@@ -10,7 +11,6 @@
 #include "EditorUndoClient.h"
 
 class IDetailsView;
-class SDockableTab;
 class SGraphEditor;
 class SSoundCuePalette;
 class UEdGraphNode;
@@ -61,6 +61,10 @@ public:
 
 	/** FGCObject interface */
 	virtual void AddReferencedObjects(FReferenceCollector& Collector) override;
+	virtual FString GetReferencerName() const override
+	{
+		return TEXT("FSoundCueEditor");
+	}
 
 	//~ Begin FEditorUndoClient Interface
 	virtual void PostUndo(bool bSuccess) override;
@@ -198,10 +202,7 @@ private:
 
 private:
 	/** The SoundCue asset being inspected */
-	USoundCue* SoundCue;
-
-	/** List of open tool panels; used to ensure only one exists at any one time */
-	TMap< FName, TWeakPtr<SDockableTab> > SpawnedToolPanels;
+	TObjectPtr<USoundCue> SoundCue;
 
 	/** New Graph Editor */
 	TSharedPtr<SGraphEditor> SoundCueGraphEditor;
@@ -215,8 +216,10 @@ private:
 	/** Command list for this editor */
 	TSharedPtr<FUICommandList> GraphEditorCommands;
 
+#if ENABLE_AUDIO_DEBUG
 	/** Cache of the Audio debugger instance */
 	Audio::FAudioDebugger* Debugger;
+#endif
 
 	/**	The tab ids for all the tabs used */
 	static const FName GraphCanvasTabId;

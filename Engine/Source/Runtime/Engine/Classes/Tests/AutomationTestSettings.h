@@ -306,7 +306,7 @@ struct FEditorMapPerformanceTestDefinition
 	GENERATED_USTRUCT_BODY()
 	
 	/** Map to be used for the Performance Capture **/
-	UPROPERTY(config, EditAnywhere, Category = Automation, meta=( AllowedClasses="World" ))
+	UPROPERTY(config, EditAnywhere, Category = Automation, meta=( AllowedClasses="/Script/Engine.World" ))
 	FSoftObjectPath PerformanceTestmap;
 
 	/** How long is this test expected to run before stopping **/
@@ -327,7 +327,7 @@ struct FLaunchOnTestSettings
 	FFilePath LaunchOnTestmap;
 
 	/** Device to be used **/
-	UPROPERTY(config, EditAnywhere, Category = Automation, meta = (ToolTip = "This is the device to be used for launch on. Example: WindowsNoEditor, Android, IOS, Linux"))
+	UPROPERTY(config, EditAnywhere, Category = Automation, meta = (ToolTip = "This is the device to be used for launch on. Example: WindowsClient, Android, IOS, Linux"))
 	FString DeviceID;
 };
 
@@ -336,8 +336,8 @@ struct FLaunchOnTestSettings
 /**
  * Implements the Editor's user settings.
  */
-UCLASS(config=Engine, defaultconfig)
-class ENGINE_API UAutomationTestSettings : public UObject
+UCLASS(config=Engine, defaultconfig, MinimalAPI)
+class UAutomationTestSettings : public UObject
 {
 	GENERATED_UCLASS_BODY()
 
@@ -358,7 +358,7 @@ public:
 	/**
 	 * The automation test map to be used for several of the automation tests.
 	 */
-	UPROPERTY(config, EditAnywhere, Category = Automation, meta=( AllowedClasses="World" ))
+	UPROPERTY(config, EditAnywhere, Category = Automation, meta=( AllowedClasses="/Script/Engine.World" ))
 	FSoftObjectPath AutomationTestmap;
 
 	/**
@@ -371,13 +371,19 @@ public:
 	 * Asset to test for open in automation process
 	 */
 	UPROPERTY(EditAnywhere, config, Category="Open Asset Tests")
-	TArray<FSoftObjectPath> AssetsToOpen;
+	TArray<FString> AssetsToOpen;
 
 	/**
 	 * Maps to PIE during the PIE test
 	 */
 	UPROPERTY(EditAnywhere, config, Category = "PIE Test Maps")
 	TArray<FString> MapsToPIETest;
+
+	/**
+	 * Use all Maps from project for PlayMapInPIE test
+	 */
+	UPROPERTY(EditAnywhere, config, Category = "Play all project Maps In PIE")
+	bool bUseAllProjectMapsToPlayInPIE;
 
 	/**
 	* Editor build promotion test settings
@@ -438,4 +444,23 @@ public:
 	 */
 	UPROPERTY(EditAnywhere, config, Category = Automation)
 	float PIETestDuration;
+
+	/**
+	 * Default value used for FWaitForInteractiveFrameRate. This is a framerate determine to be suitably "interactive", but may be
+	 * less than the target framerate of the game as this is used for evaluating time to PIE, load the editor etc
+	 */
+	UPROPERTY(EditAnywhere, config, Category = Automation)
+	float DefaultInteractiveFramerate;
+
+	/**
+	 * Default wait time in seconds for FWaitForInteractiveFrameRate. After this time a test will fail.
+	 */
+	UPROPERTY(EditAnywhere, config, Category = Automation)
+	float DefaultInteractiveFramerateWaitTime;
+
+	/**
+	 *  Default time in seconds that DefaultInteractiveFramerate must remain true in FWaitForInteractiveFrameRate
+	 */
+	UPROPERTY(EditAnywhere, config, Category = Automation)
+	float DefaultInteractiveFramerateDuration;
 };

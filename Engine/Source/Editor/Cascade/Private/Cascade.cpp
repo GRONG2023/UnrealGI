@@ -7,6 +7,7 @@
 #include "Engine/Engine.h"
 #include "Components/StaticMeshComponent.h"
 #include "Editor.h"
+#include "Editor/Transactor.h"
 #include "Components/VectorFieldComponent.h"
 #include "Engine/InterpCurveEdSetup.h"
 #include "CascadeConfiguration.h"
@@ -19,7 +20,7 @@
 #include "Framework/Application/MenuStack.h"
 #include "Framework/Application/SlateApplication.h"
 #include "Widgets/Layout/SBox.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "Preferences/CascadeOptions.h"
 #include "Distributions/DistributionFloatUniform.h"
 #include "Distributions/DistributionFloatUniformCurve.h"
@@ -52,8 +53,8 @@
 #include "Particles/ParticleSpriteEmitter.h"
 #include "Particles/ParticleModuleRequired.h"
 
-#include "Runtime/Analytics/Analytics/Public/AnalyticsEventAttribute.h"
-#include "Runtime/Analytics/Analytics/Public/Interfaces/IAnalyticsProvider.h"
+#include "AnalyticsEventAttribute.h"
+#include "Interfaces/IAnalyticsProvider.h"
 #include "EngineAnalytics.h"
 #include "Widgets/Docking/SDockTab.h"
 #include "Framework/Notifications/NotificationManager.h"
@@ -63,6 +64,7 @@
 #include "Framework/Commands/GenericCommands.h"
 #include "UnrealEngine.h"
 #include "Physics/PhysicsInterfaceCore.h"
+#include "Physics/PhysicsInterfaceScene.h"
 
 
 static const FName Cascade_PreviewViewportTab("Cascade_PreviewViewport");
@@ -98,22 +100,22 @@ void FCascade::RegisterTabSpawners(const TSharedRef<class FTabManager>& InTabMan
 	InTabManager->RegisterTabSpawner( Cascade_PreviewViewportTab, FOnSpawnTab::CreateSP( this, &FCascade::SpawnTab, Cascade_PreviewViewportTab ) )
 		.SetDisplayName(NSLOCTEXT("Cascade", "SummonViewport", "Viewport"))
 		.SetGroup( WorkspaceMenuCategoryRef )
-		.SetIcon(FSlateIcon(FEditorStyle::GetStyleSetName(), "LevelEditor.Tabs.Viewports"));
+		.SetIcon(FSlateIcon(FAppStyle::GetAppStyleSetName(), "LevelEditor.Tabs.Viewports"));
 
 	InTabManager->RegisterTabSpawner( Cascade_EmmitterCanvasTab, FOnSpawnTab::CreateSP( this, &FCascade::SpawnTab, Cascade_EmmitterCanvasTab ) )
 		.SetDisplayName(NSLOCTEXT("Cascade", "SummonCanvas", "Emitters"))
 		.SetGroup( WorkspaceMenuCategoryRef )
-		.SetIcon(FSlateIcon(FEditorStyle::GetStyleSetName(), "ClassIcon.Emitter"));
+		.SetIcon(FSlateIcon(FAppStyle::GetAppStyleSetName(), "ClassIcon.Emitter"));
 
 	InTabManager->RegisterTabSpawner( Cascade_PropertiesTab, FOnSpawnTab::CreateSP( this, &FCascade::SpawnTab, Cascade_PropertiesTab ) )
 		.SetDisplayName(NSLOCTEXT("Cascade", "SummonProperties", "Details"))
 		.SetGroup( WorkspaceMenuCategoryRef )
-		.SetIcon(FSlateIcon(FEditorStyle::GetStyleSetName(), "LevelEditor.Tabs.Details"));
+		.SetIcon(FSlateIcon(FAppStyle::GetAppStyleSetName(), "LevelEditor.Tabs.Details"));
 
 	InTabManager->RegisterTabSpawner( Cascade_CurveEditorTab, FOnSpawnTab::CreateSP( this, &FCascade::SpawnTab, Cascade_CurveEditorTab ) )
 		.SetDisplayName(NSLOCTEXT("Cascade", "SummonCurveEditor", "CurveEditor"))
 		.SetGroup( WorkspaceMenuCategoryRef )
-		.SetIcon(FSlateIcon(FEditorStyle::GetStyleSetName(), "ClassIcon.CurveBase"));
+		.SetIcon(FSlateIcon(FAppStyle::GetAppStyleSetName(), "ClassIcon.CurveBase"));
 }
 
 void FCascade::UnregisterTabSpawners(const TSharedRef<class FTabManager>& InTabManager)
@@ -332,15 +334,10 @@ void FCascade::InitCascade(const EToolkitMode::Type Mode, const TSharedPtr< clas
 
 	CreateInternalWidgets();
 
-	const TSharedRef<FTabManager::FLayout> StandaloneDefaultLayout = FTabManager::NewLayout( "Standalone_Cascade_Layout_v2" )
+	const TSharedRef<FTabManager::FLayout> StandaloneDefaultLayout = FTabManager::NewLayout( "Standalone_Cascade_Layout_v3" )
 	->AddArea(
 		FTabManager::NewPrimaryArea()
 		->SetOrientation(Orient_Vertical)
-		->Split(
-			FTabManager::NewStack()
-			->SetSizeCoefficient(0.1f)
-			->AddTab( GetToolbarTabId(), ETabState::OpenedTab )
-		)
 		->Split
 		(
 			FTabManager::NewSplitter()
@@ -1485,7 +1482,6 @@ TSharedRef<SDockTab> FCascade::SpawnTab(const FSpawnTabArgs& SpawnTabArgs, FName
 	else if(TabIdentifier == FName(TEXT("Cascade_Properties")))
 	{
 		TSharedRef<SDockTab> SpawnedTab = SNew(SDockTab)
-			.Icon(FEditorStyle::GetBrush("Cascade.Tabs.Properties"))
 			.Label(NSLOCTEXT("Cascade", "CascadePropertiesTitle", "Details"))
 			[
 				Details.ToSharedRef()
@@ -1614,12 +1610,12 @@ void FCascade::Tick(float DeltaTime)
 			ParticleSystemComponent->CascadeTickComponent(CurrDeltaTime, LEVELTICK_All);
 		}
 		ParticleSystemComponent->DoDeferredRenderUpdates_Concurrent();
-		GetFXSystem()->Tick(CurrDeltaTime);
+		UWorld* World = PreviewViewport->GetViewportClient()->GetPreviewScene().GetWorld();
+		GetFXSystem()->Tick(World, CurrDeltaTime);
 		TotalTime += CurrDeltaTime;
 		ParticleSystem->UpdateTime_Delta = fSaveUpdateDelta;
 
 		// Tick the physics scene
-		UWorld* World = PreviewViewport->GetViewportClient()->GetPreviewScene().GetWorld();
 		FPhysScene* PhysScene = World->GetPhysicsScene();
 		AWorldSettings * WorldSettings = World->GetWorldSettings();
 		check(WorldSettings);
@@ -1627,18 +1623,13 @@ void FCascade::Tick(float DeltaTime)
 		World->SetupPhysicsTickFunctions(DeltaTime);
 		PhysScene->StartFrame();
 		PhysScene->WaitPhysScenes();
-
-#if WITH_CHAOS
 		PhysScene->EndFrame();
-#else
-		PhysScene->EndFrame(NULL);
-#endif
 	}
 
 	// If a vector field module is selected, update the preview visualization.
 	if (SelectedModule && SelectedModule->IsA(UParticleModuleVectorFieldLocal::StaticClass()))
 	{
-		UParticleModuleVectorFieldLocal* VectorFieldModule = (UParticleModuleVectorFieldLocal*)SelectedModule;
+		UParticleModuleVectorFieldLocal* VectorFieldModule = (UParticleModuleVectorFieldLocal*)SelectedModule.Get();
 		LocalVectorFieldPreviewComponent->VectorField = VectorFieldModule->VectorField;
 		LocalVectorFieldPreviewComponent->SetRelativeLocation_Direct(VectorFieldModule->RelativeTranslation);
 		LocalVectorFieldPreviewComponent->SetRelativeRotation_Direct(VectorFieldModule->RelativeRotation);
@@ -2085,8 +2076,8 @@ void FCascade::ExtendToolbar()
 
 			ToolbarBuilder.BeginSection("CascadeHistory");
 			{
-				ToolbarBuilder.AddToolBarButton(FGenericCommands::Get().Undo, NAME_None, TAttribute<FText>(), TAttribute<FText>(), FSlateIcon( FEditorStyle::GetStyleSetName(), TEXT("Cascade.Undo") ) );
-				ToolbarBuilder.AddToolBarButton(FGenericCommands::Get().Redo, NAME_None, TAttribute<FText>(), TAttribute<FText>(), FSlateIcon( FEditorStyle::GetStyleSetName(), TEXT("Cascade.Redo") ) );
+				ToolbarBuilder.AddToolBarButton(FGenericCommands::Get().Undo, NAME_None, TAttribute<FText>(), TAttribute<FText>(), FSlateIcon( FAppStyle::GetAppStyleSetName(), TEXT("Cascade.Undo") ) );
+				ToolbarBuilder.AddToolBarButton(FGenericCommands::Get().Redo, NAME_None, TAttribute<FText>(), TAttribute<FText>(), FSlateIcon( FAppStyle::GetAppStyleSetName(), TEXT("Cascade.Redo") ) );
 			}
 			ToolbarBuilder.EndSection();
 
@@ -2104,7 +2095,7 @@ void FCascade::ExtendToolbar()
 					FOnGetContent::CreateStatic(&FCascade::GenerateBoundsMenuContent, ToolkitCommands),
 					LOCTEXT( "BoundsMenuCombo_Label", "Bounds Options" ),
 					LOCTEXT( "BoundsMenuCombo_ToolTip", "Bounds options"),
-					FSlateIcon(FEditorStyle::GetStyleSetName(), "Cascade.ToggleBounds"),
+					FSlateIcon(FAppStyle::GetAppStyleSetName(), "Cascade.ToggleBounds"),
 					true
 					);
 				ToolbarBuilder.AddToolBarButton(FCascadeCommands::Get().ToggleOriginAxis);
@@ -2394,6 +2385,12 @@ void FCascade::BindCommands()
 		FExecuteAction::CreateSP(this, &FCascade::OnDetailMode, DM_High),
 		FCanExecuteAction(),
 		FIsActionChecked::CreateSP(this, &FCascade::IsDetailModeChecked, DM_High));
+
+	ToolkitCommands->MapAction(
+		Commands.DetailMode_Epic,
+		FExecuteAction::CreateSP(this, &FCascade::OnDetailMode, DM_Epic),
+		FCanExecuteAction(),
+		FIsActionChecked::CreateSP(this, &FCascade::IsDetailModeChecked, DM_Epic));
 
 	ToolkitCommands->MapAction(
 		Commands.Significance_Critical,
@@ -3167,7 +3164,7 @@ void FCascade::DuplicateModule(bool bDoShare, bool bUseHighest)
 				int32 LODIndexToUse = bDoShare? DestLODLevel->Level: LODIndex;
 				SelectedModule->LODValidity &= ~(1 << LODIndexToUse);
 			}
-			// Turn on the LOD validity int he new module...
+			// Turn on the LOD validity in the new module...
 			NewModule->LODValidity |= (1 << LODIndex);
 
 			// Store the new module
@@ -4078,16 +4075,22 @@ void FCascade::OnBackgroundColor()
 {
 	if (PreviewViewport.IsValid() && PreviewViewport->GetViewportClient().IsValid())
 	{
-		TArray<FColor*> FColorArray;
+		if (UParticleSystem* LocalParticleSystem = GetParticleSystem())
+		{
+			TWeakObjectPtr<UParticleSystem> WeakParticleSystem = LocalParticleSystem;
+			FColorPickerArgs PickerArgs = FColorPickerArgs(LocalParticleSystem->BackgroundColor, FOnLinearColorValueChanged::CreateLambda([WeakParticleSystem](FLinearColor NewValue)
+				{
+					if (UParticleSystem* PinnedParticleSystem = WeakParticleSystem.Get())
+					{
+						PinnedParticleSystem->BackgroundColor = NewValue.ToFColorSRGB();
+					}
+				}));
+			PickerArgs.bClampValue = true;
+			PickerArgs.ParentWidget = PreviewViewport;
+			PickerArgs.DisplayGamma = TAttribute<float>::Create(TAttribute<float>::FGetter::CreateUObject(GEngine, &UEngine::GetDisplayGamma));
 
-		FColorArray.Add(&GetParticleSystem()->BackgroundColor);
-
-		FColorPickerArgs PickerArgs;
-		PickerArgs.ParentWidget = PreviewViewport;
-		PickerArgs.DisplayGamma = TAttribute<float>::Create( TAttribute<float>::FGetter::CreateUObject(GEngine, &UEngine::GetDisplayGamma) );
-		PickerArgs.ColorArray = &FColorArray;
-
-		OpenColorPicker(PickerArgs);
+			OpenColorPicker(PickerArgs);
+		}
 	}
 }
 
@@ -4790,7 +4793,7 @@ void FCascade::OnConvertToSeeded()
 		UE_LOG(LogCascade, Log, TEXT("Non-seeded module %s"), *ClassName);
 		// This only works if the seeded version is names <ClassName>_Seeded!!!!
 		FString SeededClassName = ClassName + TEXT("_Seeded");
-		UClass* SeededClass = FindObject<UClass>(ANY_PACKAGE, *SeededClassName);
+		UClass* SeededClass = UClass::TryFindTypeSlow<UClass>(SeededClassName);
 		if (SeededClass != NULL)
 		{
 			// Find the module index
@@ -4992,7 +4995,7 @@ bool FCascade::ConvertAllModulesToSeeded(UParticleSystem* ParticleSystem)
 						UE_LOG(LogCascade, Log, TEXT("Non-seeded module %s"), *ClassName);
 						// This only works if the seeded version is names <ClassName>_Seeded!!!!
 						FString SeededClassName = ClassName + TEXT("_Seeded");
-						UClass* SeededClass = FindObject<UClass>(ANY_PACKAGE, *SeededClassName);
+						UClass* SeededClass = UClass::TryFindTypeSlow<UClass>(SeededClassName);
 						if (SeededClass != NULL)
 						{
 							TArray<FParticleCurvePair> DistCurves;

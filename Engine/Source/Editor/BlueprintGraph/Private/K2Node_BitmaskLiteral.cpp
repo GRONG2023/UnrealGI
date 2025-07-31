@@ -2,14 +2,24 @@
 
 
 #include "K2Node_BitmaskLiteral.h"
-#include "Kismet/KismetSystemLibrary.h"
-#include "EdGraphSchema_K2.h"
-#include "K2Node_CallFunction.h"
-#include "EditorCategoryUtils.h"
-#include "KismetCompiler.h"
-#include "Kismet2/BlueprintEditorUtils.h"
-#include "BlueprintNodeSpawner.h"
+
 #include "BlueprintActionDatabaseRegistrar.h"
+#include "BlueprintNodeSpawner.h"
+#include "Containers/UnrealString.h"
+#include "EdGraph/EdGraphPin.h"
+#include "EdGraphSchema_K2.h"
+#include "EditorCategoryUtils.h"
+#include "Internationalization/Internationalization.h"
+#include "K2Node_CallFunction.h"
+#include "Kismet/KismetSystemLibrary.h"
+#include "KismetCompiler.h"
+#include "Math/NumericLimits.h"
+#include "Math/UnrealMathSSE.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/CString.h"
+#include "Serialization/Archive.h"
+#include "UObject/NameTypes.h"
+#include "UObject/Object.h"
 #include "UObject/PropertyPortFlags.h"
 
 #define LOCTEXT_NAMESPACE "UK2Node_BitmaskLiteral"
@@ -34,7 +44,7 @@ void UK2Node_BitmaskLiteral::ValidateBitflagsEnumType()
 	{
 		// Reset enum type reference if it no longer has the proper meta data.
 		const FString BitflagsMetaDataKey = FBlueprintMetadata::MD_Bitflags.ToString();
-		if (BitflagsEnum->IsPendingKill() || !BitflagsEnum->HasMetaData(*BitflagsMetaDataKey))
+		if (!IsValid(BitflagsEnum) || !BitflagsEnum->HasMetaData(*BitflagsMetaDataKey))
 		{
 			// Note: The input pin's default value is intentionally not reset here. Losing an associated enum type means the node will now expose the max
 			// number of bitflags, so this will ensure that we preserve the previous default value when the enum type representing the bitflags is removed.
@@ -153,6 +163,11 @@ void UK2Node_BitmaskLiteral::GetMenuActions(FBlueprintActionDatabaseRegistrar& A
 FText UK2Node_BitmaskLiteral::GetMenuCategory() const
 {
 	return FEditorCategoryUtils::GetCommonCategory(FCommonEditorCategory::Math);
+}
+
+void UK2Node_BitmaskLiteral::ReloadEnum(class UEnum* InEnum)
+{
+	BitflagsEnum = InEnum;
 }
 
 #undef LOCTEXT_NAMESPACE

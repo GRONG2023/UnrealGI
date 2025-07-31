@@ -7,41 +7,11 @@
 #include "Animation/AimOffsetBlendSpace.h"
 #include "Animation/BlendSpace1D.h"
 #include "Animation/AimOffsetBlendSpace1D.h"
+#include "Animation/AnimRootMotionProvider.h"
+#include "DetailLayoutBuilder.h"
+#include "DetailCategoryBuilder.h"
 
 #define LOCTEXT_NAMESPACE "AnimGraphNode_BlendSpaceBase"
-
-/////////////////////////////////////////////////////
-
-// Action to add a sequence player node to the graph
-struct FNewBlendSpacePlayerAction : public FEdGraphSchemaAction_K2NewNode
-{
-	FNewBlendSpacePlayerAction(class UBlendSpaceBase* BlendSpace)
-		: FEdGraphSchemaAction_K2NewNode()
-	{
-		check(BlendSpace);
-
-		const bool bIsAimOffset = BlendSpace->IsA(UAimOffsetBlendSpace::StaticClass()) || BlendSpace->IsA(UAimOffsetBlendSpace1D::StaticClass());
-		FText NewTooltipDescription;
-		if (bIsAimOffset)
-		{
-			UAnimGraphNode_RotationOffsetBlendSpace* Template = NewObject<UAnimGraphNode_RotationOffsetBlendSpace>();
-			Template->Node.BlendSpace = BlendSpace;
-			NodeTemplate = Template;
-			NewTooltipDescription = LOCTEXT("EvalAimOffsetToMakePose", "Evaluates an aim offset at a particular coordinate to produce a pose");
-		}
-		else
-		{
-			UAnimGraphNode_BlendSpacePlayer* Template = NewObject<UAnimGraphNode_BlendSpacePlayer>();
-			Template->Node.BlendSpace = BlendSpace;
-			NodeTemplate = Template;
-			NewTooltipDescription = LOCTEXT("EvalBlendSpaceToMakePose", "Evaluates a blend space at a particular coordinate to produce a pose");
-		}
-
-		FText NewMenuDescription = NodeTemplate->GetNodeTitle(ENodeTitleType::ListView);
-
-		UpdateSearchData(NewMenuDescription, NewTooltipDescription, LOCTEXT("Animation", "Animations"), FText::FromString(BlendSpace->GetPathName()));
-	}
-};
 
 /////////////////////////////////////////////////////
 // UAnimGraphNode_BlendSpaceBase
@@ -56,9 +26,14 @@ FLinearColor UAnimGraphNode_BlendSpaceBase::GetNodeTitleColor() const
 	return FLinearColor(0.2f, 0.8f, 0.2f);
 }
 
+FSlateIcon UAnimGraphNode_BlendSpaceBase::GetIconAndTint(FLinearColor& OutColor) const
+{
+	return FSlateIcon(FAppStyle::GetAppStyleSetName(), "ClassIcon.BlendSpace");
+}
+
 void UAnimGraphNode_BlendSpaceBase::CustomizePinData(UEdGraphPin* Pin, FName SourcePropertyName, int32 ArrayIndex) const
 {
-	UBlendSpaceBase * BlendSpace = GetBlendSpace();
+	UBlendSpace * BlendSpace = GetBlendSpace();
 
 	if (BlendSpace != NULL)
 	{
@@ -81,7 +56,7 @@ void UAnimGraphNode_BlendSpaceBase::CustomizePinData(UEdGraphPin* Pin, FName Sou
 
 void UAnimGraphNode_BlendSpaceBase::PreloadRequiredAssets()
 {
-	PreloadObject(GetBlendSpace());
+	PreloadRequiredAssetsHelper(GetBlendSpace(), FindPin(GET_MEMBER_NAME_STRING_CHECKED(FAnimNode_BlendSpacePlayer, BlendSpace)));
 
 	Super::PreloadRequiredAssets();
 }
@@ -90,7 +65,7 @@ void UAnimGraphNode_BlendSpaceBase::PostProcessPinName(const UEdGraphPin* Pin, F
 {
 	if(Pin->Direction == EGPD_Input)
 	{
-		UBlendSpaceBase * BlendSpace = GetBlendSpace();
+		UBlendSpace * BlendSpace = GetBlendSpace();
 
 		if(BlendSpace != NULL)
 		{
@@ -112,9 +87,39 @@ void UAnimGraphNode_BlendSpaceBase::PostProcessPinName(const UEdGraphPin* Pin, F
 	Super::PostProcessPinName(Pin, DisplayName);
 }
 
+void UAnimGraphNode_BlendSpaceBase::GetOutputLinkAttributes(FNodeAttributeArray& OutAttributes) const
+{
+	Super::GetOutputLinkAttributes(OutAttributes);
+
+	if (UE::Anim::IAnimRootMotionProvider::Get())
+	{
+		OutAttributes.Add(UE::Anim::IAnimRootMotionProvider::AttributeName);
+	}
+}
+
+void UAnimGraphNode_BlendSpaceBase::CustomizeDetails(IDetailLayoutBuilder& InDetailBuilder)
+{
+	const UBlendSpace* BlendSpace = GetBlendSpace();
+	if (BlendSpace)
+	{
+		TSharedRef<IPropertyHandle> XHandle = InDetailBuilder.GetProperty(TEXT("Node.X"), GetClass());
+		XHandle->SetPropertyDisplayName(FText::FromString(BlendSpace->GetBlendParameter(0).DisplayName));
+		TSharedRef<IPropertyHandle> YHandle = InDetailBuilder.GetProperty(TEXT("Node.Y"), GetClass());
+		if (BlendSpace->IsA<UBlendSpace1D>())
+		{
+			InDetailBuilder.HideProperty(YHandle);
+		}
+		else
+		{
+			YHandle->SetPropertyDisplayName(FText::FromString(BlendSpace->GetBlendParameter(1).DisplayName));
+		}
+	}
+}
+
+
 FText UAnimGraphNode_BlendSpaceBase::GetMenuCategory() const
 {
-	return LOCTEXT("BlendSpaceCategory_Label", "BlendSpaces");
+	return LOCTEXT("BlendSpaceCategory_Label", "Animation|Blend Spaces");
 }
 
 bool UAnimGraphNode_BlendSpaceBase::IsAimOffsetBlendSpace(const UClass* BlendSpaceClass)

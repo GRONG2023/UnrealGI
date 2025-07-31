@@ -2,14 +2,33 @@
 
 
 #include "K2Node_Switch.h"
-#include "UObject/UnrealType.h"
-#include "EdGraphSchema_K2.h"
-#include "EdGraph/EdGraphNodeUtils.h"
-#include "EdGraphUtilities.h"
+
 #include "BPTerminal.h"
-#include "KismetCompilerMisc.h"
-#include "KismetCompiler.h"
+#include "BlueprintCompiledStatement.h"
+#include "Containers/Array.h"
+#include "Containers/EnumAsByte.h"
+#include "Containers/IndirectArray.h"
+#include "Containers/Map.h"
+#include "EdGraph/EdGraphNode.h"
+#include "EdGraph/EdGraphNodeUtils.h"
+#include "EdGraphSchema_K2.h"
+#include "EdGraphUtilities.h"
 #include "EditorCategoryUtils.h"
+#include "Engine/Blueprint.h"
+#include "HAL/PlatformCrt.h"
+#include "Internationalization/Internationalization.h"
+#include "Kismet2/CompilerResultsLog.h"
+#include "KismetCompiledFunctionContext.h"
+#include "KismetCompiler.h"
+#include "KismetCompilerMisc.h"
+#include "Styling/AppStyle.h"
+#include "Templates/Casts.h"
+#include "UObject/Class.h"
+#include "UObject/Object.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/Script.h"
+#include "UObject/UnrealType.h"
+#include "UObject/WeakObjectPtrTemplates.h"
 
 #define LOCTEXT_NAMESPACE "K2Node_Switch"
 
@@ -80,7 +99,6 @@ public:
 
 		if ((BoolTerm != NULL) && (SwitchSelectionTerm != NULL))
 		{
-			UEdGraphNode* TargetNode = NULL;
 			UEdGraphPin* FuncPin = SwitchNode->GetFunctionPin();
 			FBPTerminal* FuncContext = Context.NetMap.FindRef(FuncPin);
 			UEdGraphPin* DefaultPin = SwitchNode->GetDefaultPin();
@@ -230,7 +248,7 @@ FLinearColor UK2Node_Switch::GetNodeTitleColor() const
 
 FSlateIcon UK2Node_Switch::GetIconAndTint(FLinearColor& OutColor) const
 {
-	static FSlateIcon Icon("EditorStyle", "GraphEditor.Switch_16x");
+	static FSlateIcon Icon(FAppStyle::GetAppStyleSetName(), "GraphEditor.Switch_16x");
 	return Icon;
 }
 
@@ -263,7 +281,7 @@ void UK2Node_Switch::RemovePinFromSwitchNode(UEdGraphPin* TargetPin)
 	{
 		RemovePin(TargetPin);
 
-		TargetPin->MarkPendingKill();
+		TargetPin->MarkAsGarbage();
 		Pins.Remove(TargetPin);
 	}
 }
@@ -307,7 +325,7 @@ void UK2Node_Switch::CreateFunctionPin()
 		if (UBlueprint* BP = GetBlueprint())
 		{
 			UClass* FunctionOwnerClass = Function->GetOuterUClass();
-			if (!BP->SkeletonGeneratedClass->IsChildOf(FunctionOwnerClass))
+			if (!BP->SkeletonGeneratedClass || !BP->SkeletonGeneratedClass->IsChildOf(FunctionOwnerClass))
 			{
 				FunctionPin->DefaultObject = FunctionOwnerClass->GetDefaultObject();
 			}

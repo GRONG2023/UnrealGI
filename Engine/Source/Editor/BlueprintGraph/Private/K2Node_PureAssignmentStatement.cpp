@@ -2,10 +2,23 @@
 
 
 #include "K2Node_PureAssignmentStatement.h"
+
+#include "Containers/Array.h"
+#include "Containers/Map.h"
+#include "EdGraph/EdGraphNode.h"
+#include "EdGraph/EdGraphPin.h"
 #include "EdGraphSchema_K2.h"
 #include "EdGraphUtilities.h"
+#include "Internationalization/Internationalization.h"
+#include "Internationalization/Text.h"
+#include "Kismet2/CompilerResultsLog.h"
+#include "KismetCompiledFunctionContext.h"
 #include "KismetCompiler.h"
+#include "Templates/Casts.h"
+#include "UObject/NameTypes.h"
 #include "VariableSetHandler.h"
+
+struct FBPTerminal;
 
 #define LOCTEXT_NAMESPACE "K2Node_PureAssignmentStatement"
 
@@ -67,7 +80,7 @@ public:
 
 FName UK2Node_PureAssignmentStatement::VariablePinName = TEXT("Variable");
 FName UK2Node_PureAssignmentStatement::ValuePinName = TEXT("Value");
-FName UK2Node_PureAssignmentStatement::OutputPinName = TEXT("ReturnValue");
+FName UK2Node_PureAssignmentStatement::OutputPinName = UEdGraphSchema_K2::PN_ReturnValue;
 
 
 UK2Node_PureAssignmentStatement::UK2Node_PureAssignmentStatement(const FObjectInitializer& ObjectInitializer)

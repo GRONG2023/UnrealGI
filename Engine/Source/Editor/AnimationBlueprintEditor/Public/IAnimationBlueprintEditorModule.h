@@ -12,6 +12,8 @@
 
 DECLARE_LOG_CATEGORY_EXTERN(LogAnimationBlueprintEditor, Log, All);
 
+class FBlueprintActionDatabaseRegistrar;
+
 class IAnimationBlueprintEditorModule : public IModuleInterface, public IHasMenuExtensibility, public IHasToolBarExtensibility
 {
 public:
@@ -30,10 +32,17 @@ public:
 	 */
 	virtual TSharedRef<IAnimationBlueprintEditor> CreateAnimationBlueprintEditor(const EToolkitMode::Type Mode, const TSharedPtr< class IToolkitHost >& InitToolkitHost, class UAnimBlueprint* Blueprint) = 0;
 
+
 	/** Get all toolbar extenders */
 	DECLARE_DELEGATE_RetVal_TwoParams(TSharedRef<FExtender>, FAnimationBlueprintEditorToolbarExtender, const TSharedRef<FUICommandList> /*InCommandList*/, TSharedRef<IAnimationBlueprintEditor> /*InAnimationBlueprintEditor*/);
 	virtual TArray<FAnimationBlueprintEditorToolbarExtender>& GetAllAnimationBlueprintEditorToolbarExtenders() = 0;
 
 	DECLARE_MULTICAST_DELEGATE_TwoParams(FOnGetCustomDebugObjects, const IAnimationBlueprintEditor& /*AnimationBlueprintEditor*/, TArray<FCustomDebugObject>& /*DebugList*/);
 	virtual FOnGetCustomDebugObjects& OnGetCustomDebugObjects() = 0;
+
+	/** Get anim blueprint type actions */
+	virtual void GetTypeActions(FBlueprintActionDatabaseRegistrar& ActionRegistrar) const = 0;
+
+	/** Get anim blueprint instance actions */
+	virtual void GetInstanceActions(const UAnimBlueprint* InAnimBlueprint, FBlueprintActionDatabaseRegistrar& ActionRegistrar) const = 0;
 };

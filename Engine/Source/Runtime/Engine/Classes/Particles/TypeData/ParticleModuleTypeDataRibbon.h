@@ -18,7 +18,7 @@ class UParticleSystemComponent;
 struct FParticleEmitterInstance;
 
 UENUM()
-enum ETrailsRenderAxisOption
+enum ETrailsRenderAxisOption : int
 {
 	Trails_CameraUp UMETA(DisplayName="Camera Up"),
 	Trails_SourceUp UMETA(DisplayName="Source Up"),
@@ -178,6 +178,9 @@ class UParticleModuleTypeDataRibbon : public UParticleModuleTypeDataBase
 
 	//~ Begin UParticleModuleTypeDataBase Interface
 	virtual FParticleEmitterInstance* CreateInstance(UParticleEmitter* InEmitterParent, UParticleSystemComponent* InComponent) override;
+	virtual const FVertexFactoryType* GetVertexFactoryType() const override;
+	virtual EPrimitiveType GetPrimitiveType() const override { return PT_TriangleStrip; }
+	virtual void CollectPSOPrecacheData(const UParticleEmitter* Emitter, FPSOPrecacheParams& OutParams) override;
 	//~ End UParticleModuleTypeDataBase Interface
 };
 

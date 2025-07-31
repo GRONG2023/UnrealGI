@@ -1,29 +1,63 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "SAssetPicker.h"
-#include "Styling/SlateTypes.h"
+
+#include "AssetRegistry/AssetData.h"
+#include "AssetThumbnail.h"
+#include "CollectionManagerTypes.h"
+#include "ContentBrowserDataFilter.h"
+#include "ContentBrowserItem.h"
+#include "ContentBrowserUtils.h"
+#include "CoreGlobals.h"
+#include "Delegates/Delegate.h"
+#include "Editor.h"
+#include "Editor/EditorEngine.h"
+#include "Framework/Application/SlateApplication.h"
+#include "Framework/Commands/GenericCommands.h"
 #include "Framework/Commands/UIAction.h"
 #include "Framework/Commands/UICommandList.h"
-#include "Widgets/SBoxPanel.h"
-#include "Layout/WidgetPath.h"
-#include "Framework/Application/SlateApplication.h"
-#include "Widgets/Layout/SSeparator.h"
-#include "Widgets/Layout/SSpacer.h"
-#include "Widgets/Images/SImage.h"
-#include "Widgets/Text/STextBlock.h"
-#include "Widgets/Input/SButton.h"
-#include "Widgets/Input/SComboButton.h"
-#include "Widgets/Input/SCheckBox.h"
-#include "EditorStyleSet.h"
 #include "FrontendFilters.h"
+#include "HAL/PlatformCrt.h"
+#include "Input/Events.h"
+#include "InputCoreTypes.h"
+#include "Internationalization/Internationalization.h"
+#include "Layout/Children.h"
+#include "Layout/Margin.h"
+#include "Layout/WidgetPath.h"
+#include "Misc/Attribute.h"
+#include "Misc/CString.h"
+#include "Misc/FilterCollection.h"
+#include "Misc/Paths.h"
+#include "PropertyHandle.h"
 #include "SAssetSearchBox.h"
-#include "SFilterList.h"
 #include "SAssetView.h"
 #include "SContentBrowser.h"
-#include "ContentBrowserUtils.h"
-#include "Framework/Commands/GenericCommands.h"
-#include "Editor.h"
-#include "PropertyHandle.h"
+#include "SFilterList.h"
+#include "SlotBase.h"
+#include "SourceControlOperations.h"
+#include "Styling/AppStyle.h"
+#include "Styling/ISlateStyle.h"
+#include "Styling/SlateColor.h"
+#include "Styling/SlateTypes.h"
+#include "Templates/UnrealTemplate.h"
+#include "Types/ISlateMetaData.h"
+#include "Types/WidgetActiveTimerDelegate.h"
+#include "UObject/Class.h"
+#include "UObject/NameTypes.h"
+#include "UObject/TopLevelAssetPath.h"
+#include "UObject/UObjectGlobals.h"
+#include "Widgets/Images/SImage.h"
+#include "Widgets/Input/SButton.h"
+#include "Widgets/Input/SCheckBox.h"
+#include "Widgets/Input/SComboButton.h"
+#include "Widgets/Layout/SSeparator.h"
+#include "Widgets/Layout/SSpacer.h"
+#include "Widgets/SBoxPanel.h"
+#include "Widgets/SWindow.h"
+
+class SWidget;
+class UObject;
+struct FGeometry;
 
 #define LOCTEXT_NAMESPACE "ContentBrowser"
 
@@ -46,7 +80,14 @@ void SAssetPicker::Construct( const FArguments& InArgs )
 	OnFolderEnteredDelegate = InArgs._AssetPickerConfig.OnFolderEntered;
 	OnGetAssetContextMenu = InArgs._AssetPickerConfig.OnGetAssetContextMenu;
 	OnGetFolderContextMenu = InArgs._AssetPickerConfig.OnGetFolderContextMenu;
+	
+	// Break up the incoming filter into a sources data and backend filter.
+	CurrentSourcesData = FSourcesData(InArgs._AssetPickerConfig.Filter.PackagePaths, InArgs._AssetPickerConfig.Collections);
+	CurrentBackendFilter = InArgs._AssetPickerConfig.Filter;
+	CurrentBackendFilter.PackagePaths.Reset();
 
+	bAllowRename = InArgs._AssetPickerConfig.bAllowRename;
+	
 	FOnGetContentBrowserItemContextMenu OnGetItemContextMenu;
 	if (OnGetAssetContextMenu.IsBound() || OnGetFolderContextMenu.IsBound())
 	{
@@ -104,29 +145,6 @@ void SAssetPicker::Construct( const FArguments& InArgs )
 
 	TSharedRef<SHorizontalBox> HorizontalBox = SNew(SHorizontalBox);
 
-	if (InArgs._AssetPickerConfig.bAddFilterUI)
-	{
-		// Filter
-		HorizontalBox->AddSlot()
-		.AutoWidth()
-		[
-			SAssignNew(FilterComboButtonPtr, SComboButton)
-			.ComboButtonStyle( FEditorStyle::Get(), "GenericFilters.ComboButtonStyle" )
-			.ForegroundColor(FLinearColor::White)
-			.ToolTipText( LOCTEXT( "AddFilterToolTip", "Add an asset filter." ) )
-			.OnGetMenuContent( this, &SAssetPicker::MakeAddFilterMenu )
-			.HasDownArrow( true )
-			.ContentPadding( FMargin( 1, 0 ) )
-			.AddMetaData<FTagMetaData>(FTagMetaData(TEXT("ContentBrowserFiltersCombo")))
-			.ButtonContent()
-			[
-				SNew( STextBlock )
-				.TextStyle( FEditorStyle::Get(), "GenericFilters.TextStyle" )
-				.Text( LOCTEXT( "Filters", "Filters" ) )
-			]
-		];
-	}
-	
 	if (!InArgs._AssetPickerConfig.bAutohideSearchBar)
 	{
 		// Search box
@@ -145,15 +163,18 @@ void SAssetPicker::Construct( const FArguments& InArgs )
 		// The 'Other Developers' filter is always on by design.
 		HorizontalBox->AddSlot()
 		.AutoWidth()
+		.Padding(4.f, 0.0f, 0.0f, 0.0f)
 		[
 			SNew(SCheckBox)
-			.Style(FEditorStyle::Get(), "ToggleButtonCheckbox")
+			.Style(FAppStyle::Get(), "ToggleButtonCheckBox")
 			.ToolTipText(this, &SAssetPicker::GetShowOtherDevelopersToolTip)
 			.OnCheckStateChanged(this, &SAssetPicker::HandleShowOtherDevelopersCheckStateChanged)
 			.IsChecked(this, &SAssetPicker::GetShowOtherDevelopersCheckState)
+			.Padding(4.f)
 			[
 				SNew(SImage)
-				.Image(FEditorStyle::GetBrush("ContentBrowser.ColumnViewDeveloperFolderIcon"))
+				.ColorAndOpacity(FSlateColor::UseForeground())
+				.Image(FAppStyle::GetBrush("ContentBrowser.ColumnViewDeveloperFolderIcon"))
 			]
 		];
 	}
@@ -165,10 +186,44 @@ void SAssetPicker::Construct( const FArguments& InArgs )
 			SNew(SSpacer)
 		];
 	}
+
+
+	if (InArgs._AssetPickerConfig.bAddFilterUI)
+	{		
+		// We create available classes here. These are used to hide away the type filters in the filter list that don't match this list of classes
+		TArray<UClass*> FilterClassList;
+		for(auto Iter = CurrentBackendFilter.ClassPaths.CreateIterator(); Iter; ++Iter)
+		{
+			FTopLevelAssetPath ClassName = (*Iter);
+			UClass* FilterClass = FindObject<UClass>(ClassName);
+			if(FilterClass)
+			{
+				FilterClassList.AddUnique(FilterClass);
+			}
+		}		
+		
+		SAssignNew(FilterListPtr, SFilterList)
+			.OnFilterChanged(this, &SAssetPicker::OnFilterChanged)
+			.FrontendFilters(FrontendFilters)
+			.InitialClassFilters(FilterClassList)
+			.FilterBarIdentifier(FName(SaveSettingsName))
+			.ExtraFrontendFilters(InArgs._AssetPickerConfig.ExtraFrontendFilters)
+			.DefaultMenuExpansionCategory(ConvertAssetTypeCategoryToAssetCategoryPath(DefaultFilterMenuExpansion).Get(EAssetCategoryPaths::Basic))
+			.OnExtendAddFilterMenu(InArgs._AssetPickerConfig.OnExtendAddFilterMenu)
+			.bUseSectionsForCustomCategories(InArgs._AssetPickerConfig.bUseSectionsForCustomFilterCategories);
+		
+		FilterComboButtonPtr = StaticCastSharedRef<SComboButton>(SFilterList::MakeAddFilterButton(FilterListPtr.ToSharedRef()));
+		
+		HorizontalBox->InsertSlot(0)
+		.AutoWidth()
+		[
+			FilterComboButtonPtr.ToSharedRef()
+		];
+	}
 		
 	VerticalBox->AddSlot()
 	.AutoHeight()
-	.Padding(0, 0, 0, 1)
+	.Padding(8.f, 0.f, 8.f, 8.f)
 	[
 		HorizontalBox
 	];
@@ -185,8 +240,8 @@ void SAssetPicker::Construct( const FArguments& InArgs )
 				.AutoHeight()
 				[
 					SNew(SButton)
-						.ButtonStyle( FEditorStyle::Get(), "ContentBrowser.NoneButton" )
-						.TextStyle( FEditorStyle::Get(), "ContentBrowser.NoneButtonText" )
+						.ButtonStyle( FAppStyle::Get(), "ContentBrowser.NoneButton" )
+						.TextStyle( FAppStyle::Get(), "ContentBrowser.NoneButtonText" )
 						.Text( LOCTEXT("NoneButtonText", "( None )") )
 						.ToolTipText( LOCTEXT("NoneButtonTooltip", "Clears the asset selection.") )
 						.HAlign(HAlign_Center)
@@ -206,34 +261,12 @@ void SAssetPicker::Construct( const FArguments& InArgs )
 	}
 
 	// Asset view
-	
-	// Break up the incoming filter into a sources data and backend filter.
-	CurrentSourcesData = FSourcesData(InArgs._AssetPickerConfig.Filter.PackagePaths, InArgs._AssetPickerConfig.Collections);
-	CurrentBackendFilter = InArgs._AssetPickerConfig.Filter;
-	CurrentBackendFilter.PackagePaths.Reset();
-
 	if (InArgs._AssetPickerConfig.bAddFilterUI)
 	{
-		// Filters
-		TArray<UClass*> FilterClassList;
-		for(auto Iter = CurrentBackendFilter.ClassNames.CreateIterator(); Iter; ++Iter)
-		{
-			FName ClassName = (*Iter);
-			UClass* FilterClass = FindObject<UClass>(ANY_PACKAGE, *ClassName.ToString());
-			if(FilterClass)
-			{
-				FilterClassList.AddUnique(FilterClass);
-			}
-		}
-
 		VerticalBox->AddSlot()
 		.AutoHeight()
 		[
-			SAssignNew(FilterListPtr, SFilterList)
-			.OnFilterChanged(this, &SAssetPicker::OnFilterChanged)
-			.FrontendFilters(FrontendFilters)
-			.InitialClassFilters(FilterClassList)
-			.ExtraFrontendFilters(InArgs._AssetPickerConfig.ExtraFrontendFilters)
+			FilterListPtr.ToSharedRef()
 		];
 
 		// Use the 'other developer' filter from the filter list widget. 
@@ -297,28 +330,27 @@ void SAssetPicker::Construct( const FArguments& InArgs )
 		.OnGetCustomAssetToolTip(InArgs._AssetPickerConfig.OnGetCustomAssetToolTip)
 		.OnVisualizeAssetToolTip(InArgs._AssetPickerConfig.OnVisualizeAssetToolTip)
 		.OnAssetToolTipClosing(InArgs._AssetPickerConfig.OnAssetToolTipClosing)
-		.AreRealTimeThumbnailsAllowed(this, &SAssetPicker::IsHovered)
 		.FrontendFilters(FrontendFilters)
 		.InitialSourcesData(CurrentSourcesData)
 		.InitialBackendFilter(CurrentBackendFilter)
 		.InitialViewType(InArgs._AssetPickerConfig.InitialAssetViewType)
 		.InitialAssetSelection(InArgs._AssetPickerConfig.InitialAssetSelection)
-		.ThumbnailScale(InArgs._AssetPickerConfig.ThumbnailScale)
 		.ShowBottomToolbar(InArgs._AssetPickerConfig.bShowBottomToolbar)
 		.OnAssetTagWantsToBeDisplayed(InArgs._AssetPickerConfig.OnAssetTagWantsToBeDisplayed)
 		.OnGetCustomSourceAssets(InArgs._AssetPickerConfig.OnGetCustomSourceAssets)
 		.AllowDragging( InArgs._AssetPickerConfig.bAllowDragging )
 		.CanShowClasses( InArgs._AssetPickerConfig.bCanShowClasses )
 		.CanShowFolders( InArgs._AssetPickerConfig.bCanShowFolders )
+		.CanShowReadOnlyFolders( InArgs._AssetPickerConfig.bCanShowReadOnlyFolders )
 		.ShowPathInColumnView( InArgs._AssetPickerConfig.bShowPathInColumnView)
 		.ShowTypeInColumnView( InArgs._AssetPickerConfig.bShowTypeInColumnView)
+		.ShowViewOptions(false)  // We control this in the asset picker
 		.SortByPathInColumnView( InArgs._AssetPickerConfig.bSortByPathInColumnView)
 		.FilterRecursivelyWithBackendFilter( false )
 		.CanShowRealTimeThumbnails( InArgs._AssetPickerConfig.bCanShowRealTimeThumbnails )
 		.CanShowDevelopersFolder( InArgs._AssetPickerConfig.bCanShowDevelopersFolder )
 		.ForceShowEngineContent( InArgs._AssetPickerConfig.bForceShowEngineContent )
 		.ForceShowPluginContent( InArgs._AssetPickerConfig.bForceShowPluginContent )
-		.PreloadAssetsForContextMenu( InArgs._AssetPickerConfig.bPreloadAssetsForContextMenu )
 		.HighlightedText( HighlightText )
 		.ThumbnailLabel( ThumbnailLabel )
 		.AssetShowWarningText( InArgs._AssetPickerConfig.AssetShowWarningText)
@@ -326,14 +358,33 @@ void SAssetPicker::Construct( const FArguments& InArgs )
 		.HiddenColumnNames(InArgs._AssetPickerConfig.HiddenColumnNames)
 		.CustomColumns(InArgs._AssetPickerConfig.CustomColumns)
 		.OnSearchOptionsChanged(this, &SAssetPicker::HandleSearchSettingsChanged)
+		.InitialThumbnailSize(InArgs._AssetPickerConfig.InitialThumbnailSize)
 	];
+
+
+	HorizontalBox->AddSlot()
+	.AutoWidth()
+	[
+		SNew(SComboButton)
+		.ContentPadding(0.f)
+		.ComboButtonStyle(&FAppStyle::Get().GetWidgetStyle<FComboButtonStyle>("SimpleComboButton"))
+		.OnGetMenuContent(AssetViewPtr.ToSharedRef(), &SAssetView::GetViewButtonContent)
+		.HasDownArrow(false)
+		.ButtonContent()
+		[
+			SNew(SImage)
+			.ColorAndOpacity(FSlateColor::UseForeground())
+			.Image(FAppStyle::Get().GetBrush("Icons.Settings"))
+		]	
+	];
+
 
 	LoadSettings();
 
 	if (AssetViewPtr.IsValid() && !InArgs._AssetPickerConfig.bAutohideSearchBar)
 	{
 		TextFilter = MakeShareable(new FFrontendFilter_Text());
-		bool bClassNamesProvided = (InArgs._AssetPickerConfig.Filter.ClassNames.Num() != 1);
+		bool bClassNamesProvided = (InArgs._AssetPickerConfig.Filter.ClassPaths.Num() != 1);
 		TextFilter->SetIncludeClassName(bClassNamesProvided || AssetViewPtr->IsIncludingClassNames());
 		TextFilter->SetIncludeAssetPath(AssetViewPtr->IsIncludingAssetPaths());
 		TextFilter->SetIncludeCollectionNames(AssetViewPtr->IsIncludingCollectionNames());
@@ -342,15 +393,19 @@ void SAssetPicker::Construct( const FArguments& InArgs )
 	AssetViewPtr->RequestSlowFullListRefresh();
 }
 
+TSharedPtr<SWidget> SAssetPicker::GetSearchBox() const
+{
+	return SearchBoxPtr;
+}
+
 EActiveTimerReturnType SAssetPicker::SetFocusPostConstruct( double InCurrentTime, float InDeltaTime )
 {
-	if ( SearchBoxPtr.IsValid() )
+	if (SearchBoxPtr.IsValid())
 	{
 		FWidgetPath WidgetToFocusPath;
-		FSlateApplication::Get().GeneratePathToWidgetUnchecked( SearchBoxPtr.ToSharedRef(), WidgetToFocusPath );
-		FSlateApplication::Get().SetKeyboardFocus( WidgetToFocusPath, EFocusCause::SetDirectly );
+		FSlateApplication::Get().GeneratePathToWidgetUnchecked(SearchBoxPtr.ToSharedRef(), WidgetToFocusPath);
+		FSlateApplication::Get().SetKeyboardFocus(WidgetToFocusPath, EFocusCause::SetDirectly);
 		WidgetToFocusPath.GetWindow()->SetWidgetToFocusOnActivate(SearchBoxPtr);
-
 		return EActiveTimerReturnType::Stop;
 	}
 
@@ -474,15 +529,10 @@ void SAssetPicker::SetNewBackendFilter(const FARFilter& NewFilter)
 	// Update the Text filter too, since now class names may no longer matter
 	if (TextFilter.IsValid())
 	{
-		TextFilter->SetIncludeClassName(NewFilter.ClassNames.Num() != 1);
+		TextFilter->SetIncludeClassName(NewFilter.ClassPaths.Num() != 1);
 	}
 
 	OnFilterChanged();
-}
-
-TSharedRef<SWidget> SAssetPicker::MakeAddFilterMenu()
-{
-	return FilterListPtr->ExternalMakeAddFilterMenu(DefaultFilterMenuExpansion);
 }
 
 void SAssetPicker::OnFilterChanged()
@@ -523,10 +573,9 @@ void SAssetPicker::HandleItemSelectionChanged(const FContentBrowserItem& InSelec
 	if (InSelectInfo != ESelectInfo::Direct)
 	{
 		FAssetData ItemAssetData;
-		if (InSelectedItem.Legacy_TryGetAssetData(ItemAssetData))
-		{
-			OnAssetSelected.ExecuteIfBound(ItemAssetData);
-		}
+		InSelectedItem.Legacy_TryGetAssetData(ItemAssetData);
+		OnAssetSelected.ExecuteIfBound(ItemAssetData);
+		
 	}
 }
 
@@ -652,7 +701,19 @@ void SAssetPicker::OnRenameRequested() const
 
 bool SAssetPicker::CanExecuteRenameRequested()
 {
+	if(!bAllowRename)
+	{
+		return false;
+	}
 	return ContentBrowserUtils::CanRenameFromAssetView(AssetViewPtr);
+}
+
+void SAssetPicker::ExecuteRenameCommand()
+{
+	if (Commands.IsValid())
+	{
+		Commands->TryExecuteAction(FGenericCommands::Get().Rename.ToSharedRef());
+	}
 }
 
 void SAssetPicker::BindCommands()
@@ -674,7 +735,7 @@ void SAssetPicker::LoadSettings()
 		// Load all our data using the settings string as a key in the user settings ini
 		if (FilterListPtr.IsValid())
 		{
-			FilterListPtr->LoadSettings(GEditorPerProjectIni, SContentBrowser::SettingsIniSection, SettingsString);
+			FilterListPtr->LoadSettings();
 		}
 		
 		AssetViewPtr->LoadSettings(GEditorPerProjectIni, SContentBrowser::SettingsIniSection, SettingsString);
@@ -690,7 +751,7 @@ void SAssetPicker::SaveSettings() const
 		// Save all our data using the settings string as a key in the user settings ini
 		if (FilterListPtr.IsValid())
 		{
-			FilterListPtr->SaveSettings(GEditorPerProjectIni, SContentBrowser::SettingsIniSection, SettingsString);
+			FilterListPtr->SaveSettings();
 		}
 
 		AssetViewPtr->SaveSettings(GEditorPerProjectIni, SContentBrowser::SettingsIniSection, SettingsString);
@@ -724,8 +785,8 @@ TSharedPtr<SWidget> SAssetPicker::GetItemContextMenu(TArrayView<const FContentBr
 		TArray<FString> SelectedPackagePaths;
 		for (const FContentBrowserItem& SelectedFolder : SelectedFolders)
 		{
-			FName PackagePath;
-			if (SelectedFolder.Legacy_TryGetPackagePath(PackagePath))
+			FName PackagePath = SelectedFolder.GetInvariantPath();
+			if (!PackagePath.IsNone())
 			{
 				SelectedPackagePaths.Add(PackagePath.ToString());
 			}
@@ -757,6 +818,43 @@ TSharedPtr<SWidget> SAssetPicker::GetItemContextMenu(TArrayView<const FContentBr
 	}
 
 	return nullptr;
+}
+
+TOptional<FAssetCategoryPath> SAssetPicker::ConvertAssetTypeCategoryToAssetCategoryPath(EAssetTypeCategories::Type InDefaultFilterMenuExpansion)
+{
+	// TODO We should completely replace EAssetTypeCategories with FAssetCategoryPath, but FAssetCategoryPath is contained in the AssetDefinitionsModule.
+	// Since the API exposes the DefaultFilterMenuExpansion, we can't easily change this
+	switch (InDefaultFilterMenuExpansion)
+	{
+	case EAssetTypeCategories::Basic:
+		return EAssetCategoryPaths::Basic;
+	case EAssetTypeCategories::Animation:
+		return EAssetCategoryPaths::Animation;
+	case EAssetTypeCategories::Materials:
+		return EAssetCategoryPaths::Material;
+	case EAssetTypeCategories::Sounds:
+		return EAssetCategoryPaths::Audio;
+	case EAssetTypeCategories::Physics:
+		return EAssetCategoryPaths::Physics;
+	case EAssetTypeCategories::UI:
+		return EAssetCategoryPaths::UI;
+	case EAssetTypeCategories::Misc:
+		return EAssetCategoryPaths::Misc;
+	case EAssetTypeCategories::Gameplay:
+		return EAssetCategoryPaths::Gameplay;
+	case EAssetTypeCategories::Blueprint:
+		return EAssetCategoryPaths::Blueprint;
+	case EAssetTypeCategories::Media:
+		return EAssetCategoryPaths::Media;
+	case EAssetTypeCategories::Textures:
+		return EAssetCategoryPaths::Texture;
+	case EAssetTypeCategories::World:
+		break;
+	case EAssetTypeCategories::FX:
+		return EAssetCategoryPaths::FX;
+	}
+
+	return TOptional<FAssetCategoryPath>();
 }
 
 #undef LOCTEXT_NAMESPACE

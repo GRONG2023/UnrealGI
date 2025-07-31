@@ -1,21 +1,82 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "SourcesViewWidgets.h"
-#include "Widgets/Images/SImage.h"
-#include "EditorStyleSet.h"
-#include "EditorFontGlyphs.h"
-#include "PathViewTypes.h"
 
-#include "DragAndDrop/DecoratedDragDropOp.h"
+#include "AssetViewUtils.h"
+#include "CollectionManagerTypes.h"
+#include "CollectionViewTypes.h"
+#include "CollectionViewUtils.h"
+#include "Containers/UnrealString.h"
+#include "ContentBrowserDataSource.h"
+#include "ContentBrowserItem.h"
+#include "ContentBrowserItemData.h"
+#include "ContentBrowserModule.h"
+#include "ContentBrowserPluginFilters.h"
+#include "ContentBrowserUtils.h"
 #include "DragAndDrop/AssetDragDropOp.h"
 #include "DragAndDrop/CollectionDragDropOp.h"
+#include "DragAndDrop/DecoratedDragDropOp.h"
 #include "DragDropHandler.h"
-#include "ContentBrowserUtils.h"
-#include "CollectionViewUtils.h"
+#include "Fonts/SlateFontInfo.h"
+#include "GenericPlatform/ICursor.h"
+#include "Input/DragAndDrop.h"
+#include "Layout/Children.h"
+#include "Layout/Margin.h"
+#include "Misc/EnumClassFlags.h"
+#include "Misc/Optional.h"
+#include "Misc/PathViews.h"
+#include "PathViewTypes.h"
+#include "SAssetTagItem.h"
+#include "SlotBase.h"
+#include "Styling/AppStyle.h"
+#include "Styling/StyleColors.h"
+#include "Templates/Function.h"
+#include "UObject/NameTypes.h"
+#include "Widgets/Images/SImage.h"
+#include "Widgets/Layout/SBorder.h"
+#include "Widgets/SBoxPanel.h"
+#include "Widgets/Text/SInlineEditableTextBlock.h"
 
-#include "ContentBrowserDataSource.h"
+struct FSlateBrush;
 
 #define LOCTEXT_NAMESPACE "ContentBrowser"
+
+struct FAssetTreeItemBrushes
+{
+	/** Brushes for the different folder states */
+	const FSlateBrush* FolderOpenBrush;
+	const FSlateBrush* FolderClosedBrush;
+	const FSlateBrush* FolderOpenVirtualBrush;
+	const FSlateBrush* FolderClosedVirtualBrush;
+	const FSlateBrush* FolderOpenCodeBrush;
+	const FSlateBrush* FolderClosedCodeBrush;
+	const FSlateBrush* FolderOpenDeveloperBrush;
+	const FSlateBrush* FolderClosedDeveloperBrush;
+	const FSlateBrush* FolderOpenPluginRootBrush;
+	const FSlateBrush* FolderClosedPluginRootBrush;
+
+	FAssetTreeItemBrushes()
+	{
+		FolderOpenBrush = FAppStyle::GetBrush("ContentBrowser.AssetTreeFolderOpen");
+		FolderClosedBrush = FAppStyle::GetBrush("ContentBrowser.AssetTreeFolderClosed");
+		FolderOpenVirtualBrush = FAppStyle::GetBrush("ContentBrowser.AssetTreeFolderOpenVirtual");
+		FolderClosedVirtualBrush = FAppStyle::GetBrush("ContentBrowser.AssetTreeFolderClosedVirtual");
+		FolderOpenCodeBrush = FAppStyle::GetBrush("ContentBrowser.AssetTreeFolderOpenCode");
+		FolderClosedCodeBrush = FAppStyle::GetBrush("ContentBrowser.AssetTreeFolderClosedCode");
+		FolderOpenDeveloperBrush = FAppStyle::GetBrush("ContentBrowser.AssetTreeFolderOpenDeveloper");
+		FolderClosedDeveloperBrush = FAppStyle::GetBrush("ContentBrowser.AssetTreeFolderClosedDeveloper");
+		FolderOpenPluginRootBrush = FAppStyle::GetBrush("ContentBrowser.AssetTreeFolderOpenPluginRoot");
+		FolderClosedPluginRootBrush = FAppStyle::GetBrush("ContentBrowser.AssetTreeFolderClosedPluginRoot");
+	}
+	
+	static FAssetTreeItemBrushes& Get()
+	{
+		static FAssetTreeItemBrushes Instance;
+		return Instance;
+	}
+};
+
+
 
 //////////////////////////
 // SAssetTreeItem
@@ -29,20 +90,38 @@ void SAssetTreeItem::Construct( const FArguments& InArgs )
 	IsItemExpanded = InArgs._IsItemExpanded;
 	bDraggedOver = false;
 
-	FolderOpenBrush = FEditorStyle::GetBrush("ContentBrowser.AssetTreeFolderOpen");
-	FolderClosedBrush = FEditorStyle::GetBrush("ContentBrowser.AssetTreeFolderClosed");
-	FolderOpenCodeBrush = FEditorStyle::GetBrush("ContentBrowser.AssetTreeFolderOpenCode");
-	FolderClosedCodeBrush = FEditorStyle::GetBrush("ContentBrowser.AssetTreeFolderClosedCode");
-	FolderDeveloperBrush = FEditorStyle::GetBrush("ContentBrowser.AssetTreeFolderDeveloper");
-	
+	IsSelected = InArgs._IsSelected;
+
 	FolderType = EFolderType::Normal;
-	if (ContentBrowserUtils::IsItemDeveloperContent(InArgs._TreeItem->GetItem()))
+	const FContentBrowserItem& Item = InArgs._TreeItem->GetItem();
+	if (ContentBrowserUtils::IsItemDeveloperContent(Item))
 	{
 		FolderType = EFolderType::Developer;
 	}
-	else if (EnumHasAnyFlags(InArgs._TreeItem->GetItem().GetItemCategory(), EContentBrowserItemFlags::Category_Class))
+	else if (EnumHasAnyFlags(Item.GetItemCategory(), EContentBrowserItemFlags::Category_Class))
 	{
 		FolderType = EFolderType::Code;
+	}
+
+	if (ContentBrowserUtils::ShouldShowCustomVirtualFolderIcon())
+	{
+		FContentBrowserItemDataAttributeValue VirtualAttributeValue = Item.GetItemAttribute(ContentBrowserItemAttributes::ItemIsCustomVirtualFolder);
+		if (VirtualAttributeValue.IsValid() && VirtualAttributeValue.GetValue<bool>())
+		{
+			FolderType = EFolderType::CustomVirtual;
+		}
+	}
+	
+	if (ContentBrowserUtils::ShouldShowPluginFolderIcon())
+	{
+		if (InArgs._TreeItem->GetItem().IsInPlugin())
+		{
+			TSharedPtr<FTreeItem> Parent = InArgs._TreeItem->Parent.Pin();
+			if (!Parent.IsValid() || !Parent->GetItem().IsInPlugin())
+			{
+				FolderType = EFolderType::PluginRoot;
+			}
+		}
 	}
 
 	bool bIsRoot = !InArgs._TreeItem->Parent.IsValid();
@@ -67,18 +146,23 @@ void SAssetTreeItem::Construct( const FArguments& InArgs )
 			]
 
 			+SHorizontalBox::Slot()
-			.AutoWidth()
 			.VAlign(VAlign_Center)
 			[
 				SAssignNew(InlineRenameWidget, SInlineEditableTextBlock)
 					.Text(this, &SAssetTreeItem::GetNameText)
 					.ToolTipText(this, &SAssetTreeItem::GetToolTipText)
-					.Font( InArgs._FontOverride.IsSet() ? InArgs._FontOverride : FEditorStyle::GetFontStyle(bIsRoot ? "ContentBrowser.SourceTreeRootItemFont" : "ContentBrowser.SourceTreeItemFont") )
+					.Font( InArgs._FontOverride.IsSet() ? InArgs._FontOverride : FAppStyle::GetFontStyle(bIsRoot ? "ContentBrowser.SourceTreeRootItemFont" : "ContentBrowser.SourceTreeItemFont") )
 					.HighlightText( InArgs._HighlightText )
 					.OnTextCommitted(this, &SAssetTreeItem::HandleNameCommitted)
 					.OnVerifyTextChanged(this, &SAssetTreeItem::VerifyNameChanged)
 					.IsSelected( InArgs._IsSelected )
 					.IsReadOnly( this, &SAssetTreeItem::IsReadOnly )
+			]
+			+SHorizontalBox::Slot()
+			.AutoWidth()
+			.HAlign(HAlign_Right)
+			[
+				GenerateStateIcons()
 			]
 		]
 	];
@@ -87,6 +171,46 @@ void SAssetTreeItem::Construct( const FArguments& InArgs )
 	{
 		EnterEditingModeDelegateHandle = TreeItem.Pin()->OnRenameRequested().AddSP( InlineRenameWidget.Get(), &SInlineEditableTextBlock::EnterEditingMode );
 	}
+}
+
+TSharedRef<SWidget> SAssetTreeItem::GenerateStateIcons()
+{
+	TSharedRef<SBox> ContainingBox = SNew(SBox);
+	TSharedPtr<SHorizontalBox> HorizonalBox;
+	FContentBrowserModule& ContentBrowserModule = FModuleManager::GetModuleChecked<FContentBrowserModule>( TEXT("ContentBrowser") );
+	if (const TSharedPtr<FTreeItem> TreeItemPinned = TreeItem.Pin())
+	{
+		const FContentBrowserItem& ContentBrowserItem = TreeItemPinned->GetItem();
+		for(const FPathViewStateIconGenerator& Generator: ContentBrowserModule.GetAllPathViewStateIconGenerators())
+		{
+			if (Generator.IsBound())
+			{
+				if (TSharedPtr<SWidget> IconWidget = Generator.Execute(ContentBrowserItem))
+				{
+					if (!HorizonalBox)
+					{
+						HorizonalBox = SNew(SHorizontalBox);
+					}
+					
+					HorizonalBox->AddSlot()
+					.AutoWidth()
+					.VAlign(VAlign_Center)
+					.Padding(4, 0, 0, 0)
+					[
+						IconWidget.ToSharedRef()
+					];
+				}
+			}
+		}
+		// If we created any content, add it to the containg box
+		// and set padding
+		if (HorizonalBox)
+		{
+			ContainingBox->SetContent(HorizonalBox.ToSharedRef());
+			ContainingBox->SetPadding(FMargin(2, 0, 4, 0));
+		}
+	}
+	return ContainingBox;
 }
 
 SAssetTreeItem::~SAssetTreeItem()
@@ -138,11 +262,6 @@ FReply SAssetTreeItem::OnDrop( const FGeometry& MyGeometry, const FDragDropEvent
 	return FReply::Unhandled();
 }
 
-void SAssetTreeItem::Tick( const FGeometry& AllottedGeometry, const double InCurrentTime, const float InDeltaTime )
-{
-	LastGeometry = AllottedGeometry;
-}
-
 bool SAssetTreeItem::VerifyNameChanged(const FText& InName, FText& OutError) const
 {
 	if ( TreeItem.IsValid() )
@@ -167,6 +286,7 @@ void SAssetTreeItem::HandleNameCommitted( const FText& NewText, ETextCommit::Typ
 		{
 			TreeItemPtr->SetNamingFolder(false);
 		
+			const FGeometry LastGeometry = GetTickSpaceGeometry();
 			FVector2D MessageLoc;
 			MessageLoc.X = LastGeometry.AbsolutePosition.X;
 			MessageLoc.Y = LastGeometry.AbsolutePosition.Y + LastGeometry.Size.Y * LastGeometry.Scale;
@@ -190,16 +310,22 @@ bool SAssetTreeItem::IsReadOnly() const
 
 const FSlateBrush* SAssetTreeItem::GetFolderIcon() const
 {
+	FAssetTreeItemBrushes& Brushes = FAssetTreeItemBrushes::Get();
 	switch( FolderType )
 	{
 	case EFolderType::Code:
-		return ( IsItemExpanded.Get() ) ? FolderOpenCodeBrush : FolderClosedCodeBrush;
+		return IsItemExpanded.Get() ? Brushes.FolderOpenCodeBrush : Brushes.FolderClosedCodeBrush;
 
 	case EFolderType::Developer:
-		return FolderDeveloperBrush;
+		return IsItemExpanded.Get() ? Brushes.FolderOpenDeveloperBrush : Brushes.FolderClosedDeveloperBrush;
+
+	case EFolderType::CustomVirtual:
+		return IsItemExpanded.Get() ? Brushes.FolderOpenVirtualBrush : Brushes.FolderClosedVirtualBrush;
+	case EFolderType::PluginRoot:
+		return (IsItemExpanded.Get()) ? Brushes.FolderOpenPluginRootBrush : Brushes.FolderClosedPluginRootBrush;
 
 	default:
-		return ( IsItemExpanded.Get() ) ? FolderOpenBrush : FolderClosedBrush;
+		return IsItemExpanded.Get() ? Brushes.FolderOpenBrush : Brushes.FolderClosedBrush;
 	}
 }
 
@@ -207,6 +333,7 @@ FSlateColor SAssetTreeItem::GetFolderColor() const
 {
 	if (TSharedPtr<FTreeItem> TreeItemPin = TreeItem.Pin())
 	{
+		FLinearColor FoundColor;
 		FContentBrowserItemDataAttributeValue ColorAttributeValue = TreeItemPin->GetItem().GetItemAttribute(ContentBrowserItemAttributes::ItemColor);
 		if (ColorAttributeValue.IsValid())
 		{
@@ -215,17 +342,21 @@ FSlateColor SAssetTreeItem::GetFolderColor() const
 			FLinearColor Color;
 			if (Color.InitFromString(ColorStr))
 			{
-				return Color;
+				FoundColor = Color;
 			}
 		}
 		else
 		{
-			if (TSharedPtr<FLinearColor> Color = ContentBrowserUtils::LoadColor(TreeItemPin->GetItem().GetVirtualPath().ToString()))
+			TOptional<FLinearColor> Color = ContentBrowserUtils::GetPathColor(TreeItemPin->GetItem().GetInvariantPath().ToString());
+			if (Color.IsSet())
 			{
-				return *Color;
+				FoundColor = Color.GetValue();
 			}
 		}
+
+		return FoundColor;
 	}
+
 	return ContentBrowserUtils::GetDefaultColor();
 }
 
@@ -242,7 +373,26 @@ FText SAssetTreeItem::GetToolTipText() const
 {
 	if (TSharedPtr<FTreeItem> TreeItemPin = TreeItem.Pin())
 	{
-		return FText::FromName(TreeItemPin->GetItem().GetVirtualPath());
+		// If this item is a plugin folder, append the plugin description to the tooltip
+		const FContentBrowserItem& Item = TreeItemPin->GetItem();
+		FText PathText = FText::FromName(Item.GetVirtualPath());
+		if (Item.IsInPlugin())
+		{
+			FNameBuilder ItemPath{Item.GetInternalPath()};
+			FStringView PluginName = FPathViews::GetMountPointNameFromPath(ItemPath.ToView());
+			if (TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(PluginName))
+			{
+				const FPluginDescriptor& Descriptor = Plugin->GetDescriptor();
+				if (!Descriptor.Description.IsEmpty())
+				{
+					return FText::Format(LOCTEXT("TwoLineTooltip", "{0}\n{1}"),
+						PathText,
+						FText::FromString(Descriptor.Description)
+						);
+				}
+			}
+		}
+		return PathText;
 	}
 	return FText();
 }
@@ -251,7 +401,7 @@ const FSlateBrush* SAssetTreeItem::GetBorderImage() const
 {
 	static const FName NAME_DraggedBorderImage = TEXT("Menu.Background");
 	static const FName NAME_NoBorderImage = TEXT("NoBorder");
-	return bDraggedOver ? FEditorStyle::GetBrush(NAME_DraggedBorderImage) : FEditorStyle::GetBrush(NAME_NoBorderImage);
+	return bDraggedOver ? FAppStyle::GetBrush(NAME_DraggedBorderImage) : FAppStyle::GetBrush(NAME_NoBorderImage);
 }
 
 
@@ -276,7 +426,7 @@ void SCollectionTreeItem::Construct( const FArguments& InArgs )
 	ChildSlot
 	[
 		SAssignNew(AssetTagItem, SAssetTagItem)
-		.ViewMode(InArgs._ViewMode)
+		.ViewMode(EAssetTagItemViewMode::Compact)
 		.BaseColor(this, &SCollectionTreeItem::GetCollectionColor)
 		.DisplayName(this, &SCollectionTreeItem::GetNameText)
 		.CountText(this, &SCollectionTreeItem::GetCollectionObjectCountText)
@@ -472,10 +622,10 @@ FText SCollectionTreeItem::GetCollectionWarningText() const
 			return NSLOCTEXT("ContentBrowser", "CollectionStatus_IsCheckedOutByAnotherUser", "Collection is checked out by another user");
 
 		case ECollectionItemStatus::IsConflicted:
-			return NSLOCTEXT("ContentBrowser", "CollectionStatus_IsConflicted", "Collection is conflicted - please use your external source control provider to resolve this conflict");
+			return NSLOCTEXT("ContentBrowser", "CollectionStatus_IsConflicted", "Collection is conflicted - please use your external revision control provider to resolve this conflict");
 
 		case ECollectionItemStatus::IsMissingSCCProvider:
-			return NSLOCTEXT("ContentBrowser", "CollectionStatus_IsMissingSCCProvider", "Collection is missing its source control provider - please check your source control settings");
+			return NSLOCTEXT("ContentBrowser", "CollectionStatus_IsMissingSCCProvider", "Collection is missing its revision control provider - please check your revision control settings");
 
 		case ECollectionItemStatus::HasLocalChanges:
 			return NSLOCTEXT("ContentBrowser", "CollectionStatus_HasLocalChanges", "Collection has local unsaved or uncomitted changes");

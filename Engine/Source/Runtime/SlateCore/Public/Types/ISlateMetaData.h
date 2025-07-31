@@ -18,7 +18,7 @@ public:
 	}
 
 	/** Virtual destructor. */
-	virtual ~ISlateMetaData() { }
+	virtual ~ISlateMetaData() {}
 
 protected:
 	/**
@@ -54,8 +54,7 @@ public:
 
 		FTagMetaData(FName InTag)
 		: Tag(InTag)
-	{
-	}
+	{}
 
 	/** Tag name for a widget */
 	FName Tag;

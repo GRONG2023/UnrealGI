@@ -1,28 +1,32 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "K2Node_CommutativeAssociativeBinaryOperator.h"
-#include "Framework/Commands/UIAction.h"
-#include "ToolMenus.h"
+
+#include "Containers/Array.h"
+#include "Containers/EnumAsByte.h"
+#include "Delegates/Delegate.h"
+#include "EdGraph/EdGraph.h"
+#include "EdGraph/EdGraphNode.h"
 #include "EdGraphSchema_K2.h"
+#include "Framework/Commands/UIAction.h"
+#include "HAL/PlatformMath.h"
+#include "Internationalization/Internationalization.h"
+#include "Internationalization/Text.h"
 #include "Kismet2/BlueprintEditorUtils.h"
-
-#include "ScopedTransaction.h"
-
+#include "Kismet2/CompilerResultsLog.h"
 #include "KismetCompiler.h"
+#include "Misc/AssertionMacros.h"
+#include "ScopedTransaction.h"
+#include "Textures/SlateIcon.h"
+#include "ToolMenu.h"
+#include "ToolMenuSection.h"
+#include "UObject/Class.h"
+#include "UObject/NameTypes.h"
+#include "UObject/Script.h"
+#include "UObject/WeakObjectPtr.h"
+#include "UObject/WeakObjectPtrTemplates.h"
 
 #define LOCTEXT_NAMESPACE "CommutativeAssociativeBinaryOperatorNode"
-
-int32 UK2Node_CommutativeAssociativeBinaryOperator::GetMaxInputPinsNum()
-{
-	return (TCHAR('Z') - TCHAR('A'));
-}
-
-FName UK2Node_CommutativeAssociativeBinaryOperator::GetNameForPin(int32 PinIndex)
-{
-	check(PinIndex < GetMaxInputPinsNum());
-	const FName Name(*FString::Chr(TCHAR('A') + PinIndex));
-	return Name;
-}
 
 UK2Node_CommutativeAssociativeBinaryOperator::UK2Node_CommutativeAssociativeBinaryOperator(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -168,7 +172,7 @@ void UK2Node_CommutativeAssociativeBinaryOperator::AddInputPinInner(int32 Additi
 		InputType.PinCategory, 
 		InputType.PinSubCategory, 
 		InputType.PinSubCategoryObject.Get(), 
-		GetNameForPin(AdditionalPinIndex + BinaryOperatorInputsNum),
+		GetNameForAdditionalPin(AdditionalPinIndex + BinaryOperatorInputsNum),
 		PinParams
 	);
 }
@@ -206,7 +210,7 @@ void UK2Node_CommutativeAssociativeBinaryOperator::RemoveInputPin(UEdGraphPin* P
 				UEdGraphPin* LocalPin = Pins[PinIndex];
 				if(LocalPin && (LocalPin != OutPin) && (LocalPin != SelfPin))
 				{
-					const FName PinName = GetNameForPin(NameIndex);
+					const FName PinName = GetNameForAdditionalPin(NameIndex);
 					if (PinName != LocalPin->PinName)
 					{
 						LocalPin->Modify();

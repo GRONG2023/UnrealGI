@@ -107,11 +107,14 @@ public:
 	}
 #endif
 
-	// FSelfRegisteringExec interface
-	virtual bool Exec(class UWorld* InWorld, const TCHAR* Cmd, FOutputDevice& Ar) override;
+	/** Reset only the linker exports associated with this package. */
+	void ResetLinkerExports(UPackage* InPackage);
 
 	/** Empty the loaders */
 	void ResetLoaders(UObject* InPkg);
+
+	/** Empty the loaders */
+	void ResetLoaders(TConstArrayView<FLinkerLoad*> InLinkerLoad);
 
 	/** Empty the loaders from the specified set */
 	void ResetLoaders(const TSet<FLinkerLoad*>& InLinkerLoadSet);
@@ -131,6 +134,10 @@ public:
 	/** Adds a linker to deferred cleanup list */
 	void RemoveLinker(FLinkerLoad* Linker);
 
+protected:
+	// FSelfRegisteringExec interface
+	virtual bool Exec_Dev(class UWorld* InWorld,const TCHAR* Cmd,FOutputDevice& Ar) override;
+
 private:
 
 	/** Map of packages to their open linkers **/
@@ -147,7 +154,7 @@ private:
 #if !UE_BUILD_SHIPPING && !UE_BUILD_TEST
 	/** List of all the existing linker loaders **/
 	FCriticalSection LiveLinkersCritical;
-	TArray<FLinkerLoad*> LiveLinkers;
+	TSet<FLinkerLoad*> LiveLinkers;
 #endif
 	
 	/** List of loaders that have new imports **/

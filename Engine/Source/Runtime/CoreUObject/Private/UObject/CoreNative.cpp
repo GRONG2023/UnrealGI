@@ -4,10 +4,12 @@
 #include "Misc/CoreDelegates.h"
 #include "Modules/ModuleManager.h"
 #include "UObject/Class.h"
+#include "UObject/Package.h"
 #include "UObject/UnrealType.h"
 #include "Misc/PackageName.h"
 #include "Misc/RuntimeErrors.h"
 #include "UObject/Stack.h"
+#include "UObject/OverridableManager.h"
 
 void UClassRegisterAllCompiledInClasses();
 bool IsInAsyncLoadingThreadCoreUObjectInternal();
@@ -16,6 +18,7 @@ void SuspendAsyncLoadingInternal();
 void ResumeAsyncLoadingInternal();
 bool IsAsyncLoadingSuspendedInternal();
 bool IsAsyncLoadingMultithreadedCoreUObjectInternal();
+ELoaderType GetLoaderTypeInternal();
 
 // CoreUObject module. Handles UObject system pre-init (registers init function with Core callbacks).
 class FCoreUObjectModule : public FDefaultModuleImpl
@@ -45,6 +48,7 @@ public:
 		ResumeAsyncLoading = &ResumeAsyncLoadingInternal;
 		IsAsyncLoadingSuspended = &IsAsyncLoadingSuspendedInternal;
 		IsAsyncLoadingMultithreaded = &IsAsyncLoadingMultithreadedCoreUObjectInternal;
+		GetLoaderType = &GetLoaderTypeInternal;
 
 		// Register the script callstack callback to the runtime error logging
 #if UE_RAISE_RUNTIME_ERRORS
@@ -52,7 +56,7 @@ public:
 #endif
 
 		// Make sure that additional content mount points can be registered after CoreUObject loads
-		FPackageName::EnsureContentPathsAreRegistered();
+		FPackageName::OnCoreUObjectInitialized();
 
 #if DO_BLUEPRINT_GUARD
 		FFrame::InitPrintScriptCallstack();
@@ -63,21 +67,20 @@ IMPLEMENT_MODULE( FCoreUObjectModule, CoreUObject );
 
 // if we are not using compiled in natives, we still need this as a base class for intrinsics
 #if !USE_COMPILED_IN_NATIVES
-IMPLEMENT_CLASS(UObject, 0);
-COREUOBJECT_API class UClass* Z_Construct_UClass_UObject();
+COREUOBJECT_API UClass* Z_Construct_UClass_UObject();
+extern FClassRegistrationInfo Z_Registration_Info_UClass_UObject;
 UClass* Z_Construct_UClass_UObject()
 {
-	static UClass* OuterClass = nullptr;
-	if (!OuterClass)
+	if (!Z_Registration_Info_UClass_UObject.OuterSingleton)
 	{
-		OuterClass = UObject::StaticClass();
-		UObjectForceRegistration(OuterClass);
-		UObjectBase::EmitBaseReferences(OuterClass);
-		OuterClass->StaticLink();
+		Z_Registration_Info_UClass_UObject.OuterSingleton = UObject::StaticClass();
+		UObjectForceRegistration(Z_Registration_Info_UClass_UObject.OuterSingleton);
+		Z_Registration_Info_UClass_UObject.OuterSingleton->StaticLink();
 	}
-	check(OuterClass->GetClass());
-	return OuterClass;
+	check(Z_Registration_Info_UClass_UObject.OuterSingleton->GetClass());
+	return Z_Registration_Info_UClass_UObject.OuterSingleton;
 }
+IMPLEMENT_CLASS(UObject, 0);
 #endif
 
 /*-----------------------------------------------------------------------------
@@ -85,19 +88,24 @@ UClass* Z_Construct_UClass_UObject()
 -----------------------------------------------------------------------------*/
 
 FObjectInstancingGraph::FObjectInstancingGraph(bool bDisableInstancing)
+	: FObjectInstancingGraph(bDisableInstancing ? EObjectInstancingGraphOptions::DisableInstancing : EObjectInstancingGraphOptions::None)	
+{
+}
+
+FObjectInstancingGraph::FObjectInstancingGraph(EObjectInstancingGraphOptions InOptions)
 	: SourceRoot(nullptr)
 	, DestinationRoot(nullptr)
+	, InstancingOptions(InOptions)
 	, bCreatingArchetype(false)
-	, bEnableSubobjectInstancing(!bDisableInstancing)
 	, bLoadingObject(false)
 {
 }
 
-FObjectInstancingGraph::FObjectInstancingGraph( UObject* DestinationSubobjectRoot )
+FObjectInstancingGraph::FObjectInstancingGraph( UObject* DestinationSubobjectRoot, EObjectInstancingGraphOptions InOptions)
 	: SourceRoot(nullptr)
 	, DestinationRoot(nullptr)
+	, InstancingOptions(InOptions)
 	, bCreatingArchetype(false)
-	, bEnableSubobjectInstancing(true)
 	, bLoadingObject(false)
 {
 	SetDestinationRoot(DestinationSubobjectRoot);
@@ -115,6 +123,14 @@ void FObjectInstancingGraph::SetDestinationRoot(UObject* DestinationSubobjectRoo
 	SourceToDestinationMap.Add(SourceRoot, DestinationRoot);
 
 	bCreatingArchetype = DestinationSubobjectRoot->HasAnyFlags(RF_ArchetypeObject);
+	if (DestinationSubobjectRoot->GetPackage()->HasAnyPackageFlags(PKG_Cooked))
+	{
+		//We are never updating archetypes when loading cooked packages,
+		//and we can't safely run the reconstruct logic with UObject destruction from the async loading thread.
+		//Make sure to never reconstruct found existing destination subobjects in cooked packages,
+		//they should always have been created from the correct up-to-date template already.
+		bCreatingArchetype = false;
+	}
 }
 
 UObject* FObjectInstancingGraph::GetDestinationObject(UObject* SourceObject)
@@ -123,9 +139,14 @@ UObject* FObjectInstancingGraph::GetDestinationObject(UObject* SourceObject)
 	return SourceToDestinationMap.FindRef(SourceObject);
 }
 
-UObject* FObjectInstancingGraph::GetInstancedSubobject( UObject* SourceSubobject, UObject* CurrentValue, UObject* CurrentObject, bool bDoNotCreateNewInstance, bool bAllowSelfReference )
+UObject* FObjectInstancingGraph::GetInstancedSubobject( UObject* SourceSubobject, UObject* CurrentValue, UObject* CurrentObject, EInstancePropertyValueFlags Flags )
 {
 	checkSlow(SourceSubobject);
+
+	const bool bAreOverridesEnabled = SourceSubobject && FOverridableManager::Get().IsEnabled(*SourceSubobject);
+	const bool bDoNotCreateNewInstance = !!(Flags & EInstancePropertyValueFlags::DoNotCreateNewInstance);
+	const bool bAllowSelfReference     = !!(Flags & EInstancePropertyValueFlags::AllowSelfReference) || bAreOverridesEnabled;
+
 
 	UObject* InstancedSubobject = INVALID_OBJECT;
 
@@ -137,17 +158,23 @@ UObject* FObjectInstancingGraph::GetInstancedSubobject( UObject* SourceSubobject
 		if ( !bShouldInstance && CurrentValue->GetOuter() == CurrentObject->GetArchetype() )
 		{
 			// this code is intended to catch cases where SourceRoot contains subobjects assigned to instanced object properties, where the subobject's class
-			// contains components, and the class of the subobject is outside of the inheritance hierarchy of the SourceRoot, for example, a weapon
+			// contains subobjects, and the class of the subobject is outside of the inheritance hierarchy of the SourceRoot, for example, a weapon
 			// class which contains UIObject subobject definitions in its defaultproperties, where the property referencing the UIObjects is marked instanced.
 			bShouldInstance = true;
 
-			// if this case is triggered, ensure that the CurrentValue of the component property is still pointing to the template component.
+			// if this case is triggered, ensure that the CurrentValue of the subobject property is still pointing to the template subobject.
 			check(SourceSubobject == CurrentValue);
 		}
 
 		if ( bShouldInstance )
 		{
-			// search for the unique component instance that corresponds to this component template
+			// If the CurrentValue is within the SourceRoot, lets use it to instantiate as it must have come from the merge result of the serialization
+			if (bAreOverridesEnabled && SourceSubobject != CurrentValue && CurrentValue->IsIn(SourceRoot))
+			{
+				SourceSubobject = CurrentValue;
+			}
+
+			// search for the unique subobject instance that corresponds to this subobject template
 			InstancedSubobject = GetDestinationObject(SourceSubobject);
 			if ( InstancedSubobject == nullptr )
 			{
@@ -157,12 +184,12 @@ UObject* FObjectInstancingGraph::GetInstancedSubobject( UObject* SourceSubobject
 				}
 				else
 				{
-					// if the Outer for the component currently assigned to this property is the same as the object that we're instancing components for,
-					// the component does not need to be instanced; otherwise, there are two possiblities:
+					// if the Outer for the subobject currently assigned to this property is the same as the object that we're instancing subobjects for,
+					// the subobject does not need to be instanced; otherwise, there are two possiblities:
 					// 1. CurrentValue is a template and needs to be instanced
-					// 2. CurrentValue is an instanced component, in which case it should already be in InstanceGraph, UNLESS the component was created
+					// 2. CurrentValue is an instanced subobject, in which case it should already be in InstanceGraph, UNLESS the subobject was created
 					//		at runtime (editinline export properties, for example).  If that is the case, CurrentValue will be an instance that is not linked
-					//		to the component template referenced by CurrentObject's archetype, and in this case, we also don't want to re-instance the component template
+					//		to the subobject template referenced by CurrentObject's archetype, and in this case, we also don't want to re-instance the subobject template
 
 					const bool bIsRuntimeInstance = CurrentValue != SourceSubobject && CurrentValue->GetOuter() == CurrentObject;
 					if (bIsRuntimeInstance )
@@ -171,7 +198,7 @@ UObject* FObjectInstancingGraph::GetInstancedSubobject( UObject* SourceSubobject
 					}
 					else
 					{
-						// If the component template is relevant in this context(client vs server vs editor), instance it.
+						// If the subobject template is relevant in this context(client vs server vs editor), instance it.
 						const bool bShouldLoadForClient = SourceSubobject->NeedsLoadForClient();
 						const bool bShouldLoadForServer = SourceSubobject->NeedsLoadForServer();
 						const bool bShouldLoadForEditor = ( GIsEditor && ( bShouldLoadForClient || !CurrentObject->RootPackageHasAnyFlags(PKG_PlayInEditor) ) );
@@ -180,8 +207,8 @@ UObject* FObjectInstancingGraph::GetInstancedSubobject( UObject* SourceSubobject
 						{
 							// this is the first time the instance corresponding to SourceSubobject has been requested
 
-							// get the object instance corresponding to the source component's Outer - this is the object that
-							// will be used as the Outer for the destination component
+							// get the object instance corresponding to the source subobject's Outer - this is the object that
+							// will be used as the Outer for the destination subobject
 							UObject* SubobjectOuter = GetDestinationObject(SourceSubobject->GetOuter());
 
 							// In the event we're templated off a deep nested UObject hierarchy, with several links to objects nested in the object
@@ -189,26 +216,22 @@ UObject* FObjectInstancingGraph::GetInstancedSubobject( UObject* SourceSubobject
 							// outer.  In that case - we need to go ahead and instance that outer.
 							if ( SubobjectOuter == nullptr )
 							{
-								SubobjectOuter = GetInstancedSubobject(SourceSubobject->GetOuter(), SourceSubobject->GetOuter(), CurrentObject, bDoNotCreateNewInstance, bAllowSelfReference);
+								SubobjectOuter = GetInstancedSubobject(SourceSubobject->GetOuter(), SourceSubobject->GetOuter(), CurrentObject, Flags);
 
-								checkf(SubobjectOuter && SubobjectOuter != INVALID_OBJECT, TEXT("No corresponding destination object found for '%s' while attempting to instance component '%s'"), *SourceSubobject->GetOuter()->GetFullName(), *SourceSubobject->GetFullName());
+								checkf(SubobjectOuter && SubobjectOuter != INVALID_OBJECT, TEXT("No corresponding destination object found for '%s' while attempting to instance subobject '%s'"), *SourceSubobject->GetOuter()->GetFullName(), *SourceSubobject->GetFullName());
 							}
 
 							FName SubobjectName = SourceSubobject->GetFName();
 
-							// final archetype archetype will be the archetype of the template
-							UObject* FinalSubobjectArchetype = CurrentValue->GetArchetype();
-
 							// Don't search for the existing subobjects on Blueprint-generated classes. What we'll find is a subobject
 							// created by the constructor which may not have all of its fields initialized to the correct value (which
 							// should be coming from a blueprint).
-							// NOTE: Since this function is called ONLY for Blueprint-generated classes, we may as well delete this 'if'.
 							if (!SubobjectOuter->GetClass()->HasAnyClassFlags(CLASS_CompiledFromBlueprint))
 							{
 								InstancedSubobject = StaticFindObjectFast(nullptr, SubobjectOuter, SubobjectName);
 							}
 
-							if (InstancedSubobject && IsCreatingArchetype())
+							if (InstancedSubobject && IsCreatingArchetype() && !InstancedSubobject->HasAnyFlags(RF_LoadCompleted))
 							{
 								// since we are updating an archetype, this needs to reconstruct as that is the mechanism used to copy properties
 								// it will destroy the existing object and overwrite it
@@ -217,7 +240,7 @@ UObject* FObjectInstancingGraph::GetInstancedSubobject( UObject* SourceSubobject
 
 							if (!InstancedSubobject)
 							{
-								// finally, create the component instance
+								// finally, create the subobject instance
 								FStaticConstructObjectParameters Params(SourceSubobject->GetClass());
 								Params.Outer = SubobjectOuter;
 								Params.Name = SubobjectName;
@@ -233,7 +256,7 @@ UObject* FObjectInstancingGraph::GetInstancedSubobject( UObject* SourceSubobject
 			}
 			else if ( IsLoadingObject() && InstancedSubobject->GetClass()->HasAnyClassFlags(CLASS_HasInstancedReference) )
 			{
-				/* When loading an object from disk, in some cases we have a component which has a reference to another component in DestinationObject which
+				/* When loading an object from disk, in some cases we have a subobject which has a reference to another subobject in DestinationObject which
 					wasn't serialized and hasn't yet been instanced.  For example, the PointLight class declared two component templates:
 
 						Begin DrawLightRadiusComponent0
@@ -262,11 +285,13 @@ UObject* FObjectInstancingGraph::GetInstancedSubobject( UObject* SourceSubobject
 }
 
 
-UObject* FObjectInstancingGraph::InstancePropertyValue( class UObject* ComponentTemplate, class UObject* CurrentValue, class UObject* Owner, bool bIsTransient, bool bCausesInstancing, bool bAllowSelfReference )
+UObject* FObjectInstancingGraph::InstancePropertyValue(UObject* SubObjectTemplate, UObject* CurrentValue, UObject* Owner, EInstancePropertyValueFlags Flags)
 {
-	UObject* NewValue = CurrentValue;
+	bool bCausesInstancing   = !!(Flags & EInstancePropertyValueFlags::CausesInstancing);
+	bool bAllowSelfReference = !!(Flags & EInstancePropertyValueFlags::AllowSelfReference);
 
-	check(CurrentValue);
+	checkf(CurrentValue, TEXT("Null object value encountered while trying to instance subobject of %s. Instanced object properties are never expected to be null (template: %s)."), 
+		*GetFullNameSafe(Owner), *GetNameSafe(SubObjectTemplate));
 
 	if (CurrentValue->GetClass()->HasAnyClassFlags(CLASS_DefaultToInstanced))
 	{
@@ -277,25 +302,33 @@ UObject* FObjectInstancingGraph::InstancePropertyValue( class UObject* Component
 		(!bCausesInstancing && // or if this class isn't forced to be instanced and this var did not have the instance keyword
 		!bAllowSelfReference)) // and this isn't a delegate
 	{
-		return NewValue; // not instancing
+		return CurrentValue; // not instancing
 	}
 
-	// if the object we're instancing the components for (Owner) has the current component's outer in its archetype chain, and its archetype has a nullptr value
-	// for this component property it means that the archetype didn't instance its component, so we shouldn't either.
+	if (!!(InstancingOptions & EObjectInstancingGraphOptions::InstanceTemplatesOnly) && // if we're allowed to instance templates only
+		!CurrentValue->IsTemplate()) // and the current value is not a template
+	{
+		return CurrentValue; // not instancing
+	}
 
-	if (ComponentTemplate == nullptr && CurrentValue != nullptr && (Owner && Owner->IsBasedOnArchetype(CurrentValue->GetOuter())))
+	UObject* NewValue = CurrentValue;
+
+	// if the object we're instancing the subobjects for (Owner) has the current subobject's outer in its archetype chain, and its archetype has a nullptr value
+	// for this subobject property it means that the archetype didn't instance its subobject, so we shouldn't either.
+
+	if (SubObjectTemplate == nullptr && (Owner != nullptr && Owner->IsBasedOnArchetype(CurrentValue->GetOuter())))
 	{
 		NewValue = nullptr;
 	}
 	else
 	{
-		if ( ComponentTemplate == nullptr )
+		if (SubObjectTemplate == nullptr )
 		{
-			// should only be here if our archetype doesn't contain this component property
-			ComponentTemplate = CurrentValue;
+			// should only be here if our archetype doesn't contain this subobject property
+			SubObjectTemplate = CurrentValue;
 		}
 
-		UObject* MaybeNewValue = GetInstancedSubobject(ComponentTemplate, CurrentValue, Owner, bAllowSelfReference, bAllowSelfReference);
+		UObject* MaybeNewValue = GetInstancedSubobject(SubObjectTemplate, CurrentValue, Owner, Flags);
 		if ( MaybeNewValue != INVALID_OBJECT )
 		{
 			NewValue = MaybeNewValue;
@@ -304,7 +337,7 @@ UObject* FObjectInstancingGraph::InstancePropertyValue( class UObject* Component
 	return NewValue;
 }
 
-void FObjectInstancingGraph::AddNewObject(class UObject* ObjectInstance, UObject* InArchetype /*= nullptr*/)
+void FObjectInstancingGraph::AddNewObject(UObject* ObjectInstance, UObject* InArchetype /*= nullptr*/)
 {
 	check(!GEventDrivenLoaderEnabled || !InArchetype || !InArchetype->HasAnyFlags(RF_NeedLoad));
 

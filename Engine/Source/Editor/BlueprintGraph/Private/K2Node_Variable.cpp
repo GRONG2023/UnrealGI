@@ -2,19 +2,48 @@
 
 
 #include "K2Node_Variable.h"
+
 #include "BlueprintCompilationManager.h"
-#include "UObject/UObjectHash.h"
+#include "Components/ActorComponent.h"
 #include "Components/PrimitiveComponent.h"
-#include "GameFramework/MovementComponent.h"
-#include "Engine/BlueprintGeneratedClass.h"
+#include "Containers/Set.h"
+#include "EdGraph/EdGraph.h"
+#include "EdGraph/EdGraphPin.h"
+#include "EdGraph/EdGraphSchema.h"
 #include "EdGraphSchema_K2.h"
+#include "Editor/UnrealEdEngine.h"
+#include "Engine/Blueprint.h"
+#include "Engine/BlueprintGeneratedClass.h"
+#include "Engine/SimpleConstructionScript.h"
+#include "GameFramework/Actor.h"
+#include "GameFramework/MovementComponent.h"
+#include "HAL/PlatformCrt.h"
+#include "Internationalization/Internationalization.h"
+#include "K2Node_FunctionEntry.h"
 #include "Kismet2/BlueprintEditorUtils.h"
-#include "KismetCompilerMisc.h"
 #include "Kismet2/CompilerResultsLog.h"
 #include "Kismet2/StructureEditorUtils.h"
-#include "Styling/SlateIconFinder.h"
+#include "KismetCompilerMisc.h"
 #include "Logging/MessageLog.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/Guid.h"
+#include "Preferences/UnrealEdOptions.h"
+#include "Serialization/Archive.h"
 #include "SourceCodeNavigation.h"
+#include "Styling/AppStyle.h"
+#include "Styling/SlateIconFinder.h"
+#include "Templates/Casts.h"
+#include "Templates/UnrealTemplate.h"
+#include "UObject/Class.h"
+#include "UObject/Object.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/ObjectVersion.h"
+#include "UObject/UnrealType.h"
+#include "UObject/WeakObjectPtr.h"
+#include "UObject/WeakObjectPtrTemplates.h"
+#include "UnrealEdGlobals.h"
+#include "Settings/BlueprintEditorProjectSettings.h"
+#include "ToolMenu.h"
 
 #define LOCTEXT_NAMESPACE "K2Node"
 
@@ -30,13 +59,13 @@ void UK2Node_Variable::Serialize(FArchive& Ar)
 	// Fix old content 
 	if(Ar.IsLoading())
 	{
-		if(Ar.UE4Ver() < VER_UE4_VARK2NODE_USE_MEMBERREFSTRUCT)
+		if(Ar.UEVer() < VER_UE4_VARK2NODE_USE_MEMBERREFSTRUCT)
 		{
 			// Copy info into new struct
 			VariableReference.SetDirect(VariableName_DEPRECATED, FGuid(), VariableSourceClass_DEPRECATED, bSelfContext_DEPRECATED);
 		}
 
-		if(Ar.UE4Ver() < VER_UE4_K2NODE_VAR_REFERENCEGUIDS)
+		if(Ar.UEVer() < VER_UE4_K2NODE_VAR_REFERENCEGUIDS)
 		{
 			FGuid VarGuid;
 			
@@ -76,7 +105,7 @@ bool UK2Node_Variable::CreatePinForVariable(EEdGraphPinDirection Direction, FNam
 			// class (the blueprint has not be compiled with it yet), so let's 
 			// check the skeleton class as well, see if we can pull pin data 
 			// from there...
-			UBlueprint* VariableBlueprint = CastChecked<UBlueprint>(BpClassOwner->ClassGeneratedBy, ECastCheckedType::NullAllowed);
+			UBlueprint* VariableBlueprint = CastChecked<UBlueprint>(BpClassOwner->ClassGeneratedBy.Get(), ECastCheckedType::NullAllowed);
 			if (VariableBlueprint)
 			{
 				if (FProperty* SkelProperty = GetPropertyForVariableFromSkeleton())
@@ -145,6 +174,16 @@ void UK2Node_Variable::CreatePinForSelf()
 					if (OwnerClass)
 					{
 						TargetClass = OwnerClass->GetAuthoritativeClass();
+					}
+					else if(TargetClass)
+					{
+						// check if it's a sparse member, sparse members are accessed via the authoritative
+						// class - this matches the convention defined in BlueprintActionDatabaseImpl::AddClassDataObjectActions:
+						UClass* AuthClass = TargetClass->GetAuthoritativeClass();
+						if (AuthClass->GetSparseClassDataStruct()->IsChildOf(Property->GetOwnerStruct()) )
+						{
+							TargetClass = AuthClass;
+						}
 					}
 				}
 				else if (GetBlueprint()->SkeletonGeneratedClass)
@@ -224,25 +263,28 @@ FLinearColor UK2Node_Variable::GetNodeTitleColor() const
 	return FLinearColor::White;
 }
 
-FString UK2Node_Variable::GetFindReferenceSearchString() const
+FString UK2Node_Variable::GetFindReferenceSearchString_Impl(EGetFindReferenceSearchStringFlags InFlags) const
 {
-	FString ResultSearchString;
-	if (VariableReference.IsLocalScope())
+	// Legacy behavior for variable nodes was to do an exact search
+	if (EnumHasAnyFlags(InFlags, EGetFindReferenceSearchStringFlags::UseSearchSyntax) || EnumHasAnyFlags(InFlags, EGetFindReferenceSearchStringFlags::Legacy))
 	{
-		ResultSearchString = VariableReference.GetReferenceSearchString(nullptr);
-	}
-	else
-	{
-		FProperty* VariableProperty = VariableReference.ResolveMember<FProperty>(GetBlueprintClassFromNode());
-		if (VariableProperty)
+		if (VariableReference.IsLocalScope())
 		{
-			ResultSearchString = VariableReference.GetReferenceSearchString(VariableProperty->GetOwnerClass());
+			// Generate local variable search query
+			return VariableReference.GetReferenceSearchString(nullptr);
+		}
+		else if (FProperty* VariableProperty = VariableReference.ResolveMember<FProperty>(GetBlueprintClassFromNode()))
+		{
+			// Generate member variable search query
+			return VariableReference.GetReferenceSearchString(VariableProperty->GetOwnerClass());
 		}
 	}
-	return ResultSearchString;
+
+	// Simple query: just search for variable name
+	return FString::Printf(TEXT("\"%s\""), *VariableReference.GetMemberName().ToString());
 }
 
-UK2Node::ERedirectType UK2Node_Variable::DoPinsMatchForReconstruction( const UEdGraphPin* NewPin, int32 NewPinIndex, const UEdGraphPin* OldPin, int32 OldPinIndex ) const 
+UK2Node::ERedirectType UK2Node_Variable::DoPinsMatchForReconstruction(const UEdGraphPin* NewPin, int32 NewPinIndex, const UEdGraphPin* OldPin, int32 OldPinIndex) const 
 {
 	const UEdGraphSchema_K2* K2Schema = GetDefault<UEdGraphSchema_K2>();
 	if( OldPin->PinType.PinCategory == UEdGraphSchema_K2::PC_Exec )
@@ -251,8 +293,25 @@ UK2Node::ERedirectType UK2Node_Variable::DoPinsMatchForReconstruction( const UEd
 	}
 
 	const bool bPinNamesMatch = (OldPin->PinName == NewPin->PinName);
-	const bool bCanMatchSelfs = bPinNamesMatch || ((OldPin->PinName == UEdGraphSchema_K2::PN_Self) == (NewPin->PinName == UEdGraphSchema_K2::PN_Self));
+	const bool bCanMatchSelfs = bPinNamesMatch || ((OldPin->PinName == UEdGraphSchema_K2::PN_Self) && (NewPin->PinName == UEdGraphSchema_K2::PN_Self));
 	const bool bTheSameDirection = (NewPin->Direction == OldPin->Direction);
+
+	const bool bNewPinIsObject = (NewPin->PinType.PinCategory == UEdGraphSchema_K2::PC_Object);
+	const bool bNewPinIsInterface = (NewPin->PinType.PinCategory == UEdGraphSchema_K2::PC_Interface);
+	const bool bNewIsClass = (NewPin->PinType.PinCategory == UEdGraphSchema_K2::PC_Class);
+	const bool bNewPinIsObjectType = 
+		bNewPinIsObject ||
+		bNewPinIsInterface ||
+		bNewIsClass
+	;
+	
+	const FEdGraphPinType& InputType = (OldPin->Direction == EGPD_Output) ? OldPin->PinType : NewPin->PinType;
+	const FEdGraphPinType& OutputType = (OldPin->Direction == EGPD_Output) ? NewPin->PinType : OldPin->PinType;
+	
+	const bool bHasIncompatibleObjectType =
+		bNewPinIsObjectType &&
+		!K2Schema->ArePinTypesCompatible(OutputType, InputType)
+	;
 
 	if (bCanMatchSelfs && bTheSameDirection)
 	{
@@ -267,62 +326,54 @@ UK2Node::ERedirectType UK2Node_Variable::DoPinsMatchForReconstruction( const UEd
 		// variable has been altered to be a sub-class ref (meaning we should 
 		// treat the NewPin as an output)... the opposite applies if the pins 
 		// are inputs
-		const FEdGraphPinType& InputType  = (OldPin->Direction == EGPD_Output) ? OldPin->PinType : NewPin->PinType;
-		const FEdGraphPinType& OutputType = (OldPin->Direction == EGPD_Output) ? NewPin->PinType : OldPin->PinType;
 
-		if (K2Schema->ArePinTypesCompatible(OutputType, InputType))
+		if (NewPin->ParentPin)
 		{
-			// If these are split pins, we need to do some name checking logic
-			if (NewPin->ParentPin)
+			// If the OldPin is not split, then these don't match
+			if (OldPin->ParentPin == nullptr)
 			{
-				// If the OldPin is not split, then these don't match
-				if (OldPin->ParentPin == nullptr)
+				return ERedirectType_None;
+			}
+
+			// Go through and find the original variable pin.
+			// If the number of steps out to the original variable pin is not the same then these don't match
+			const UEdGraphPin* ParentmostNewPin = NewPin;
+			const UEdGraphPin* ParentmostOldPin = OldPin;
+
+			while (ParentmostNewPin->ParentPin)
+			{
+				if (ParentmostOldPin->ParentPin == nullptr)
 				{
 					return ERedirectType_None;
 				}
+				ParentmostNewPin = ParentmostNewPin->ParentPin;
+				ParentmostOldPin = ParentmostOldPin->ParentPin;
+			}
 
-				// Go through and find the original variable pin.
-				// If the number of steps out to the original variable pin is not the same then these don't match
-				const UEdGraphPin* ParentmostNewPin = NewPin;
-				const UEdGraphPin* ParentmostOldPin = OldPin;
+			if (ParentmostOldPin->ParentPin)
+			{
+				return ERedirectType_None;
+			}
 
-				while (ParentmostNewPin->ParentPin)
-				{
-					if (ParentmostOldPin->ParentPin == nullptr)
-					{
-						return ERedirectType_None;
-					}
-					ParentmostNewPin = ParentmostNewPin->ParentPin;
-					ParentmostOldPin = ParentmostOldPin->ParentPin;
-				}
+			// Compare whether the names, ignoring the original variable's name in the case of renames, match
+			FName NewPinPropertyName = FName(*NewPin->PinName.ToString().RightChop(ParentmostNewPin->PinName.ToString().Len() + 1));
+			FName OldPinPropertyName = FName(*OldPin->PinName.ToString().RightChop(ParentmostOldPin->PinName.ToString().Len() + 1));
 
-				if (ParentmostOldPin->ParentPin)
-				{
-					return ERedirectType_None;
-				}
-
-				// Compare whether the names, ignoring the original variable's name in the case of renames, match
-				FName NewPinPropertyName = FName(*NewPin->PinName.ToString().RightChop(ParentmostNewPin->PinName.ToString().Len() + 1));
-				FName OldPinPropertyName = FName(*OldPin->PinName.ToString().RightChop(ParentmostOldPin->PinName.ToString().Len() + 1));
-
-				if (!DoesRenamedVariableMatch(OldPinPropertyName, NewPinPropertyName, Cast<UStruct>(NewPin->ParentPin->PinType.PinSubCategoryObject.Get())))
-				{
-					return ERedirectType_None;
-				}
+			if (!DoesRenamedVariableMatch(OldPinPropertyName, NewPinPropertyName, Cast<UStruct>(NewPin->ParentPin->PinType.PinSubCategoryObject.Get())))
+			{
+				return ERedirectType_None;
 			}
 
 			return ERedirectType_Name;
 		}
-		else
+		else if (bHasIncompatibleObjectType)
 		{
-			const bool bNewPinIsObject = (NewPin->PinType.PinCategory == UEdGraphSchema_K2::PC_Object);
-
 			// Special Case: If we had a pin match, and the class isn't loaded 
 			//               yet because of a cyclic dependency, temporarily 
 			//               cast away the const, and fix up.
 			if ( bPinNamesMatch &&
-				(bNewPinIsObject || (NewPin->PinType.PinCategory == UEdGraphSchema_K2::PC_Interface)) &&
-				(NewPin->PinType.PinSubCategoryObject == NULL) )
+				(bNewPinIsObject || bNewPinIsInterface) &&
+				(NewPin->PinType.PinSubCategoryObject == nullptr) )
 			{
 				// @TODO:  Fix this up to be less hacky
 				UBlueprintGeneratedClass* TypeClass = Cast<UBlueprintGeneratedClass>(OldPin->PinType.PinSubCategoryObject.Get());
@@ -363,7 +414,6 @@ UK2Node::ERedirectType UK2Node_Variable::DoPinsMatchForReconstruction( const UEd
 			{
 				const UClass* PSCOClass = Cast<UClass>(OldPin->PinType.PinSubCategoryObject.Get());
 				const bool bOldIsBlueprint = PSCOClass && PSCOClass->IsChildOf(UBlueprint::StaticClass());
-				const bool bNewIsClass     = (NewPin->PinType.PinCategory == UEdGraphSchema_K2::PC_Class);
 				// Special Case: If we're migrating from old blueprint references 
 				//               to class references, allow pins to be reconnected if coerced
 				if (bNewIsClass && bOldIsBlueprint)
@@ -373,6 +423,14 @@ UK2Node::ERedirectType UK2Node_Variable::DoPinsMatchForReconstruction( const UEd
 					return ERedirectType_Name;
 				}
 			}
+		}
+		else
+		{
+			// By default, we allow the redirect if direction and name match.
+			// The type may not match, but we defer that check to ValidateLinkedPinTypes,
+			// which attempts to address the incompatibility by inserting a conversion node.
+			// This behavior is consistent with how UK2Node operates.
+			return ERedirectType_Name;
 		}
 	}
 
@@ -389,19 +447,7 @@ FProperty* UK2Node_Variable::GetPropertyForVariable_Internal(UClass* OwningClass
 {
 	const FName VarName = GetVarName();
 
-	// Look in the sparse class data first
-	FProperty* VariableProperty = nullptr;
-	// TODO: move some of this into MemberReference::ResolveMember if possible
-	UClass* Scope = VariableReference.GetScope(OwningClass);
-	UScriptStruct* SparseClassDataStruct = Scope ? Scope->GetSparseClassDataStruct() : nullptr;
-	if (SparseClassDataStruct)
-	{
-		VariableProperty = FindFProperty<FProperty>(SparseClassDataStruct, VarName);
-	}
-	if (!VariableProperty)
-	{
-		VariableProperty = VariableReference.ResolveMember<FProperty>(OwningClass);
-	}
+	FProperty* VariableProperty = VariableReference.ResolveMember<FProperty>(OwningClass);
 
 	// if the variable has been deprecated, don't use it
 	if (VariableProperty != nullptr)
@@ -518,10 +564,10 @@ void UK2Node_Variable::ValidateNodeDuringCompilation(class FCompilerResultsLog& 
 			UBlueprint* Blueprint = GetBlueprint();
 			if (Blueprint != nullptr)
 			{
-				OwnerName = Blueprint->GetName();
+				OwnerName = Blueprint->GetPathName();
 				if (UClass* VarOwnerClass = VariableReference.GetMemberParentClass(Blueprint->GeneratedClass))
 				{
-					OwnerName = VarOwnerClass->GetName();
+					OwnerName = VarOwnerClass->GetPathName();
 				}
 			}
 
@@ -561,16 +607,16 @@ FSlateIcon UK2Node_Variable::GetVarIconFromPinType(const FEdGraphPinType& InPinT
 
 	if (InPinType.IsArray())
 	{
-		return FSlateIcon("EditorStyle", "Kismet.AllClasses.ArrayVariableIcon");
+		return FSlateIcon(FAppStyle::GetAppStyleSetName(), "Kismet.AllClasses.ArrayVariableIcon");
 	}
 	else if (InPinType.IsSet())
 	{
-		return FSlateIcon("EditorStyle", "Kismet.AllClasses.SetVariableIcon");
+		return FSlateIcon(FAppStyle::GetAppStyleSetName(), "Kismet.AllClasses.SetVariableIcon");
 	}
 	else if (InPinType.IsMap())
 	{
 		// TODO: Need to properly deal with Key/Value stuff
-		return FSlateIcon("EditorStyle", "Kismet.AllClasses.MapVariableKeyIcon");
+		return FSlateIcon(FAppStyle::GetAppStyleSetName(), "Kismet.AllClasses.MapVariableKeyIcon");
 	}
 	else if (InPinType.PinSubCategoryObject.IsValid())
 	{
@@ -580,7 +626,7 @@ FSlateIcon UK2Node_Variable::GetVarIconFromPinType(const FEdGraphPinType& InPinT
 		}
 	}
 
-	return FSlateIcon("EditorStyle", "Kismet.AllClasses.VariableIcon");
+	return FSlateIcon(FAppStyle::GetAppStyleSetName(), "Kismet.AllClasses.VariableIcon");
 }
 
 FText UK2Node_Variable::GetToolTipHeading() const
@@ -591,15 +637,18 @@ FText UK2Node_Variable::GetToolTipHeading() const
 	FText IconTag;
 	if ( FProperty const* VariableProperty = VariableReference.ResolveMember<FProperty>(GetBlueprintClassFromNode()) )
 	{
-		if (VariableProperty->HasAllPropertyFlags(CPF_Net | CPF_EditorOnly))
+		const UActorComponent* Component = GetActorComponent(VariableProperty);
+		const bool IsEditorOnly = VariableProperty->HasAnyPropertyFlags(CPF_EditorOnly) || (Component && Component->bIsEditorOnly);
+		const bool IsReplicated = VariableProperty->HasAnyPropertyFlags(CPF_Net) || (Component && Component->GetIsReplicated());
+		if (IsEditorOnly && IsReplicated)
 		{
 			IconTag = LOCTEXT("ReplicatedEditorOnlyVar", "Editor-Only | Replicated");
 		}
-		else if (VariableProperty->HasAnyPropertyFlags(CPF_Net))
+		else if (IsReplicated)
 		{
 			IconTag = LOCTEXT("ReplicatedVar", "Replicated");
 		}
-		else if (VariableProperty->HasAnyPropertyFlags(CPF_EditorOnly))
+		else if (IsEditorOnly)
 		{
 			IconTag = LOCTEXT("EditorOnlyVar", "Editor-Only");
 		}
@@ -649,6 +698,21 @@ void UK2Node_Variable::HandleVariableRenamed(UBlueprint* InBlueprint, UClass* In
 	}
 }
 
+void UK2Node_Variable::ReplaceReferences(UBlueprint* InBlueprint, UBlueprint* InReplacementBlueprint, const FMemberReference& InSource, const FMemberReference& InReplacement)
+{
+	if (VariableReference.IsLocalScope() || VariableReference.IsSelfContext())
+	{
+		VariableReference = InReplacement;
+	}
+	else
+	{
+		// Make a copy because ResolveMember is non-const
+		FMemberReference Replacement = InReplacement;
+		const FProperty* ResolvedProperty = Replacement.ResolveMember<FProperty>(InBlueprint);
+		VariableReference.SetFromField<FProperty>(ResolvedProperty, InReplacementBlueprint->GeneratedClass);
+	}
+}
+
 bool UK2Node_Variable::ReferencesVariable(const FName& InVarName, const UStruct* InScope) const
 {
 	if (InVarName == GetVarName())
@@ -682,7 +746,7 @@ FSlateIcon UK2Node_Variable::GetVariableIconAndColor(const UStruct* VarScope, FN
 		}
 	}
 
-	return FSlateIcon("EditorStyle", "Kismet.AllClasses.VariableIcon");
+	return FSlateIcon(FAppStyle::GetAppStyleSetName(), "Kismet.AllClasses.VariableIcon");
 }
 
 
@@ -809,16 +873,16 @@ bool UK2Node_Variable::RemapRestrictedLinkReference(FName OldVariableName, FName
 	return bRemapped;
 }
 
-
 FName UK2Node_Variable::GetCornerIcon() const
 {
 	if (const FProperty* VariableProperty = VariableReference.ResolveMember<FProperty>(GetBlueprintClassFromNode()))
 	{
-		if (VariableProperty->HasAllPropertyFlags(CPF_Net))
+		const UActorComponent* Component = GetActorComponent(VariableProperty);
+		if (VariableProperty->HasAllPropertyFlags(CPF_Net) || (Component && Component->GetIsReplicated()))
 		{
 			return TEXT("Graph.Replication.Replicated");
 		}
-		else if (VariableProperty->HasAllPropertyFlags(CPF_EditorOnly))
+		else if (VariableProperty->HasAllPropertyFlags(CPF_EditorOnly) || (Component && Component->bIsEditorOnly))
 		{
 			return TEXT("Graph.Editor.EditorOnlyIcon");
 		}
@@ -829,12 +893,13 @@ FName UK2Node_Variable::GetCornerIcon() const
 
 bool UK2Node_Variable::HasExternalDependencies(TArray<class UStruct*>* OptionalOutput) const
 {
-	UClass* SourceClass = GetVariableSourceClass();
 	UBlueprint* SourceBlueprint = GetBlueprint();
-	bool bResult = (SourceClass && (SourceClass->ClassGeneratedBy != SourceBlueprint));
+	FProperty* VariableProperty = GetPropertyForVariable();
+	UClass* PropertySourceClass = VariableProperty ? VariableProperty->GetOwnerClass() : nullptr;
+	bool bResult = (PropertySourceClass && (PropertySourceClass->ClassGeneratedBy != SourceBlueprint));
 	if (bResult && OptionalOutput)
 	{
-		OptionalOutput->AddUnique(SourceClass);
+		OptionalOutput->AddUnique(PropertySourceClass);
 	}
 
 	// Also include underlying non-native variable types as external dependencies. Otherwise, contextual
@@ -970,7 +1035,7 @@ bool UK2Node_Variable::CanPasteHere(const UEdGraph* TargetGraph) const
 		{
 			const UClass* CurrentClass = GetBlueprint()->SkeletonGeneratedClass->GetAuthoritativeClass();
 			const UClass* PropertyClass = Property->GetOwnerClass()->GetAuthoritativeClass();
-			const bool bIsChildOf = CurrentClass->IsChildOf(PropertyClass);
+			const bool bIsChildOf = CurrentClass && CurrentClass->IsChildOf(PropertyClass);
 			return bIsChildOf;
 		}
 		return false;
@@ -993,8 +1058,10 @@ void UK2Node_Variable::PostPasteNode()
 	{
 		// Local scoped variables should always validate whether they are being placed in the same graph as their scope
 		// ResolveMember will not return nullptr when the graph changes but the Blueprint remains the same.
-		UEdGraph* ScopeGraph = FBlueprintEditorUtils::FindScopeGraph(Blueprint, VariableReference.GetMemberScope(GetBlueprintClassFromNode()));
-		if(ScopeGraph != GetGraph())
+		const UStruct* MemberScope = VariableReference.GetMemberScope(GetBlueprintClassFromNode());
+		UEdGraph* ScopeGraph = FBlueprintEditorUtils::FindScopeGraph(Blueprint, MemberScope);
+		const bool bMemberScopeInvalid = (ScopeGraph && MemberScope && ScopeGraph->GetFName() != MemberScope->GetFName());
+		if(ScopeGraph != GetGraph() || bMemberScopeInvalid)
 		{
 			bInvalidateVariable = true;
 		}
@@ -1010,7 +1077,8 @@ void UK2Node_Variable::PostPasteNode()
 		{
 			UEdGraph* FunctionGraph = FBlueprintEditorUtils::GetTopLevelGraph(GetGraph());
 			FBPVariableDescription* VariableDescription = FBlueprintEditorUtils::FindLocalVariable(Blueprint, FunctionGraph, VariableReference.GetMemberName());
-			if(VariableDescription)
+			bool bFoundParam = FunctionParameterExists(FunctionGraph, VariableReference.GetMemberName());
+			if(VariableDescription || bFoundParam)
 			{
 				VariableReference.SetLocalMember(VariableReference.GetMemberName(), FunctionGraph->GetName(), VariableReference.GetMemberGuid());
 			}
@@ -1021,22 +1089,48 @@ void UK2Node_Variable::PostPasteNode()
 
 bool UK2Node_Variable::HasDeprecatedReference() const
 {
+	bool bDeprecated = false;
+	FProperty* VariableProperty = nullptr; // Declare up here so we can reuse if we would have resolved twice
+
 	// Check if the referenced variable is deprecated.
 	if (VariableReference.IsDeprecated())
 	{
-		return true;
+		bDeprecated = true;
 	}
-	else if (FProperty* VariableProperty = VariableReference.ResolveMember<FProperty>(GetBlueprintClassFromNode()))
+	else
 	{
-		// Backcompat: Allow variables tagged only with 'DeprecationMessage' meta to be seen as deprecated if inherited from a native parent class.
-		const bool bHasDeprecationMessage = VariableProperty->HasMetaData(FBlueprintMetadata::MD_DeprecationMessage);
-		if (bHasDeprecationMessage && VariableProperty->GetOwnerUObject()->IsNative())
+		VariableProperty = VariableReference.ResolveMember<FProperty>(GetBlueprintClassFromNode());
+		if (VariableProperty)
 		{
-			return true;
+			// Backcompat: Allow variables tagged only with 'DeprecationMessage' meta to be seen as deprecated if inherited from a native parent class.
+			const bool bHasDeprecationMessage = VariableProperty->HasMetaData(FBlueprintMetadata::MD_DeprecationMessage);
+			if (bHasDeprecationMessage && VariableProperty->GetOwnerUObject()->IsNative())
+			{
+				bDeprecated = true;
+			}
 		}
 	}
 
-	return false;
+	if (bDeprecated)
+	{
+		const UBlueprintEditorProjectSettings* BlueprintEditorProjectSettings = GetDefault<UBlueprintEditorProjectSettings>();
+		if (!VariableProperty)
+		{
+			VariableProperty = VariableReference.ResolveMember<FProperty>(GetBlueprintClassFromNode());
+		}
+
+
+		if (VariableProperty)
+		{
+			const FString PathName = VariableProperty->GetPathName();
+			if (BlueprintEditorProjectSettings->SuppressedDeprecationMessages.Contains(PathName))
+			{
+				bDeprecated = false;
+			}
+		}
+	}
+
+	return bDeprecated;
 }
 
 FEdGraphNodeDeprecationResponse UK2Node_Variable::GetDeprecationResponse(EEdGraphNodeDeprecationType DeprecationType) const
@@ -1079,11 +1173,14 @@ bool UK2Node_Variable::CanJumpToDefinition() const
 {
 	const FProperty* VariableProperty = GetPropertyForVariable();
 	const bool bNativeVariable = (VariableProperty != nullptr) && (VariableProperty->IsNative());
-	return bNativeVariable || (GetJumpTargetForDoubleClick() != nullptr);
+	const bool bCanJumpToNativeVariable = bNativeVariable && ensure(GUnrealEd) && GUnrealEd->GetUnrealEdOptions()->IsCPPAllowed();
+	return bCanJumpToNativeVariable || (GetJumpTargetForDoubleClick() != nullptr);
 }
 
 void UK2Node_Variable::JumpToDefinition() const
 {
+	if (ensure(GUnrealEd) && GUnrealEd->GetUnrealEdOptions()->IsCPPAllowed())
+	{
 	// For native variables, try going to the variable definition in C++ if available
 	if (FProperty* VariableProperty = GetPropertyForVariable())
 	{
@@ -1093,9 +1190,87 @@ void UK2Node_Variable::JumpToDefinition() const
 			return;
 		}
 	}
+	}
 
 	// Otherwise, fall back to the inherited behavior
 	Super::JumpToDefinition();
+}
+
+void UK2Node_Variable::GetNodeContextMenuActions(class UToolMenu* Menu, class UGraphNodeContextMenuContext* Context) const
+{
+	Super::GetNodeContextMenuActions(Menu, Context);
+
+	if (HasDeprecatedReference())
+	{
+		FText MenuEntryTitle = LOCTEXT("SuppressVariableDeprecationWarningTitle", "Suppress Deprecation Warning");
+		FText MenuEntryTooltip = LOCTEXT("SuppressVariableDeprecationWarningTooltip", "Adds this variable to the suppressed deprecation warnings list in the Bluperint Editor Project Settings for this project.");
+
+		FToolMenuSection& Section = Menu->AddSection("K2NodeVariable", LOCTEXT("VariableHeader", "Variable"));
+		Section.AddMenuEntry(
+			"SuppressDeprecationWarning",
+			MenuEntryTitle,
+			MenuEntryTooltip,
+			FSlateIcon(),
+			FUIAction(
+				FExecuteAction::CreateUObject(this, &UK2Node_Variable::SuppressDeprecationWarning),
+				FCanExecuteAction::CreateUObject(this, &UK2Node_Variable::HasDeprecatedReference),
+				FIsActionChecked()
+			)
+		);
+	}
+}
+
+bool UK2Node_Variable::FunctionParameterExists(const UEdGraph* InFunctionGraph, const FName InParameterName)
+{
+	TArray<UK2Node_FunctionEntry*> Entry;
+	InFunctionGraph->GetNodesOfClass<UK2Node_FunctionEntry>(Entry);
+
+	if (ensureMsgf(Entry.Num() == 1, TEXT("Couldn't find a Function Entry node in graph %s"), *InFunctionGraph->GetName()))
+	{
+		check(Entry[0]);
+
+		return Entry[0]->UserDefinedPinExists(InParameterName);
+	}
+
+	return false;
+}
+
+const UActorComponent* UK2Node_Variable::GetActorComponent(const FProperty* VariableProperty) const
+{
+	if (!VariableProperty)
+	{
+		return nullptr;
+	}
+
+	UBlueprint* OwnerBlueprint = GetBlueprint();
+	if(OwnerBlueprint && OwnerBlueprint->SimpleConstructionScript)
+	{
+		if (const AActor* EditorActorInstance = OwnerBlueprint->SimpleConstructionScript->GetComponentEditorActorInstance())
+		{
+			for (const UActorComponent* Component : EditorActorInstance->GetComponents())
+			{
+				if (!Component || Component->GetFName() != VariableProperty->GetFName())
+				{
+					continue;
+				}
+				return Component;
+			}
+		}
+	}
+	
+	return nullptr;
+}
+
+void UK2Node_Variable::SuppressDeprecationWarning() const
+{
+	if (const FProperty* Property = VariableReference.ResolveMember<FProperty>(GetBlueprintClassFromNode()))
+	{
+		FString PathName = Property->GetPathName();
+		UBlueprintEditorProjectSettings* BlueprintEditorProjectSettings = GetMutableDefault<UBlueprintEditorProjectSettings>();
+		BlueprintEditorProjectSettings->SuppressedDeprecationMessages.Add(MoveTemp(PathName));
+		BlueprintEditorProjectSettings->SaveConfig();
+		BlueprintEditorProjectSettings->TryUpdateDefaultConfigFile("", false);
+	}
 }
 
 #undef LOCTEXT_NAMESPACE

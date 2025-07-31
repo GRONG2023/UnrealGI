@@ -98,6 +98,7 @@ void UAnimGraphNode_ApplyAdditive::PostEditChangeProperty(struct FPropertyChange
 				if (Node.AlphaInputType != EAnimAlphaInputType::Float)
 				{
 					Pin->BreakAllPinLinks();
+					RemoveBindings(Pin->PinName);
 				}
 			}
 			else if (Pin->PinName == GET_MEMBER_NAME_STRING_CHECKED(FAnimNode_ApplyAdditive, bAlphaBoolEnabled))
@@ -105,6 +106,7 @@ void UAnimGraphNode_ApplyAdditive::PostEditChangeProperty(struct FPropertyChange
 				if (Node.AlphaInputType != EAnimAlphaInputType::Bool)
 				{
 					Pin->BreakAllPinLinks();
+					RemoveBindings(Pin->PinName);
 				}
 			}
 			else if (Pin->PinName == GET_MEMBER_NAME_STRING_CHECKED(FAnimNode_ApplyAdditive, AlphaCurveName))
@@ -112,6 +114,7 @@ void UAnimGraphNode_ApplyAdditive::PostEditChangeProperty(struct FPropertyChange
 				if (Node.AlphaInputType != EAnimAlphaInputType::Curve)
 				{
 					Pin->BreakAllPinLinks();
+					RemoveBindings(Pin->PinName);
 				}
 			}
 		}
@@ -156,7 +159,7 @@ void UAnimGraphNode_ApplyAdditive::CustomizeDetails(IDetailLayoutBuilder& Detail
 
 FString UAnimGraphNode_ApplyAdditive::GetNodeCategory() const
 {
-	return TEXT("Blends");
+	return TEXT("Animation|Blends");
 	//@TODO: TEXT("Apply additive to normal pose"), TEXT("Apply additive pose"));
 }
 

@@ -7,7 +7,7 @@
 
 /** A pose for a skeletal mesh */
 USTRUCT(BlueprintType)
-struct ENGINE_API FPoseSnapshot
+struct FPoseSnapshot
 {
 	GENERATED_BODY()
 
@@ -15,6 +15,15 @@ public:
 	FPoseSnapshot()
 		: bIsValid(false)
 	{}
+
+	void Reset()
+	{
+		LocalTransforms.Reset();
+		BoneNames.Reset();
+		SkeletalMeshName = NAME_None;
+		SnapshotName = NAME_None;
+		bIsValid = false;
+	}
 
 	/** Array of transforms per-bone */
 	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category="Snapshot")

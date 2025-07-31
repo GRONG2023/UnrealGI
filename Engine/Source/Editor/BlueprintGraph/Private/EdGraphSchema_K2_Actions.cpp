@@ -1,26 +1,33 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "EdGraphSchema_K2_Actions.h"
-#include "Components/ActorComponent.h"
-#include "Layout/SlateRect.h"
-#include "Engine/BlueprintGeneratedClass.h"
-#include "EdGraphSchema_K2.h"
-#include "K2Node.h"
-#include "K2Node_Event.h"
-#include "K2Node_AddComponent.h"
-#include "K2Node_BaseMCDelegate.h"
-#include "K2Node_AddDelegate.h"
-#include "K2Node_CustomEvent.h"
-#include "K2Node_Literal.h"
-#include "K2Node_Timeline.h"
-#include "Kismet2/BlueprintEditorUtils.h"
-#include "EdGraphNode_Comment.h"
 
-#include "ScopedTransaction.h"
-#include "Classes/EditorStyleSettings.h"
 #include "ComponentAssetBroker.h"
-#include "Kismet2/KismetEditorUtilities.h"
+#include "Components/ActorComponent.h"
+#include "Containers/EnumAsByte.h"
+#include "EdGraph/EdGraphNode.h"
+#include "EdGraphNode_Comment.h"
+#include "EdGraphSchema_K2.h"
 #include "EdGraphUtilities.h"
+#include "Engine/Blueprint.h"
+#include "Engine/BlueprintGeneratedClass.h"
+#include "Engine/MemberReference.h"
+#include "GameFramework/Actor.h"
+#include "K2Node.h"
+#include "K2Node_AddComponent.h"
+#include "K2Node_AddDelegate.h"
+#include "K2Node_BaseMCDelegate.h"
+#include "K2Node_CustomEvent.h"
+#include "K2Node_Event.h"
+#include "K2Node_Literal.h"
+#include "Kismet2/BlueprintEditorUtils.h"
+#include "Kismet2/KismetEditorUtilities.h"
+#include "Layout/SlateRect.h"
+#include "Math/UnrealMathSSE.h"
+#include "ScopedTransaction.h"
+#include "Settings/EditorStyleSettings.h"
+#include "UObject/Field.h"
+#include "UObject/ObjectHandle.h"
 
 
 namespace 
@@ -40,7 +47,7 @@ namespace
 
 void FEdGraphSchemaAction_BlueprintVariableBase::MovePersistentItemToCategory(const FText& NewCategoryName)
 {
-	FBlueprintEditorUtils::SetBlueprintVariableCategory(GetSourceBlueprint(), VarName, GetVariableScope(), NewCategoryName);
+	FBlueprintEditorUtils::SetBlueprintVariableCategory(GetSourceBlueprint(), VarName, Cast<UStruct>(GetVariableScope()), NewCategoryName);
 }
 
 int32 FEdGraphSchemaAction_BlueprintVariableBase::GetReorderIndexInContainer() const
@@ -64,10 +71,10 @@ bool FEdGraphSchemaAction_BlueprintVariableBase::ReorderToBeforeAction(TSharedRe
 		FName TargetVarName = VarAction->GetVariableName();
 		if ((BP != nullptr) && (VarName != TargetVarName) && (VariableSource == VarAction->GetVariableScope()))
 		{
-			if (FBlueprintEditorUtils::MoveVariableBeforeVariable(BP, VarAction->GetVariableScope(), VarName, TargetVarName, true))
+			if (FBlueprintEditorUtils::MoveVariableBeforeVariable(BP, Cast<UStruct>(VarAction->GetVariableScope()), VarName, TargetVarName, true))
 			{
 				// Change category of var to match the one we dragged on to as well
-				FText TargetVarCategory = FBlueprintEditorUtils::GetBlueprintVariableCategory(BP, TargetVarName, GetVariableScope());
+				FText TargetVarCategory = FBlueprintEditorUtils::GetBlueprintVariableCategory(BP, TargetVarName, Cast<UStruct>(GetVariableScope()));
 				MovePersistentItemToCategory(TargetVarCategory);
 
 				// Update Blueprint after changes so they reflect in My Blueprint tab.
@@ -110,7 +117,7 @@ UBlueprint* FEdGraphSchemaAction_BlueprintVariableBase::GetSourceBlueprint() con
 
 int32 FEdGraphSchemaAction_K2LocalVar::GetReorderIndexInContainer() const
 {
-	return FBlueprintEditorUtils::FindLocalVariableIndex(GetSourceBlueprint(), GetVariableScope(), GetVariableName());
+	return FBlueprintEditorUtils::FindLocalVariableIndex(GetSourceBlueprint(), Cast<UStruct>(GetVariableScope()), GetVariableName());
 }
 
 /////////////////////////////////////////////////////
@@ -236,7 +243,7 @@ UEdGraphNode* FEdGraphSchemaAction_K2NewNode::CreateNode(
 	const bool bSelectNewNode = (Options & EK2NewNodeFlags::SelectNewNode) != EK2NewNodeFlags::None;
 	const bool bGotoNode = (Options & EK2NewNodeFlags::GotoNewNode) != EK2NewNodeFlags::None;
 
-	const FScopedTransaction Transaction(NSLOCTEXT("UnrealEd", "K2_AddNode", "Add Node"));
+	const FScopedTransaction Transaction(NSLOCTEXT("UnrealEd", "K2_AddNode", "Add Node"), !IsInAsyncLoadingThread());
 	ParentGraph->Modify();
 	for(UEdGraphPin* FromPin : FromPins)
 	{
@@ -265,11 +272,11 @@ UEdGraphNode* FEdGraphSchemaAction_K2NewNode::CreateNode(
 
 	// For input pins, new node will generally overlap node being dragged off
 	// Work out if we want to visually push away from connected node
-	int32 XLocation = Location.X;
+	int32 XLocation = static_cast<int32>(Location.X);
 	if (FromPinPtr.IsValid() && FromPinPtr->Direction == EGPD_Input)
 	{
 		UEdGraphNode* PinNode = FromPinPtr->GetOwningNode();
-		const float XDelta = FMath::Abs(PinNode->NodePosX - Location.X);
+		const double XDelta = FMath::Abs(PinNode->NodePosX - Location.X);
 
 		if (XDelta < NodeDistance)
 		{
@@ -279,7 +286,7 @@ UEdGraphNode* FEdGraphSchemaAction_K2NewNode::CreateNode(
 		}
 	}
 	ResultNode->NodePosX = XLocation;
-	ResultNode->NodePosY = Location.Y;
+	ResultNode->NodePosY = static_cast<int32>(Location.Y);
 	ResultNode->SnapToGrid(GetDefault<UEditorStyleSettings>()->GridSnapSize);
 
 	// make sure to auto-wire after we position the new node (in case the 
@@ -609,21 +616,21 @@ UEdGraphNode* FEdGraphSchemaAction_K2AddCustomEvent::PerformAction(class UEdGrap
 UEdGraphNode* FEdGraphSchemaAction_K2AddCallOnActor::PerformAction(class UEdGraph* ParentGraph, UEdGraphPin* FromPin, const FVector2D Location, bool bSelectNewNode/* = true*/)
 {
 	// Snap the node placement location to the grid, ensures calculations later match up better
-	const float GridSnapSize = (float)GetDefault<UEditorStyleSettings>()->GridSnapSize;
+	const uint32 GridSnapSize = GetDefault<UEditorStyleSettings>()->GridSnapSize;
 	FVector2D LocalLocation;
-	LocalLocation.X = FMath::GridSnap( Location.X, GridSnapSize);
-	LocalLocation.Y = FMath::GridSnap( Location.Y, GridSnapSize);
+	LocalLocation.X = FMath::GridSnap(Location.X, GridSnapSize);
+	LocalLocation.Y = FMath::GridSnap(Location.Y, GridSnapSize);
 
 	// First use the base functionality to spawn the 'call function' node
-	UEdGraphNode* CallNode = FEdGraphSchemaAction_K2NewNode::PerformAction(ParentGraph, FromPin, LocalLocation);
+	UEdGraphNode* CallNode = FEdGraphSchemaAction_K2NewNode::PerformAction(ParentGraph, FromPin, FVector2D(LocalLocation));
 	const float FunctionNodeHeightUnsnapped = UEdGraphSchema_K2::EstimateNodeHeight( CallNode );
 
 	// this is the guesstimate of the function node's height, snapped to grid units
 	const float FunctionNodeHeight = FMath::GridSnap( FunctionNodeHeightUnsnapped, GridSnapSize );
 	// this is roughly the middle of the function node height
-	const float FunctionNodeMidY = LocalLocation.Y + FunctionNodeHeight * 0.5f;
+	const float FunctionNodeMidY = static_cast<float>(LocalLocation.Y + FunctionNodeHeight * 0.5f);
 	// this is the offset up from the mid point at which we start placing nodes 
-	const float StartYOffset = (float((LevelActors.Num() > 0) ? LevelActors.Num()-1 : 0) * -NodeLiteralHeight) * 0.5f;
+	const float StartYOffset = (static_cast<float>((LevelActors.Num() > 0) ? LevelActors.Num() - 1 : 0) * -NodeLiteralHeight) * 0.5f;
 	// The Y location we start placing nodes from
 	const float ReferencedNodesPlacementYLocation = FunctionNodeMidY + StartYOffset;
 
@@ -640,11 +647,11 @@ UEdGraphNode* FEdGraphSchemaAction_K2AddCallOnActor::PerformAction(class UEdGrap
 
 			LiteralNode->SetObjectRef(LevelActor);
 			LiteralNode->AllocateDefaultPins();
-			LiteralNode->NodePosX = LocalLocation.X - FunctionNodeLiteralReferencesXOffset;
+			LiteralNode->NodePosX = static_cast<int32>(LocalLocation.X - FunctionNodeLiteralReferencesXOffset);
 
 			// this is the current offset down from the Y start location to place the next node at
-			float CurrentNodeOffset = NodeLiteralHeight * float(ActorIndex);
-			LiteralNode->NodePosY = ReferencedNodesPlacementYLocation + CurrentNodeOffset;
+			float CurrentNodeOffset = NodeLiteralHeight * static_cast<float>(ActorIndex);
+			LiteralNode->NodePosY = static_cast<int32>(ReferencedNodesPlacementYLocation + CurrentNodeOffset);
 
 			LiteralNode->SnapToGrid(GridSnapSize);
 

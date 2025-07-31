@@ -8,6 +8,9 @@
 #include "UObject/Object.h"
 #include "UObject/ScriptMacros.h"
 #include "Particles/ParticlePerfStats.h"
+#include "Async/TaskGraphInterfaces.h"
+#include "RHIDefinitions.h"
+#include "PSOPrecache.h"
 
 #include "ParticleSystem.generated.h"
 
@@ -23,7 +26,7 @@ class UParticleEmitter;
  *	Enumeration indicating the method by which the system should be updated
  */
 UENUM()
-enum EParticleSystemUpdateMode
+enum EParticleSystemUpdateMode : int
 {
 	/** RealTime	- update via the delta time passed in				*/
 	EPSUM_RealTime UMETA(DisplayName="Real-Time"),
@@ -35,7 +38,7 @@ enum EParticleSystemUpdateMode
  *	ParticleSystemLODMethod
  */
 UENUM()
-enum ParticleSystemLODMethod
+enum ParticleSystemLODMethod : int
 {
 	// Automatically set the LOD level, checking every LODDistanceCheckTime seconds.
 	PARTICLESYSTEMLODMETHOD_Automatic UMETA(DisplayName="Automatic"),
@@ -49,7 +52,7 @@ enum ParticleSystemLODMethod
 
 /** Occlusion method enumeration */
 UENUM()
-enum EParticleSystemOcclusionBoundsMethod
+enum EParticleSystemOcclusionBoundsMethod : int
 {
 	/** Don't determine occlusion on this particle system */
 	EPSOBM_None UMETA(DisplayName="None"),
@@ -105,8 +108,10 @@ struct FNamedEmitterMaterial
 	FName Name;
 
 	UPROPERTY(EditAnywhere, Category = NamedMaterial)
-	UMaterialInterface* Material;
+	TObjectPtr<UMaterialInterface> Material;
 };
+
+using FMaterialPSOPrecacheRequestID = uint32;
 
 UCLASS(Abstract, MinimalAPI, BlueprintType)
 class UFXSystemAsset : public UObject
@@ -115,8 +120,10 @@ class UFXSystemAsset : public UObject
 public:
 	UFXSystemAsset() {}
 
+	ENGINE_API virtual void PostInitProperties() override;
+
 	/** Max number of components of this system to keep resident in the world component pool. */
-	UPROPERTY(EditAnywhere, Category = Performance)
+	UPROPERTY(EditAnywhere, Category = Performance, AdvancedDisplay)
 	uint32 MaxPoolSize;
 	//TODO: Allow pool size overriding per world and possibly implement some preallocation too.
 
@@ -125,12 +132,38 @@ public:
 	* This can amortize runtime activation cost by moving it to load time.
 	* Use with care as this could cause large hitches for systems loaded/unloaded during play rather than at level load.
 	*/
-	UPROPERTY(EditAnywhere, Category = Performance)
+	UPROPERTY(EditAnywhere, Category = Performance, AdvancedDisplay)
 	uint32 PoolPrimeSize = 0;
 
 #if WITH_PER_SYSTEM_PARTICLE_PERF_STATS
 	mutable FParticlePerfStats* ParticlePerfStats = nullptr;
+
+	//Cached CSV Stat names for this system.
+#if WITH_PARTICLE_PERF_CSV_STATS
+	FName CSVStat_Count = NAME_None;
+	FName CSVStat_Total = NAME_None;
+	FName CSVStat_GTOnly = NAME_None;
+	FName CSVStat_InstAvgGT = NAME_None;
+	FName CSVStat_RT = NAME_None;
+	FName CSVStat_InstAvgRT = NAME_None;
+	FName CSVStat_GPU = NAME_None;
+	FName CSVStat_InstAvgGPU = NAME_None;
+	FName CSVStat_Activation = NAME_None;
+	FName CSVStat_Waits = NAME_None;
+	FName CSVStat_Culled = NAME_None;
+	FName CSVStat_MemoryKB = NAME_None;
 #endif
+#endif
+
+	const FGraphEventRef& GetPrecachePSOsEvent() const { return PrecachePSOsEvent; }
+	const TArray<FMaterialPSOPrecacheRequestID>& GetMaterialPSOPrecacheRequestIDs() const { return MaterialPSOPrecacheRequestIDs; }
+
+protected:
+	
+	ENGINE_API void LaunchPSOPrecaching(const FMaterialInterfacePSOPrecacheParamsList& VFsPerMaterials);
+
+	FGraphEventRef PrecachePSOsEvent;
+	TArray<FMaterialPSOPrecacheRequestID> MaterialPSOPrecacheRequestIDs;
 };
 
 /**
@@ -173,11 +206,11 @@ class UParticleSystem : public UFXSystemAsset
 
 	/** Emitters	- internal - the array of emitters in the system				*/
 	UPROPERTY(instanced)
-	TArray<UParticleEmitter*> Emitters;
+	TArray<TObjectPtr<UParticleEmitter>> Emitters;
 
 	/** The component used to preview the particle system in Cascade				*/
 	UPROPERTY(transient)
-	UParticleSystemComponent* PreviewComponent;
+	TObjectPtr<UParticleSystemComponent> PreviewComponent;
 
 #if WITH_EDITORONLY_DATA
 	/** The angle to use when rendering the thumbnail image							*/
@@ -195,7 +228,7 @@ class UParticleSystem : public UFXSystemAsset
 #endif // WITH_EDITORONLY_DATA
 	/** Used for curve editor to remember curve-editing setup.						*/
 	UPROPERTY(export)
-	UInterpCurveEdSetup* CurveEdSetup;
+	TObjectPtr<UInterpCurveEdSetup> CurveEdSetup;
 
 	//
 	//	LOD
@@ -315,7 +348,7 @@ public:
 #if WITH_EDITORONLY_DATA
 	/** Internal: The PSys thumbnail image									*/
 	UPROPERTY()
-	class UTexture2D* ThumbnailImage;
+	TObjectPtr<class UTexture2D> ThumbnailImage;
 
 #endif // WITH_EDITORONLY_DATA
 
@@ -404,15 +437,23 @@ public:
 #if WITH_EDITOR
 	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
 #endif // WITH_EDITOR
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS // Suppress compiler warning on override of deprecated function
+	UE_DEPRECATED(5.0, "Use version that takes FObjectPreSaveContext instead.")
 	virtual void PreSave(const class ITargetPlatform* TargetPlatform) override;
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS
+	virtual void PreSave(FObjectPreSaveContext ObjectSaveContext) override;
 	virtual void PostLoad() override;
 	virtual bool IsPostLoadThreadSafe() const override;
+	virtual void GetAssetRegistryTags(FAssetRegistryTagsContext Context) const override;
+	UE_DEPRECATED(5.4, "Implement the version that takes FAssetRegistryTagsContext instead.")
 	virtual void GetAssetRegistryTags(TArray<FAssetRegistryTag>& OutTags) const override;
 	bool UsesCPUCollision() const;
 	virtual bool CanBeClusterRoot() const override;
 	virtual void Serialize(FArchive& Ar) override;
 
 	//~ End UObject Interface.
+
+	void PrecachePSOs();
 
 	bool CanBePooled()const;
 

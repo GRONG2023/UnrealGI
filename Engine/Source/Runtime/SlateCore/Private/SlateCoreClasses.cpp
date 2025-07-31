@@ -51,6 +51,7 @@ static FAutoConsoleVariableRef CVarSlateNewUpdateMethod(
 );
 
 bool GSlateIsOnFastUpdatePath = false;
+bool GSlateIsOnFastProcessInvalidation = false;
 bool GSlateIsInInvalidationSlowPath = false;
 
 #if SLATE_CHECK_UOBJECT_RENDER_RESOURCES
@@ -62,6 +63,15 @@ static FAutoConsoleVariableRef CVarSlateCheckUObjectRenderResources(
 );
 
 bool GSlateCheckUObjectRenderResourcesShouldLogFatal = false;
+#endif
+
+#if SLATE_CHECK_UOBJECT_SHAPED_GLYPH_SEQUENCE
+bool GSlateCheckUObjectShapedGlyphSequence = true;
+static FAutoConsoleVariableRef CVarSlateCheckUObjectShapedGlyphSequence(
+	TEXT("Slate.CheckUObjectShapedGlyphSequence"),
+	GSlateCheckUObjectShapedGlyphSequence,
+	TEXT("")
+);
 #endif
 
 #if WITH_SLATE_DEBUGGING

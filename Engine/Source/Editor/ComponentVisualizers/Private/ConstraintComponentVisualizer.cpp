@@ -2,8 +2,20 @@
 
 #include "ConstraintComponentVisualizer.h"
 
-#include "SceneManagement.h"
+#include "Chaos/ChaosEngineInterface.h"
+#include "Components/ActorComponent.h"
+#include "Engine/EngineTypes.h"
+#include "HAL/PlatformCrt.h"
+#include "Math/Box.h"
+#include "Math/Color.h"
+#include "Math/Quat.h"
+#include "Math/Rotator.h"
+#include "Math/Transform.h"
+#include "Math/Vector.h"
+#include "PhysicsEngine/ConstraintInstance.h"
 #include "PhysicsEngine/PhysicsConstraintComponent.h"
+#include "SceneManagement.h"
+#include "Templates/Casts.h"
 
 static const FColor	JointFrame1Color(255,0,0);
 static const FColor JointFrame2Color(0,0,255);
@@ -30,7 +42,7 @@ void FConstraintComponentVisualizer::DrawVisualization( const UActorComponent* C
 
 			const float LastKnownScale = Instance.GetLastKnownScale();
 
-			if(ConstraintComp->GetBodyInstance(EConstraintFrame::Frame1))
+			if(ConstraintComp->GetPhysicsObject(EConstraintFrame::Frame1))
 			{
 				Con1Frame.ScaleTranslation(LastKnownScale);
 			}
@@ -38,7 +50,7 @@ void FConstraintComponentVisualizer::DrawVisualization( const UActorComponent* C
 
 			Con2Frame.SetScale3D(Con2Frame.GetScale3D() * LastKnownScale);
 
-			if (ConstraintComp->GetBodyInstance(EConstraintFrame::Frame2))
+			if (ConstraintComp->GetPhysicsObject(EConstraintFrame::Frame2))
 			{
 				Con2Frame.ScaleTranslation(LastKnownScale);
 			}
@@ -60,7 +72,7 @@ void FConstraintComponentVisualizer::DrawVisualization( const UActorComponent* C
 		FBox Body2Box = ConstraintComp->GetBodyBox(EConstraintFrame::Frame2);
 
 		// Draw constraint information
-		Instance.DrawConstraint(PDI, 1.f, 1.f, true, true, Con1Frame, Con2Frame, false);
+		Instance.DrawConstraint(PDI, 1.f, 1.f, true, true, Con1Frame, Con2Frame, false, false);
 
 		// Draw boxes to indicate bodies connected by joint.
 		if(Body1Box.IsValid)

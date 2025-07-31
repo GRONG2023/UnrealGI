@@ -1,11 +1,25 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "SModifierItemRow.h"
-#include "Widgets/Images/SImage.h"
+
 #include "Animation/Skeleton.h"
+#include "AnimationModifier.h"
+#include "Containers/UnrealString.h"
+#include "Delegates/Delegate.h"
+#include "Layout/Children.h"
+#include "Misc/Attribute.h"
+#include "SlotBase.h"
+#include "Styling/AppStyle.h"
+#include "Templates/SubclassOf.h"
+#include "UObject/WeakObjectPtrTemplates.h"
 #include "Widgets/Images/SImage.h"
+#include "Widgets/SBoxPanel.h"
+#include "Widgets/SCompoundWidget.h"
 #include "Widgets/Text/STextBlock.h"
-#include "EditorStyleSet.h"
+
+class STableViewBase;
+struct FGeometry;
+struct FPointerEvent;
 
 void SModifierItemRow::Construct(const FArguments& InArgs, const TSharedRef<STableViewBase>& InOwnerTableView, const ModifierListviewItem& Item)
 {
@@ -21,7 +35,7 @@ void SModifierItemRow::Construct(const FArguments& InArgs, const TSharedRef<STab
 		.Padding(6.0f, 2.0f, 0.0f, 2.0f)
 		[
 			SNew(SImage)
-			.Image(InternalItem->OuterClass == USkeleton::StaticClass() ? FEditorStyle::GetBrush("ClassIcon.Skeleton") : FEditorStyle::GetBrush("ClassIcon.AnimSequence"))
+			.Image(InternalItem->OuterClass == USkeleton::StaticClass() ? FAppStyle::GetBrush("ClassIcon.Skeleton") : FAppStyle::GetBrush("ClassIcon.AnimSequence"))
 		]
 
 		+ SHorizontalBox::Slot()
@@ -48,7 +62,7 @@ FText SModifierItemRow::GetInstanceText() const
 	// Ensure we remove the modifier class postfix
 	LabelString.RemoveFromEnd(Postfix);
 
-	if (InternalItem->Instance.IsValid() && !InternalItem->Instance->IsLatestRevisionApplied())
+	if (InternalItem->OutOfDate)
 	{
 		LabelString.Append(" (Out of Date)");
 	}

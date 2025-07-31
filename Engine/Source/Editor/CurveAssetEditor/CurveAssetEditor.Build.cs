@@ -17,7 +17,7 @@ public class CurveAssetEditor : ModuleRules
 				"Engine",
 				"Slate",
 				"SlateCore",
-                "EditorStyle",
+				"EditorFramework",
 				"UnrealEd",
 				"InputCore",
 				"TimeManagement",

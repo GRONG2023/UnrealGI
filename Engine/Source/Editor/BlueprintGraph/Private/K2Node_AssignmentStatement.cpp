@@ -2,12 +2,30 @@
 
 
 #include "K2Node_AssignmentStatement.h"
-#include "EdGraphSchema_K2.h"
-#include "KismetCompiler.h"
-#include "VariableSetHandler.h"
-#include "BlueprintNodeSpawner.h"
-#include "EditorCategoryUtils.h"
+
 #include "BlueprintActionDatabaseRegistrar.h"
+#include "BlueprintNodeSpawner.h"
+#include "Containers/Array.h"
+#include "Containers/Map.h"
+#include "EdGraph/EdGraph.h"
+#include "EdGraph/EdGraphPin.h"
+#include "EdGraph/EdGraphSchema.h"
+#include "EdGraphSchema_K2.h"
+#include "EdGraphUtilities.h"
+#include "EditorCategoryUtils.h"
+#include "HAL/PlatformMath.h"
+#include "Internationalization/Internationalization.h"
+#include "Kismet2/CompilerResultsLog.h"
+#include "KismetCastingUtils.h"
+#include "KismetCompiledFunctionContext.h"
+#include "KismetCompiler.h"
+#include "Misc/AssertionMacros.h"
+#include "UObject/Class.h"
+#include "UObject/NameTypes.h"
+#include "UObject/WeakObjectPtrTemplates.h"
+#include "VariableSetHandler.h"
+
+struct FBPTerminal;
 
 #define LOCTEXT_NAMESPACE "K2Node_AssignmentStatement"
 
@@ -24,6 +42,8 @@ public:
 
 	virtual void RegisterNets(FKismetFunctionContext& Context, UEdGraphNode* Node) override
 	{
+		using namespace UE::KismetCompiler;
+
 		UEdGraphPin* VariablePin = Node->FindPin(TEXT("Variable"));
 		UEdGraphPin* ValuePin = Node->FindPin(TEXT("Value"));
 
@@ -35,23 +55,59 @@ public:
 
 		if (VariablePin->LinkedTo.Num() == 0)
 		{
-			CompilerContext.MessageLog.Error(*LOCTEXT("NoVarriableConnected_Error", "A variable needs to be connected to @@").ToString(), VariablePin);
+			CompilerContext.MessageLog.Error(*LOCTEXT("NoVariableConnected_Error", "A variable needs to be connected to @@").ToString(), VariablePin);
+			return;
 		}
 
 		ValidateAndRegisterNetIfLiteral(Context, ValuePin);
+
+		UEdGraphPin* VariablePinNet = FEdGraphUtilities::GetNetFromPin(VariablePin);
+		UEdGraphPin* ValuePinNet = FEdGraphUtilities::GetNetFromPin(ValuePin);
+
+		if (VariablePinNet && ValuePinNet)
+		{
+			CastingUtils::FConversion Conversion =
+				CastingUtils::GetFloatingPointConversion(*ValuePinNet, *VariablePinNet);
+
+			if (Conversion.Type != CastingUtils::FloatingPointCastType::None)
+			{
+				FBPTerminal* NewTerm = CastingUtils::MakeImplicitCastTerminal(Context, VariablePinNet, Node);
+
+				Context.ImplicitCastMap.Add(VariablePin, CastingUtils::FImplicitCastParams{Conversion, NewTerm, Node});
+			}
+		}
+		else
+		{
+			CompilerContext.MessageLog.Error(*LOCTEXT("NoVariableOrValueNets_Error", "Expected Variable and Value pins to have valid connections in @@").ToString(), Node);
+		}
 	}
 
 
 	virtual void Compile(FKismetFunctionContext& Context, UEdGraphNode* Node) override
 	{
+		using namespace UE::KismetCompiler;
+
 		UEdGraphPin* VariablePin = Node->FindPin(TEXT("Variable"));
 		UEdGraphPin* ValuePin = Node->FindPin(TEXT("Value"));
+
+		check(VariablePin);
+		check(VariablePin->LinkedTo.Num() == 1);
+		check(ValuePin);
 
 		InnerAssignment(Context, Node, VariablePin, ValuePin);
 
 		// Generate the output impulse from this node
 		GenerateSimpleThenGoto(Context, *Node);
+
+		// The assignment node is very much a non-standard node: its pins don't directly reference any data, but their nets do.
+		// The only cast that could happen is from the value pin's net to the variable's pin net, which we handle in RegisterNets.
+		// Due to how RegisterImplicitCasts works, it can actually register an erroneous entry to the value pin,
+		// which we need to remove ourselves.
+		CastingUtils::RemoveRegisteredImplicitCast(Context, ValuePin);
 	}
+
+protected:
+	virtual bool UsesVariablePinAsKey() const override { return true; }
 };
 
 
@@ -85,13 +141,13 @@ FText UK2Node_AssignmentStatement::GetNodeTitle(ENodeTitleType::Type TitleType) 
 	return LOCTEXT("Assign", "Assign");
 }
 
-bool UK2Node_AssignmentStatement::IsCompatibleWithGraph(UEdGraph const* TargetGraph) const
+bool UK2Node_AssignmentStatement::IsCompatibleWithGraph(const UEdGraph* TargetGraph) const
 {
 	bool bIsCompatible = Super::IsCompatibleWithGraph(TargetGraph);
 	if (bIsCompatible)
 	{
-		EGraphType const GraphType = TargetGraph->GetSchema()->GetGraphType(TargetGraph);
-		bIsCompatible = GraphType == GT_Macro;
+		const EGraphType GraphType = TargetGraph->GetSchema()->GetGraphType(TargetGraph);
+		bIsCompatible = (GraphType == GT_Macro);
 	}
 
 	return bIsCompatible;

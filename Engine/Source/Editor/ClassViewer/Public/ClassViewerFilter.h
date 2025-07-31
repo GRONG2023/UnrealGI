@@ -1,15 +1,49 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 #pragma once
 
+#include "Containers/Array.h"
+#include "Containers/Set.h"
 #include "CoreMinimal.h"
+#include "CoreTypes.h"
+#include "Delegates/Delegate.h"
 #include "Engine/EngineTypes.h"
+#include "Internationalization/Text.h"
+#include "Misc/Attribute.h"
 #include "Settings/ClassViewerSettings.h"
+#include "Templates/SharedPointer.h"
+#include "UObject/NameTypes.h"
+#include "UObject/SoftObjectPath.h"
+#include "UObject/TopLevelAssetPath.h"
 
-class FClassViewerNode;
+class FClassViewerFilterFuncs;
 class FClassViewerInitializationOptions;
+class FClassViewerNode;
+class FString;
 class FTextFilterExpressionEvaluator;
 class IAssetReferenceFilter;
 class IAssetRegistry;
+class UClass;
+class UObject;
+
+/** Delegate used to respond to a filter option change. The argument will indicate whether the option was enabled or disabled. */
+DECLARE_DELEGATE_OneParam(FOnClassViewerFilterOptionChanged, bool);
+
+/** Used to define a custom class viewer filter option. */
+class FClassViewerFilterOption
+{
+public:
+	/** Whether or not the option is currently enabled (default = true). */
+	bool bEnabled = true;
+
+	/** Localized label text to use for the option in the class viewer's filter menu. */
+	TAttribute<FText> LabelText;
+
+	/** Localized tooltip text to use for the option in the class viewer's filter menu. */
+	TAttribute<FText> ToolTipText;
+
+	/** Optional external delegate that will be invoked when this filter option is changed. */
+	FOnClassViewerFilterOptionChanged OnOptionChanged;
+};
 
 /** Interface class for creating filters for the Class Viewer. */
 class IClassViewerFilter
@@ -34,6 +68,48 @@ public:
 	 * @param InFilterFuncs				Useful functions for filtering.
 	 */
 	virtual bool IsUnloadedClassAllowed(const FClassViewerInitializationOptions& InInitOptions, const TSharedRef< const class IUnloadedBlueprintData > InUnloadedClassData, TSharedRef< class FClassViewerFilterFuncs > InFilterFuncs) = 0;
+
+	/**
+	 * Can be optionally implemented to gather additional filter flags. If present, these
+	 * will be added into the View Options menu where they can be toggled on/off by the user.
+	 * 
+	 * Example:
+	 *	In the following case, we define a custom filter option to allow the user to toggle the entire filter on/off. This is
+	 *	synced with a global config setting (MyFilterConfigSettings->bIsCustomFilterEnabled) that is checked at filtering time.
+	 * 
+	 *		void FMyCustomClassFilter::GetFilterOptions(TArray<TSharedRef<FClassViewerFilterOption>>& OutFilterOptions)
+	 *		{
+	 *			TSharedRef<FClassViewerFilterOption> MyFilterOption = MakeShared<FClassViewerFilterOption>();
+	 *			MyFilterOption->bEnabled = MyFilterConfigSettings->bIsCustomFilterEnabled;
+	 *			MyFilterOption->LabelText = LOCTEXT("MyCustomFilterOptionLabel", "My Custom Filter");
+	 *			MyFilterOption->ToolTipText = LOCTEXT("MyCustomFilterOptionToolTip", "Enable or disable my custom class filter.");
+	 *			MyFilterOption->OnOptionChanged = FOnClassViewerFilterOptionChanged::CreateSP(this, &FMyCustomClassFilter::OnOptionChanged);
+	 * 
+	 *			OutFilterOptions.Add(MyFilterOption);
+	 *		}
+	 *		
+	 *		void FMyCustomClassFilter::OnOptionChanged(bool bIsEnabled)
+	 *		{
+	 *			// Updates the filter's config setting whenever the user changes the option.
+	 *			MyFilterConfigSettings->bIsCustomFilterEnabled = bIsEnabled;
+	 *		}
+	 * 
+	 *		bool FMyCustomClassFilter::IsClassAllowed(...)
+	 *		{
+	 *			if(!MyFilterConfigSettings->bIsCustomFilterEnabled)
+	 *			{
+	 *				// Filter is disabled; always allow the class.
+	 *				return true;
+	 *			}
+	 * 
+	 *			// ...
+	 *		}
+	 *
+	 * @param OutFilterOptions		On output, contains the set of options to be added into the filter menu.
+	 *								The Class Viewer requires these to be allocated so that each option can
+	 *								be safely referenced by each menu item widget in the View Options menu.
+	 */
+	virtual void GetFilterOptions(TArray<TSharedRef<FClassViewerFilterOption>>& OutFilterOptions) {}
 };
 
 /** Filter class that performs many common checks. */
@@ -282,5 +358,11 @@ public:
 	/**
 	 * Get the class path of this blueprint.
 	 */
+	UE_DEPRECATED(5.1, "Class names are now represented by path names. Please use GetClassPathName.")
 	virtual FName GetClassPath() const = 0;
+
+	/**
+	 * Get the class path of this blueprint.
+	 */
+	virtual FTopLevelAssetPath GetClassPathName() const = 0;
 };

@@ -4,196 +4,163 @@
 
 #if WITH_EDITOR
 
-#include "HAL/PlatformFilemanager.h"
-#include "HAL/FileManager.h"
-#include "Misc/Paths.h"
+#include "HAL/PlatformFile.h"
+#include "HAL/PlatformFileManager.h"
 #include "Async/AsyncWork.h"
-#include "Misc/CoreMisc.h"
-#include "DerivedDataCacheInterface.h"
-#include "HAL/FileManager.h"
-#include "Misc/PackageName.h"
+#include "DerivedDataCache.h"
+#include "DerivedDataRequestOwner.h"
 #include "Misc/FileHelper.h"
+#include "Misc/Guid.h"
 #include "VirtualTextureBuiltData.h"
-#include "VirtualTextureChunkManager.h"
-#include "HAL/RunnableThread.h"
-#include "HAL/ThreadSafeCounter.h"
-#include "HAL/Runnable.h"
 #include "Misc/ConfigCacheIni.h"
 
 DECLARE_LOG_CATEGORY_EXTERN(LogVTDiskCache, Log, All);
 DEFINE_LOG_CATEGORY(LogVTDiskCache);
 
-class FVirtualTextureDCCCacheCleanup final : public FRunnable
+struct FVirtualTextureFileHeader
 {
-	/** Singleton instance */
-	static FVirtualTextureDCCCacheCleanup* Runnable;
+	static const uint32 CurrentMagic = 0x4558ACDF;
+	static const uint32 CurrentVersion = 2u;
 
-	FRunnableThread* Thread;
-	FThreadSafeCounter StopTaskCounter;
-	FString Directory;
+	uint32 Magic = 0u;
+	uint32 Version = 0u;
+	uint32 HashSize = 0u;
+	FSHAHash Hash;
 
-	FTimespan UnusedFileTime;
-	int32 MaxContinuousFileChecks = -1;
-	
-	FVirtualTextureDCCCacheCleanup(const FString& InDirectory)
-		: Directory(InDirectory)
+	friend FArchive& operator<<(FArchive& Ar, FVirtualTextureFileHeader& Ref)
 	{
-		check(GConfig);
-		int32 UnusedFileAge = 17;
-		GConfig->GetInt(TEXT("VirtualTextureChunkDDCCache"), TEXT("UnusedFileAge"), UnusedFileAge, GEngineIni);
-		UnusedFileTime = FTimespan(UnusedFileAge, 0, 0, 0);
-		GConfig->GetInt(TEXT("VirtualTextureChunkDDCCache"), TEXT("MaxFileChecksPerSec"), MaxContinuousFileChecks, GEngineIni);
-
-		// Don't delete the runnable automatically. It's going to be manually deleted in FDDCCleanup::Shutdown.
-		Thread = FRunnableThread::Create(this, TEXT("FVirtualTextureDCCCacheCleanup"), 0, TPri_BelowNormal, FPlatformAffinity::GetPoolThreadMask());
-	}
-
-	virtual ~FVirtualTextureDCCCacheCleanup()
-	{
-		delete Thread;
-	}
-
-	virtual uint32 Run() override
-	{
-		// Give up some time to the engine to start up and load everything
-		Wait(120.0f, 0.5f);
-
-		// find all files in the directory
-		TArray<FString> FileNames;
-		IFileManager::Get().FindFilesRecursive(FileNames, *Directory, TEXT("*.*"), true, false);
-
-		// Cleanup
-		int32 NumFilesChecked = 0;
-		for (int32 FileIndex = 0; FileIndex < FileNames.Num() && ShouldStop() == false; FileIndex++)
-		{
-			const FDateTime LastModificationTime = IFileManager::Get().GetTimeStamp(*FileNames[FileIndex]);
-			const FDateTime LastAccessTime = IFileManager::Get().GetAccessTimeStamp(*FileNames[FileIndex]);
-			if ((LastAccessTime != FDateTime::MinValue()) || (LastModificationTime != FDateTime::MinValue()))
-			{
-				const FTimespan TimeSinceLastAccess = FDateTime::UtcNow() - LastAccessTime;
-				const FTimespan TimeSinceLastModification = FDateTime::UtcNow() - LastModificationTime;
-				if (TimeSinceLastAccess >= UnusedFileTime && TimeSinceLastModification >= UnusedFileTime)
-				{
-					// Delete the file
-					bool Result = IFileManager::Get().Delete(*FileNames[FileIndex], false, true, true);
-				}
-			}
-
-			if (++NumFilesChecked >= MaxContinuousFileChecks && MaxContinuousFileChecks > 0 && ShouldStop() == false)
-			{
-				NumFilesChecked = 0;
-				Wait(1.0f);
-			}
-			else
-			{
-				// Give up a tiny amount of time so that we're not consuming too much cpu/hdd resources.
-				Wait(0.05f);
-			}
-		}
-
-		return 0;
-	}
-
-	virtual void Stop() override
-	{
-		StopTaskCounter.Increment();
-	}
-
-	FORCEINLINE bool ShouldStop() const
-	{
-		return StopTaskCounter.GetValue() > 0;
-	}
-
-	/**
-	* Waits for a given amount of time periodically checking if there's been any Stop requests.
-	*
-	* @param InSeconds time in seconds to wait.
-	* @param InSleepTime interval at which to check for Stop requests.
-	*/
-	void Wait(const float InSeconds, const float InSleepTime = 0.1f)
-	{
-		// Instead of waiting the given amount of seconds doing nothing
-		// check periodically if there's been any Stop requests.
-		for (float TimeToWait = InSeconds; TimeToWait > 0.0f && ShouldStop() == false; TimeToWait -= InSleepTime)
-		{
-			FPlatformProcess::Sleep(FMath::Min(InSleepTime, TimeToWait));
-		}
-	}
-	
-	void EnsureCompletion()
-	{
-		Stop();
-		Thread->WaitForCompletion();
-	}
-
-public:
-
-	static void Startup(const FString& Directory)
-	{
-		if (Runnable == nullptr && FPlatformProcess::SupportsMultithreading())
-		{
-			Runnable = new FVirtualTextureDCCCacheCleanup(Directory);
-		}
-	}
-
-	static void Shutdown()
-	{
-		if (Runnable)
-		{
-			Runnable->EnsureCompletion();
-			delete Runnable;
-			Runnable = nullptr;
-		}
+		return Ar << Ref.Magic << Ref.Version << Ref.HashSize << Ref.Hash;
 	}
 };
-FVirtualTextureDCCCacheCleanup* FVirtualTextureDCCCacheCleanup::Runnable = nullptr;
+static_assert(sizeof(FVirtualTextureFileHeader) == sizeof(uint32) * 3 + sizeof(FSHAHash), "Bad packing");
 
 class FAsyncFillCacheWorker : public FNonAbandonableTask
 {
 public:
-	FString	Filename;
+	FString TempFilename;
+	FString	FinalFilename;
 	FVirtualTextureDataChunk* Chunk;
 
-	FAsyncFillCacheWorker(const FString& InFilename, FVirtualTextureDataChunk* InChunk)
-		: Filename(InFilename)
+	FAsyncFillCacheWorker(const FString& InTempFilename, const FString& InFinalFilename, FVirtualTextureDataChunk* InChunk)
+		: TempFilename(InTempFilename)
+		, FinalFilename(InFinalFilename)
 		, Chunk(InChunk)
 	{
 	}
 
 	void DoWork()
 	{
+		TRACE_CPUPROFILER_EVENT_SCOPE(FAsyncFillCacheWorker::DoWork);
+
 		IPlatformFile& PlatformFile = FPlatformFileManager::Get().GetPlatformFile();
-		FDerivedDataCacheInterface& DDC = GetDerivedDataCacheRef();
+
+		// Limit size of valid hash
+		static const uint32 kMaxHashSize = 32 * 1024;
 
 		//The file might be resident but this is the first request to it, flag as available
-		if (PlatformFile.FileExists(*Filename))
 		{
-			Chunk->bFileAvailableInVTDDCDache = true;
-			return;
+			TUniquePtr<FArchive> Ar(IFileManager::Get().CreateFileReader(*FinalFilename, 0));
+			if (Ar)
+			{
+				FVirtualTextureFileHeader Header;
+				*Ar << Header;
+				if (Header.Magic == FVirtualTextureFileHeader::CurrentMagic &&
+					Header.Version == FVirtualTextureFileHeader::CurrentVersion &&
+					Header.HashSize <= kMaxHashSize)
+				{
+					TArray64<uint8> FileContents;
+					FileContents.AddUninitialized(Header.HashSize);
+					Ar->Serialize(FileContents.GetData(), Header.HashSize);
+
+					FSHAHash FileHash;
+					FSHA1::HashBuffer(FileContents.GetData(), FileContents.Num(), FileHash.Hash);
+					if (FileHash == Header.Hash)
+					{
+						Ar.Reset(); // Close the file before marking the chunk as available
+						Chunk->bFileAvailableInVTDDCDache = true;
+						return;
+					}
+					else
+					{
+						UE_LOG(LogVTDiskCache, Log, TEXT("Found invalid existing VT DDC cache %s, mismatched hash, deleting"), *FinalFilename);
+					}
+				}
+				else
+				{
+					UE_LOG(LogVTDiskCache, Log, TEXT("Found invalid existing VT DDC cache %s, Magic: %d Version: %d HashSize: %d, deleting"), *FinalFilename, Header.Magic, Header.Version, Header.HashSize);
+				}
+
+				Ar.Reset();
+				const bool bDeleteResult = PlatformFile.DeleteFile(*FinalFilename);
+				ensureMsgf(bDeleteResult, TEXT("Failed to delete invalid VT DDC file %s"), *FinalFilename);
+			}
 		}
 
 		// Fetch data from DDC
-		TArray<uint8> Results;
-		//TODO(ddebaets) this sync request seems to be blocking here while it uses the job pool. add overload to perform it on this thread?
-		const bool DDCResult = DDC.GetSynchronous(*Chunk->DerivedDataKey, Results, Filename);
-		if (DDCResult == false)
+		using namespace UE::DerivedData;
+		FSharedBuffer Results;
+		FRequestOwner BlockingOwner(EPriority::Blocking);
+		GetCache().GetValue({{{FinalFilename}, ConvertLegacyCacheKey(Chunk->DerivedDataKey)}}, BlockingOwner, [&Results](FCacheGetValueResponse&& Response)
 		{
-			UE_LOG(LogVTDiskCache, Error, TEXT("Failed to fetch data from DDC (key: %s)"), *Chunk->DerivedDataKey);
+			Results = Response.Value.GetData().Decompress();
+		});
+		BlockingOwner.Wait();
+
+		if (Results.IsNull())
+		{
+			UE_LOG(LogVTDiskCache, Log, TEXT("Failed to fetch data from DDC (key: %s)"), *Chunk->DerivedDataKey);
+			return;
+		}
+
+		if (Results.GetSize() <= sizeof(FVirtualTextureChunkHeader))
+		{
+			UE_LOG(LogVTDiskCache, Error, TEXT("VT DDC data is too small %" UINT64_FMT " (key: %s)"), Results.GetSize(), *Chunk->DerivedDataKey);
+			return;
+		}
+
+		const void* ChunkData = Results.GetData();
+		const uint64 ChunkDataSize = Results.GetSize();
+
+		FSHAHash Hash;
+		FSHA1::HashBuffer(ChunkData, ChunkDataSize, Hash.Hash);
+		if (Hash != Chunk->BulkDataHash)
+		{
+			UE_LOG(LogVTDiskCache, Error, TEXT("VT DDC data is corrupt (key: %s)"), *Chunk->DerivedDataKey);
 			return;
 		}
 
 		// Write to Disk
-		FArchive* Ar = IFileManager::Get().CreateFileWriter(*Filename, 0);
-		if (Ar == nullptr)
 		{
-			UE_LOG(LogVTDiskCache, Error, TEXT("Failed to write to %s"), *Filename);
-			return;
-		}
-		Ar->Serialize(const_cast<uint8*>(Results.GetData() + 4), Results.Num() - 4); // skip size embedded in DDC entry
-		delete Ar;
+			TUniquePtr<FArchive> Ar(IFileManager::Get().CreateFileWriter(*TempFilename, 0));
+			if (!Ar)
+			{
+				UE_LOG(LogVTDiskCache, Error, TEXT("Failed to write to %s"), *TempFilename);
+				return;
+			}
 
-		// File is now available
-		Chunk->bFileAvailableInVTDDCDache = true;
+			FVirtualTextureFileHeader Header;
+			Header.Magic = FVirtualTextureFileHeader::CurrentMagic;
+			Header.Version = FVirtualTextureFileHeader::CurrentVersion;
+			Header.HashSize = FMath::Min<uint32>(ChunkDataSize, kMaxHashSize);
+			FSHA1::HashBuffer(ChunkData, Header.HashSize, Header.Hash.Hash);
+			*Ar << Header;
+			const int64 ArchiveOffset = Ar->Tell();
+			check(ArchiveOffset == sizeof(FVirtualTextureFileHeader));
+			Ar->Serialize(const_cast<void*>(ChunkData), ChunkDataSize);
+		}
+
+		if (PlatformFile.MoveFile(*FinalFilename, *TempFilename))
+		{
+			// File is now available
+			Chunk->bFileAvailableInVTDDCDache = true;
+		}
+		else
+		{
+			// Failed to move file, was the final file somehow created by a different process?
+			PlatformFile.DeleteFile(*TempFilename);
+			Chunk->bFileAvailableInVTDDCDache = PlatformFile.FileExists(*FinalFilename);
+			check(Chunk->bFileAvailableInVTDDCDache);
+		}
 	}
 
 	FORCEINLINE TStatId GetStatId() const
@@ -210,6 +177,8 @@ FVirtualTextureChunkDDCCache* GetVirtualTextureChunkDDCCache()
 
 void FVirtualTextureChunkDDCCache::Initialize()
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(FVirtualTextureChunkDDCCache::Initialize);
+
 	// setup the cache folder
 	auto& PlatformFile = FPlatformFileManager::Get().GetPlatformFile();
 
@@ -234,51 +203,132 @@ void FVirtualTextureChunkDDCCache::Initialize()
 		IFileManager::Get().Delete(*TempFilename, false, false, true);
 	}
 
-	FVirtualTextureDCCCacheCleanup::Startup(AbsoluteCachePath);
+	// Delete any old files in the cache directory
+	check(GConfig);
+	int32 UnusedFileAge = 17;
+	GConfig->GetInt(TEXT("VirtualTextureChunkDDCCache"), TEXT("UnusedFileAge"), UnusedFileAge, GEngineIni);
+	const FTimespan UnusedFileTime = FTimespan(UnusedFileAge, 0, 0, 0);
+
+	// find all files in the directory
+	IFileManager::Get().IterateDirectoryStatRecursively(*AbsoluteCachePath, [UnusedFileTime](const TCHAR* FileName, const FFileStatData& Stat)
+	{
+		if (!Stat.bIsDirectory && (Stat.AccessTime != FDateTime::MinValue() || Stat.ModificationTime != FDateTime::MinValue()))
+		{
+			const FTimespan TimeSinceLastAccess = FDateTime::UtcNow() - Stat.AccessTime;
+			const FTimespan TimeSinceLastModification = FDateTime::UtcNow() - Stat.ModificationTime;
+			if (TimeSinceLastAccess >= UnusedFileTime && TimeSinceLastModification >= UnusedFileTime)
+			{
+				// Delete the file
+				const bool Result = IFileManager::Get().Delete(FileName, false, true, true);
+				UE_LOG(LogVTDiskCache, Log, TEXT("Deleted old VT cache file %s"), FileName);
+			}
+		}
+
+		return true;
+	});
 }
 
 void FVirtualTextureChunkDDCCache::ShutDown()
 {
-	ActiveChunks.Empty();
-	FVirtualTextureDCCCacheCleanup::Shutdown();
+	WaitFlushRequests_AnyThread();
 }
 
 void FVirtualTextureChunkDDCCache::UpdateRequests()
 {
-	ActiveChunks.RemoveAll([](auto Chunk) -> bool {return Chunk->bFileAvailableInVTDDCDache == true; });
+	check(IsInRenderingThread());
+
+	// Needs a lock because these arrays are accessed by rare calls to WaitFlushRequests_AnyThread().
+	// All other access is render thread.
+	FScopeLock Lock(&ActiveTasksLock);
+
+	// Remove completed chunks from array.
+	ActiveChunks.RemoveAllSwap([](auto Chunk) -> bool {return Chunk->bFileAvailableInVTDDCDache == true; }, EAllowShrinking::No);
+
+	// Remove completed tasks from array.
+	for (int32 TaskIndex = 0; TaskIndex < ActiveTasks.Num(); ++TaskIndex)
+	{
+		FAsyncTask<FAsyncFillCacheWorker>* Task = ActiveTasks[TaskIndex];
+		if (Task->IsWorkDone())
+		{
+			Task->EnsureCompletion();
+			delete Task;
+			ActiveTasks.RemoveAtSwap(TaskIndex--, 1, EAllowShrinking::No);
+		}
+	}
 }
 
-bool FVirtualTextureChunkDDCCache::MakeChunkAvailable(FVirtualTextureDataChunk* Chunk, FString& ChunkFileName, bool bAsync)
+void FVirtualTextureChunkDDCCache::WaitFlushRequests_AnyThread()
 {
+	TArray<FAsyncTask<FAsyncFillCacheWorker>*> ActiveTasksCopy;
+	{
+		FScopeLock Lock(&ActiveTasksLock);
+		ActiveChunks.Empty();
+		ActiveTasksCopy = MoveTemp(ActiveTasks);
+	}
+	for (int32 TaskIndex = 0; TaskIndex < ActiveTasksCopy.Num(); ++TaskIndex)
+	{
+		FAsyncTask<FAsyncFillCacheWorker>* Task = ActiveTasksCopy[TaskIndex];
+		Task->EnsureCompletion();
+		delete Task;
+	}
+}
+
+bool FVirtualTextureChunkDDCCache::MakeChunkAvailable(struct FVirtualTextureDataChunk* Chunk, bool bAsync, FString& OutChunkFileName, int64& OutOffsetInFile)
+{
+	TRACE_CPUPROFILER_EVENT_SCOPE(FVirtualTextureChunkDDCCache::MakeChunkAvailable);
+
+	check(IsInParallelRenderingThread());
+
 	const FString CachedFilePath = AbsoluteCachePath / Chunk->ShortDerivedDataKey;
+	const FString TempFilePath = AbsoluteCachePath / FGuid::NewGuid().ToString() + ".tmp";
+
+	if (Chunk->bCorruptDataLoadedFromDDC)
+	{
+		// We determined data loaded from DDC was corrupt...this means any file saved to VT DDC cache is also corrupt and can no longer be used
+		FPlatformFileManager::Get().GetPlatformFile().DeleteFile(*CachedFilePath);
+		Chunk->bCorruptDataLoadedFromDDC = false;
+		Chunk->bFileAvailableInVTDDCDache = false;
+	}
 
 	// File already available? 
 	if (Chunk->bFileAvailableInVTDDCDache)
 	{
-		ChunkFileName = CachedFilePath;
+		OutChunkFileName = CachedFilePath;
+		OutOffsetInFile = sizeof(FVirtualTextureFileHeader);
 		return true;
 	}
 
-	// Are we already processing this chunk ?
-	const int32 ChunkInProgressIdx = ActiveChunks.Find(Chunk);
-	if (ChunkInProgressIdx != -1)
 	{
-		return false;
+		// Are we already processing this chunk ?
+		FScopeLock Lock(&ActiveTasksLock);
+		const int32 ChunkInProgressIdx = ActiveChunks.Find(Chunk);
+		if (ChunkInProgressIdx != -1)
+		{
+			return false;
+		}
 	}
 	
 	// start filling it to the cache
 	if (bAsync)
 	{
-		ActiveChunks.Add(Chunk);
-		(new FAutoDeleteAsyncTask<FAsyncFillCacheWorker>(CachedFilePath, Chunk))->StartBackgroundTask();
+		FAsyncTask<FAsyncFillCacheWorker>* Task = (new FAsyncTask<FAsyncFillCacheWorker>(TempFilePath, CachedFilePath, Chunk));
+		
+		{
+			FScopeLock Lock(&ActiveTasksLock);
+			ActiveTasks.Add(Task);
+			ActiveChunks.Add(Chunk);
+		}
+		
+		Task->StartBackgroundTask();
 	}
 	else
 	{
-		FAsyncFillCacheWorker SyncWorker(CachedFilePath, Chunk);
+		FAsyncFillCacheWorker SyncWorker(TempFilePath, CachedFilePath, Chunk);
 		SyncWorker.DoWork();
 		if (Chunk->bFileAvailableInVTDDCDache)
 		{
-			ChunkFileName = CachedFilePath;
+			OutChunkFileName = CachedFilePath;
+			OutOffsetInFile = sizeof(FVirtualTextureFileHeader);
 			return true;
 		}
 	}
@@ -286,5 +336,29 @@ bool FVirtualTextureChunkDDCCache::MakeChunkAvailable(FVirtualTextureDataChunk* 
 	return false;
 }
 
+void FVirtualTextureChunkDDCCache::MakeChunkAvailable_Concurrent(struct FVirtualTextureDataChunk* Chunk)
+{
+	TRACE_CPUPROFILER_EVENT_SCOPE(FVirtualTextureChunkDDCCache::MakeChunkAvailable_Concurrent);
+
+	const FString CachedFilePath = AbsoluteCachePath / Chunk->ShortDerivedDataKey;
+	const FString TempFilePath = AbsoluteCachePath / FGuid::NewGuid().ToString() + ".tmp";
+
+	if (Chunk->bCorruptDataLoadedFromDDC)
+	{
+		// We determined data loaded from DDC was corrupt...this means any file saved to VT DDC cache is also corrupt and can no longer be used
+		FPlatformFileManager::Get().GetPlatformFile().DeleteFile(*CachedFilePath);
+		Chunk->bCorruptDataLoadedFromDDC = false;
+		Chunk->bFileAvailableInVTDDCDache = false;
+	}
+
+	// File already available? 
+	if (Chunk->bFileAvailableInVTDDCDache)
+	{
+		return;
+	}
+
+	FAsyncFillCacheWorker SyncWorker(TempFilePath, CachedFilePath, Chunk);
+	SyncWorker.DoWork();
+}
 
 #endif

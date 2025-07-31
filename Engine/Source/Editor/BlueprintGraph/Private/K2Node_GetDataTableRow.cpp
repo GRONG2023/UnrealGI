@@ -1,27 +1,50 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "K2Node_GetDataTableRow.h"
-#include "Engine/DataTable.h"
+
+#include "BlueprintActionDatabaseRegistrar.h"
+#include "BlueprintNodeSpawner.h"
+#include "Containers/EnumAsByte.h"
+#include "Containers/Map.h"
+#include "Containers/UnrealString.h"
+#include "DataTableEditorUtils.h"
+#include "EdGraph/EdGraph.h"
+#include "EdGraph/EdGraphPin.h"
+#include "EdGraph/EdGraphSchema.h"
 #include "EdGraphSchema_K2.h"
+#include "EditorCategoryUtils.h"
+#include "Engine/DataTable.h"
+#include "Engine/MemberReference.h"
+#include "HAL/PlatformMath.h"
+#include "Internationalization/Internationalization.h"
 #include "K2Node_CallFunction.h"
 #include "K2Node_IfThenElse.h"
-#include "Kismet2/BlueprintEditorUtils.h"
-#include "KismetCompiler.h"
-#include "DataTableEditorUtils.h"
 #include "Kismet/DataTableFunctionLibrary.h"
-#include "BlueprintNodeSpawner.h"
-#include "EditorCategoryUtils.h"
-#include "BlueprintActionDatabaseRegistrar.h"
+#include "Kismet2/BlueprintEditorUtils.h"
+#include "Kismet2/CompilerResultsLog.h"
+#include "KismetCompiler.h"
+#include "Math/Color.h"
+#include "Misc/AssertionMacros.h"
+#include "Styling/AppStyle.h"
+#include "Templates/Casts.h"
+#include "UObject/Class.h"
+#include "UObject/NameTypes.h"
+#include "UObject/Object.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/UObjectBaseUtility.h"
+#include "UObject/UnrealNames.h"
+#include "UObject/WeakObjectPtr.h"
+#include "UObject/WeakObjectPtrTemplates.h"
+
+class UBlueprint;
 
 #define LOCTEXT_NAMESPACE "K2Node_GetDataTableRow"
 
 namespace GetDataTableRowHelper
 {
-
-const FName DataTablePinName = "DataTable";
-const FName RowNotFoundPinName = "RowNotFound";
-const FName RowNamePinName = "RowName";
-
+	const FName DataTablePinName = "DataTable";
+	const FName RowNotFoundPinName = "RowNotFound";
+	const FName RowNamePinName = "RowName";
 }
 
 UK2Node_GetDataTableRow::UK2Node_GetDataTableRow(const FObjectInitializer& ObjectInitializer)
@@ -80,7 +103,7 @@ void UK2Node_GetDataTableRow::RefreshRowNameOptions()
 {
 	// When the DataTable pin gets a new value assigned, we need to update the Slate UI so that SGraphNodeCallParameterCollectionFunction will update the ParameterName drop down
 	UEdGraph* Graph = GetGraph();
-	Graph->NotifyGraphChanged();
+	Graph->NotifyNodeChanged(this);
 }
 
 
@@ -131,12 +154,16 @@ UScriptStruct* UK2Node_GetDataTableRow::GetDataTableRowStructType() const
 		if (ResultPin && ResultPin->LinkedTo.Num() > 0)
 		{
 			RowStructType = Cast<UScriptStruct>(ResultPin->LinkedTo[0]->PinType.PinSubCategoryObject.Get());
+			if (RowStructType == nullptr && ResultPin->PinType.PinCategory != UEdGraphSchema_K2::PC_Wildcard)
+			{
+				RowStructType = GetFallbackStruct();
+			}
 			for (int32 LinkIndex = 1; LinkIndex < ResultPin->LinkedTo.Num(); ++LinkIndex)
 			{
 				UEdGraphPin* Link = ResultPin->LinkedTo[LinkIndex];
 				UScriptStruct* LinkType = Cast<UScriptStruct>(Link->PinType.PinSubCategoryObject.Get());
 
-				if (RowStructType->IsChildOf(LinkType))
+				if (RowStructType && RowStructType->IsChildOf(LinkType))
 				{
 					RowStructType = LinkType;
 				}
@@ -404,7 +431,7 @@ void UK2Node_GetDataTableRow::ExpandNode(class FKismetCompilerContext& CompilerC
 FSlateIcon UK2Node_GetDataTableRow::GetIconAndTint(FLinearColor& OutColor) const
 {
 	OutColor = GetNodeTitleColor();
-	static FSlateIcon Icon("EditorStyle", "Kismet.AllClasses.FunctionIcon");
+	static FSlateIcon Icon(FAppStyle::GetAppStyleSetName(), "Kismet.AllClasses.FunctionIcon");
 	return Icon;
 }
 

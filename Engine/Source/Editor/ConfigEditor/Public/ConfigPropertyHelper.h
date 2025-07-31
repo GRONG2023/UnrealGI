@@ -2,15 +2,24 @@
 
 #pragma once
  
+#include "Containers/Array.h"
+#include "Containers/UnrealString.h"
 #include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
+#include "UObject/FieldPath.h"
 #include "UObject/Object.h"
-#include "UObject/WeakObjectPtr.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/UObjectGlobals.h"
 #include "UObject/WeakFieldPtr.h"
+#include "UObject/WeakObjectPtr.h"
+
 #include "ConfigPropertyHelper.generated.h"
 
+class FProperty;
+template <typename T> struct TObjectPtr;
+
 UENUM()
-enum EConfigFileSourceControlStatus
+enum EConfigFileSourceControlStatus : int
 {
 	CFSCS_Unknown UMETA(DisplayName=Unknown),
 	CFSCS_Writable UMETA(DisplayName = "Available to edit"),
@@ -47,5 +56,5 @@ public:
 	TFieldPath<FProperty> EditProperty;
 
 	UPROPERTY(Transient, Category = Helper, EditAnywhere)
-	TArray<UPropertyConfigFileDisplayRow*> ConfigFilePropertyObjects;
+	TArray<TObjectPtr<UPropertyConfigFileDisplayRow>> ConfigFilePropertyObjects;
 };

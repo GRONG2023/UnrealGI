@@ -1,34 +1,33 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "AnimationBlueprintInterfaceEditorMode.h"
-#include "Animation/DebugSkelMeshComponent.h"
-#include "Animation/AnimInstance.h"
-#include "IPersonaToolkit.h"
+
+#include "Animation/AnimBlueprint.h"
+#include "AnimationBlueprintEditor.h"
+#include "BlueprintEditor.h"
 #include "BlueprintEditorTabs.h"
-#include "ISkeletonEditorModule.h"
+#include "Framework/Docking/LayoutExtender.h"
+#include "Framework/Docking/TabManager.h"
+#include "Framework/MultiBox/MultiBoxExtender.h"
+#include "Modules/ModuleManager.h"
 #include "PersonaModule.h"
 #include "SBlueprintEditorToolbar.h"
-#include "IPersonaPreviewScene.h"
-#include "ToolMenus.h"
+#include "Templates/Casts.h"
+#include "Types/SlateEnums.h"
+#include "UObject/WeakObjectPtr.h"
+
+class UToolMenu;
 
 FAnimationBlueprintInterfaceEditorMode::FAnimationBlueprintInterfaceEditorMode(const TSharedRef<FAnimationBlueprintEditor>& InAnimationBlueprintEditor)
 	: FBlueprintInterfaceApplicationMode(InAnimationBlueprintEditor, FAnimationBlueprintEditorModes::AnimationBlueprintInterfaceEditorMode, FAnimationBlueprintEditorModes::GetLocalizedMode)
 {
 	AnimBlueprintPtr = CastChecked<UAnimBlueprint>(InAnimationBlueprintEditor->GetBlueprintObj());
 
-	TabLayout = FTabManager::NewLayout( "Standalone_AnimationBlueprintInterfaceEditMode_Layout_v1.0" )
+	TabLayout = FTabManager::NewLayout( "Standalone_AnimationBlueprintInterfaceEditMode_Layout_v1.1" )
 		->AddArea
 		(
 			FTabManager::NewPrimaryArea()
 			->SetOrientation(Orient_Vertical)
-			->Split
-			(
-				// Top toolbar
-				FTabManager::NewStack() 
-				->SetSizeCoefficient(0.186721f)
-				->SetHideTabWell(true)
-				->AddTab(InAnimationBlueprintEditor->GetToolbarTabId(), ETabState::OpenedTab)
-			)
 			->Split
 			(
 				// Main application area

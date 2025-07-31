@@ -2,19 +2,47 @@
 
 #pragma once
 
-#include "Widgets/DeclarativeSyntaxSupport.h"
-#include "Widgets/SCompoundWidget.h"
+#include "Containers/Array.h"
+#include "Containers/Set.h"
+#include "CurveDrawInfo.h"
 #include "CurveEditorTypes.h"
-#include "SCurveEditorView.h"
+#include "Framework/MultiBox/MultiBoxBuilder.h"
+#include "Framework/MultiBox/MultiBoxBuilder.h"
+#include "HAL/Platform.h"
 #include "ICurveEditorDragOperation.h"
 #include "ICurveEditorToolExtension.h"
-#include "CurveDrawInfo.h"
+#include "Input/Reply.h"
+#include "Internationalization/Text.h"
+#include "Math/Color.h"
+#include "Math/Vector2D.h"
+#include "Misc/Attribute.h"
+#include "Misc/Optional.h"
+#include "Rendering/RenderingCommon.h"
+#include "SCurveEditorView.h"
+#include "Styling/SlateColor.h"
+#include "Templates/SharedPointer.h"
+#include "Templates/Tuple.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
+#include "Widgets/SCompoundWidget.h"
+#include "CurveEditorSettings.h"
 
-struct FCurveModelID;
-struct FCurveEditorScreenSpace;
-struct FOptionalSize;
-struct FCurveEditorDelayedDrag;
+class FCurveEditor;
+class FCurveModel;
+class FMenuBuilder;
+class FPaintArgs;
+class FSlateRect;
+class FSlateWindowElementList;
+class FWidgetStyle;
 class IMenu;
+struct FCurveEditorDelayedDrag;
+struct FCurveEditorScreenSpace;
+struct FCurveEditorToolID;
+struct FCurveModelID;
+struct FCurvePointHandle;
+struct FGeometry;
+struct FOptionalSize;
+struct FPointerEvent;
+struct FKeyAttributes;
 
 namespace CurveViewConstants
 {
@@ -76,6 +104,8 @@ public:
 	virtual void GetGridLinesX(TSharedRef<const FCurveEditor> CurveEditor, TArray<float>& MajorGridLines, TArray<float>& MinorGridLines, TArray<FText>* MajorGridLabels = nullptr) const override;
 	virtual void GetGridLinesY(TSharedRef<const FCurveEditor> CurveEditor, TArray<float>& MajorGridLines, TArray<float>& MinorGridLines, TArray<FText>* MajorGridLabels = nullptr) const override;
 
+	virtual void BuildContextMenu(FMenuBuilder& MenuBuilder, TOptional<FCurvePointHandle> ClickedPoint, TOptional<FCurveModelID> HoveredCurveID);
+
 protected:
 
 	// ~SCurveEditorView Interface
@@ -83,13 +113,17 @@ protected:
 	virtual bool GetCurveWithinWidgetRange(const FSlateRect& WidgetRectangle, TArray<FCurvePointHandle>* OutPoints) const override;
 	virtual TOptional<FCurveModelID> GetHoveredCurve() const override;
 
+	virtual FText FormatToolTipCurveName(const FCurveModel& CurveModel) const;
+	virtual FText FormatToolTipTime(const FCurveModel& CurveModel, double EvaluatedTime) const;
+	virtual FText FormatToolTipValue(const FCurveModel& CurveModel, double EvaluatedValue) const;
+
 	virtual void PaintView(const FPaintArgs& Args, const FGeometry& AllottedGeometry, const FSlateRect& MyCullingRect, FSlateWindowElementList& OutDrawElements, int32 BaseLayerId, const FWidgetStyle& InWidgetStyle, bool bParentEnabled) const;
 
 protected:
 
 	// SWidget Interface
-	virtual int32 OnPaint(const FPaintArgs& Args, const FGeometry& AllottedGeometry, const FSlateRect& MyCullingRect, FSlateWindowElementList& OutDrawElements, int32 BaseLayerId, const FWidgetStyle& InWidgetStyle, bool bParentEnabled) const override;
 	virtual void Tick(const FGeometry& AllottedGeometry, const double InCurrentTime, const float InDeltaTime) override;
+	virtual int32 OnPaint(const FPaintArgs& Args, const FGeometry& AllottedGeometry, const FSlateRect& MyCullingRect, FSlateWindowElementList& OutDrawElements, int32 BaseLayerId, const FWidgetStyle& InWidgetStyle, bool bParentEnabled) const override;
 	virtual void OnMouseEnter(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent) override;
 	virtual void OnMouseLeave(const FPointerEvent& MouseEvent) override;
 	virtual FReply OnMouseMove(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent) override;
@@ -109,6 +143,7 @@ protected:
 	FText GetCurveCaption() const;
 
 private:
+	void HandleDirectKeySelectionByMouse(TSharedPtr<FCurveEditor> CurveEditor, const FPointerEvent& MouseEvent, TOptional<FCurvePointHandle> MouseDownPoint);
 
 	void CreateContextMenu(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent);
 
@@ -121,6 +156,17 @@ private:
 	FText GetToolTipCurveName() const;
 	FText GetToolTipTimeText() const;
 	FText GetToolTipValueText() const;
+
+	/**
+	 * Returns the proper tangent value so we can keep the curve remain the original shape
+	 *
+	 * @param InTime		The time we are trying to add a key to
+	 * @param InValue		The value we are trying to add a key to
+	 * @param CurveToAddTo  The curve we are trying to add a key to
+	 * @param DeltaTime		Negative to get the left tangent, positive for right. Remember to use FMath::Abs() when needed
+	 * @return				The tangent value relatives to the DeltaTime upon mouse click's position
+	 */
+	double GetTangentValue(const double InTime, const double InValue, FCurveModel* CurveToAddTo, double DeltaTime) const;
 
 	/*~ Command binding callbacks */
 	void AddKeyAtScrubTime(TSet<FCurveModelID> ForCurves);
@@ -136,13 +182,15 @@ private:
 	void RebindContextualActions(FVector2D InMousePosition);
 
 	/** Copy the curves from this view and set them as the Curve Editor's buffered curve support. */
-	void BufferVisibleCurves();
-	/** Copy the curves from this view and set them as the Curve Editor's buffered curve support. */
-	void BufferCurve(const FCurveModelID CurveID);
-	/** Attempt to apply the previously buffered curves to the currently visible curves. */
-	void ApplyBufferCurves(TOptional<FCurveModelID> DestinationCurve);
-	/** Check if it's legal to apply any of the buffered curves to our currently visible curves. */
-	bool CanApplyBufferedCurves(TOptional<FCurveModelID> DestinationCurve) const;
+	void BufferCurves();
+	/** Attempt to apply the previously buffered curves to the currently selected curves. */
+	void ApplyBufferCurves(const bool bSwapBufferCurves);
+	/** Check if it's legal to buffer any of our selected curves. */
+	bool CanBufferedCurves() const;
+	/** Check if it's legal to apply any of the buffered curves to our currently selected curves. */
+	bool CanApplyBufferedCurves() const;
+	/** Returns interpolation mode and tangent mode based on neighbours or default curve editor if no neighbours . */
+	FKeyAttributes GetDefaultKeyAttributesForCurveTime(const FCurveEditor& CurveEditor, const FCurveModel& CurveModel, double EvalTime) const;
 
 protected:
 
@@ -150,9 +198,6 @@ protected:
 	FLinearColor BackgroundTint;
 
 private:
-
-	/** Curve draw parameters that are re-generated on tick. We generate them once and then they're used in multiple places per frame. */
-	TArray<FCurveDrawParams> CachedDrawParams;
 
 	/** (Optional) the current drag operation */
 	TOptional<FCurveEditorDelayedDrag> DragOperation;
@@ -176,4 +221,12 @@ private:
 
 	/** Cached location of the mouse relative to this widget each tick. This is so that command bindings related to the mouse cursor can create them at the right time. */
 	FVector2D CachedMousePosition;
+
+	/** Cached curve caption, used to determine when to refresh the retainer */
+	mutable FText CachedCurveCaption;
+
+	/** Cached curve caption color, used to determine when to refresh the retainer */
+	mutable FSlateColor CachedCurveCaptionColor;
+
+	mutable bool bNeedsRefresh = false;
 };

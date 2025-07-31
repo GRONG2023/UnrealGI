@@ -8,6 +8,15 @@
 
 DECLARE_CYCLE_STAT(TEXT("Child Paint"), STAT_ChildPaint, STATGROUP_SlateVeryVerbose);
 
+SLATE_IMPLEMENT_WIDGET(SCompoundWidget)
+void SCompoundWidget::PrivateRegisterAttributes(FSlateAttributeInitializer& AttributeInitializer)
+{
+	SLATE_ADD_MEMBER_ATTRIBUTE_DEFINITION_WITH_NAME(AttributeInitializer, "SlotPadding", ChildSlot.SlotPaddingAttribute, EInvalidateWidgetReason::Layout);
+	SLATE_ADD_MEMBER_ATTRIBUTE_DEFINITION_WITH_NAME(AttributeInitializer, "ContentScale", ContentScaleAttribute, EInvalidateWidgetReason::Layout);
+	SLATE_ADD_MEMBER_ATTRIBUTE_DEFINITION_WITH_NAME(AttributeInitializer, "ColorAndOpacity", ColorAndOpacityAttribute, EInvalidateWidgetReason::Paint);
+	SLATE_ADD_MEMBER_ATTRIBUTE_DEFINITION_WITH_NAME(AttributeInitializer, "ForegroundColor", ForegroundColorAttribute, EInvalidateWidgetReason::Paint);
+}
+
 int32 SCompoundWidget::OnPaint( const FPaintArgs& Args, const FGeometry& AllottedGeometry, const FSlateRect& MyCullingRect, FSlateWindowElementList& OutDrawElements, int32 LayerId, const FWidgetStyle& InWidgetStyle, bool bParentEnabled ) const
 {
 
@@ -20,19 +29,21 @@ int32 SCompoundWidget::OnPaint( const FPaintArgs& Args, const FGeometry& Allotte
 	// There may be zero elements in this array if our child collapsed/hidden
 	if( ArrangedChildren.Num() > 0 )
 	{
+		const bool bShouldBeEnabled = ShouldBeEnabled(bParentEnabled);
+
 		check( ArrangedChildren.Num() == 1 );
 		FArrangedWidget& TheChild = ArrangedChildren[0];
 
 		FWidgetStyle CompoundedWidgetStyle = FWidgetStyle(InWidgetStyle)
-			.BlendColorAndOpacityTint(ColorAndOpacity.Get())
-			.SetForegroundColor( GetForegroundColor() );
+			.BlendColorAndOpacityTint(GetColorAndOpacity())
+			.SetForegroundColor(bShouldBeEnabled ? GetForegroundColor() : GetDisabledForegroundColor() );
 
 		int32 Layer = 0;
 		{
 #if WITH_VERY_VERBOSE_SLATE_STATS
 			SCOPE_CYCLE_COUNTER(STAT_ChildPaint);
 #endif
-			Layer = TheChild.Widget->Paint( Args.WithNewParent(this), TheChild.Geometry, MyCullingRect, OutDrawElements, LayerId + 1, CompoundedWidgetStyle, ShouldBeEnabled( bParentEnabled ) );
+			Layer = TheChild.Widget->Paint( Args.WithNewParent(this), TheChild.Geometry, MyCullingRect, OutDrawElements, LayerId + 1, CompoundedWidgetStyle, bShouldBeEnabled);
 		}
 		return Layer;
 	}
@@ -50,7 +61,8 @@ FVector2D SCompoundWidget::ComputeDesiredSize( float ) const
 	EVisibility ChildVisibility = ChildSlot.GetWidget()->GetVisibility();
 	if ( ChildVisibility != EVisibility::Collapsed )
 	{
-		return ChildSlot.GetWidget()->GetDesiredSize() + ChildSlot.SlotPadding.Get().GetDesiredSize();
+		FVector2f LocalDesiredSize = ChildSlot.GetWidget()->GetDesiredSize() + ChildSlot.GetPadding().GetDesiredSize();
+		return FVector2D(LocalDesiredSize);
 	}
 	
 	return FVector2D::ZeroVector;
@@ -58,23 +70,23 @@ FVector2D SCompoundWidget::ComputeDesiredSize( float ) const
 
 void SCompoundWidget::OnArrangeChildren( const FGeometry& AllottedGeometry, FArrangedChildren& ArrangedChildren ) const
 {
-	ArrangeSingleChild(GSlateFlowDirection, AllottedGeometry, ArrangedChildren, ChildSlot, ContentScale);
+	ArrangeSingleChild(GSlateFlowDirection, AllottedGeometry, ArrangedChildren, ChildSlot, GetContentScale());
 }
 
 FSlateColor SCompoundWidget::GetForegroundColor() const
 {
-	return ForegroundColor.Get();
+	return ForegroundColorAttribute.Get();
 }
 
 SCompoundWidget::SCompoundWidget()
 	: ChildSlot(this)
-	, ContentScale( FVector2D(1.0f,1.0f) )
-	, ColorAndOpacity( FLinearColor::White )
-	, ForegroundColor( FSlateColor::UseForeground() )
+	, ContentScaleAttribute( *this, FVector2D(1.0f,1.0f) )
+	, ColorAndOpacityAttribute( *this, FLinearColor::White )
+	, ForegroundColorAttribute( *this, FSlateColor::UseForeground() )
 {
 }
 
 void SCompoundWidget::SetVisibility( TAttribute<EVisibility> InVisibility )
 {
-	SWidget::SetVisibility( InVisibility );
+	SWidget::SetVisibility(MoveTemp(InVisibility));
 }

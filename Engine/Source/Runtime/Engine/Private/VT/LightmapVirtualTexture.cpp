@@ -1,7 +1,9 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "VT/LightmapVirtualTexture.h"
-#include "LightMap.h"
+#include "Async/TaskGraphInterfaces.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(LightmapVirtualTexture)
 
 ULightMapVirtualTexture2D::ULightMapVirtualTexture2D(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -26,3 +28,4 @@ uint32 ULightMapVirtualTexture2D::GetLayerForType(ELightMapVirtualTextureType In
 	const int TypeIndex = (int)InType;
 	return (TypeIndex >= TypeToLayer.Num()) ? ~0u : (uint32)TypeToLayer[TypeIndex];
 }
+

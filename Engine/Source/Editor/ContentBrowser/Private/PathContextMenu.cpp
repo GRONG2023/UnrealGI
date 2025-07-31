@@ -1,47 +1,57 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "PathContextMenu.h"
-#include "Misc/MessageDialog.h"
-#include "HAL/FileManager.h"
-#include "Misc/Paths.h"
-#include "Modules/ModuleManager.h"
-#include "UObject/ObjectRedirector.h"
-#include "Misc/PackageName.h"
-#include "Widgets/DeclarativeSyntaxSupport.h"
-#include "Widgets/SBoxPanel.h"
-#include "Widgets/SWindow.h"
-#include "Framework/Application/SlateApplication.h"
-#include "Textures/SlateIcon.h"
-#include "Framework/MultiBox/MultiBoxExtender.h"
-#include "Widgets/Input/SButton.h"
-#include "Widgets/Colors/SColorBlock.h"
-#include "EditorStyleSet.h"
-#include "SourceControlOperations.h"
-#include "ISourceControlModule.h"
-#include "SourceControlHelpers.h"
-#include "AssetData.h"
-#include "Editor.h"
-#include "FileHelpers.h"
-#include "ARFilter.h"
-#include "AssetRegistryModule.h"
-#include "IAssetTools.h"
-#include "AssetToolsModule.h"
-#include "ContentBrowserLog.h"
-#include "ContentBrowserSingleton.h"
-#include "ContentBrowserUtils.h"
-#include "SourceControlWindows.h"
-#include "ContentBrowserModule.h"
-#include "Framework/MultiBox/MultiBoxBuilder.h"
-#include "Widgets/Colors/SColorPicker.h"
-#include "Framework/Commands/GenericCommands.h"
-#include "Framework/Notifications/NotificationManager.h"
-#include "Widgets/Notifications/SNotificationList.h"
+
+#include "AssetViewUtils.h"
+#include "Containers/ArrayView.h"
+#include "Containers/Map.h"
+#include "Containers/StringFwd.h"
+#include "Containers/StringView.h"
+#include "Containers/UnrealString.h"
 #include "ContentBrowserCommands.h"
-#include "ToolMenus.h"
-#include "ContentBrowserMenuContexts.h"
-#include "IContentBrowserDataModule.h"
+#include "ContentBrowserDataFilter.h"
 #include "ContentBrowserDataSource.h"
 #include "ContentBrowserDataSubsystem.h"
+#include "ContentBrowserDelegates.h"
+#include "ContentBrowserMenuContexts.h"
+#include "ContentBrowserModule.h"
+#include "ContentBrowserSingleton.h"
+#include "ContentBrowserUtils.h"
+#include "Framework/Application/SlateApplication.h"
+#include "Framework/Commands/GenericCommands.h"
+#include "Framework/Commands/UIAction.h"
+#include "Framework/Commands/UICommandInfo.h"
+#include "Framework/MultiBox/MultiBoxExtender.h"
+#include "Framework/SlateDelegates.h"
+#include "HAL/IConsoleManager.h"
+#include "HAL/PlatformApplicationMisc.h"
+#include "HAL/PlatformCrt.h"
+#include "IContentBrowserDataModule.h"
+#include "Math/Vector2D.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/Attribute.h"
+#include "Modules/ModuleManager.h"
+#include "SlotBase.h"
+#include "SourceControlOperations.h"
+#include "Styling/AppStyle.h"
+#include "Templates/Casts.h"
+#include "Templates/Tuple.h"
+#include "Templates/UnrealTemplate.h"
+#include "Textures/SlateIcon.h"
+#include "ToolMenu.h"
+#include "ToolMenuDelegates.h"
+#include "ToolMenuEntry.h"
+#include "ToolMenuSection.h"
+#include "ToolMenus.h"
+#include "UObject/NameTypes.h"
+#include "UObject/UnrealNames.h"
+#include "Widgets/Colors/SColorBlock.h"
+#include "Widgets/Colors/SColorPicker.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
+#include "Widgets/Input/SButton.h"
+#include "Widgets/SBoxPanel.h"
+#include "Widgets/SWidget.h"
+#include "Widgets/SWindow.h"
 
 #define LOCTEXT_NAMESPACE "ContentBrowser"
 
@@ -63,6 +73,11 @@ void FPathContextMenu::SetOnFolderDeleted(const FOnFolderDeleted& InOnFolderDele
 void FPathContextMenu::SetOnFolderFavoriteToggled(const FOnFolderFavoriteToggled& InOnFolderFavoriteToggled)
 {
 	OnFolderFavoriteToggled = InOnFolderFavoriteToggled;
+}
+
+void FPathContextMenu::SetOnPrivateContentEditToggled(const FOnPrivateContentEditToggled& InOnPrivateContentEditToggled)
+{
+	OnPrivateContentEditToggled = InOnPrivateContentEditToggled;
 }
 
 const TArray<FContentBrowserItem>& FPathContextMenu::GetSelectedFolders() const
@@ -129,7 +144,7 @@ void FPathContextMenu::MakePathViewContextMenu(UToolMenu* Menu)
 						FUIAction(),
 						EUserInterfaceActionType::Button,
 						false,
-						FSlateIcon()
+						FSlateIcon(FAppStyle::GetAppStyleSetName(), "Icons.Import")
 					);
 				}
 			}
@@ -138,12 +153,24 @@ void FPathContextMenu::MakePathViewContextMenu(UToolMenu* Menu)
 			if (!Context->bNoFolderOnDisk)
 			{
 				Section.AddMenuEntry(
-					"ExploreTooltip",
+					"Explore",
 					ContentBrowserUtils::GetExploreFolderText(),
 					LOCTEXT("ExploreTooltip", "Finds this folder on disk."),
-					FSlateIcon(),
+					FSlateIcon(FAppStyle::GetAppStyleSetName(), "Icons.BrowseContent"),
 					FUIAction( FExecuteAction::CreateSP( this, &FPathContextMenu::ExecuteExplore ) )
 					);
+			}
+
+			// Assume paths with an on-disk representation also have an internal path to copy
+			if (!Context->bNoFolderOnDisk)
+			{
+				Section.AddMenuEntry(
+					"CopyPath",
+					LOCTEXT("CopyFolderPath", "Copy Path"),
+					LOCTEXT("CopyFolderTooltip", "Copy the paths of the selected folder(s)"),
+					FSlateIcon(FAppStyle::GetAppStyleSetName(), "GenericCommands.Copy"),
+					FExecuteAction::CreateSP(this, &FPathContextMenu::CopySelectedFolder)
+				);
 			}
 
 			if (Context->bCanBeModified)
@@ -164,7 +191,7 @@ void FPathContextMenu::MakePathViewContextMenu(UToolMenu* Menu)
 					LOCTEXT("SetColorTooltip", "Sets the color this folder should appear as."),
 					FNewToolMenuDelegate::CreateRaw( this, &FPathContextMenu::MakeSetColorSubMenu ),
 					false,
-					FSlateIcon()
+					FSlateIcon(FAppStyle::GetAppStyleSetName(), "Icons.Color")
 					);
 			}
 			else
@@ -174,20 +201,22 @@ void FPathContextMenu::MakePathViewContextMenu(UToolMenu* Menu)
 					"SetColor",
 					LOCTEXT("SetColor", "Set Color"),
 					LOCTEXT("SetColorTooltip", "Sets the color this folder should appear as."),
-					FSlateIcon(),
+					FSlateIcon(FAppStyle::GetAppStyleSetName(), "Icons.Color"),
 					FUIAction( FExecuteAction::CreateSP( this, &FPathContextMenu::ExecutePickColor ) )
 					);
 			}			
 
+			FString SelectedFolderPath = SelectedFolders[0].GetVirtualPath().ToString();
+			FContentBrowserItemPath SelectedFolderItemPath(SelectedFolders[0].GetVirtualPath(), EContentBrowserPathType::Virtual);
 			// If this folder is already favorited, show the option to remove from favorites
-			if (ContentBrowserUtils::IsFavoriteFolder(SelectedFolders[0].GetVirtualPath().ToString()))
+			if (ContentBrowserUtils::IsFavoriteFolder(SelectedFolderItemPath))
 			{
 				// Remove from favorites
 				Section.AddMenuEntry(
 					"RemoveFromFavorites",
 					LOCTEXT("RemoveFromFavorites", "Remove From Favorites"),
 					LOCTEXT("RemoveFromFavoritesTooltip", "Removes this folder from the favorites section."),
-					FSlateIcon(FEditorStyle::GetStyleSetName(), "PropertyWindow.Favorites_Disabled"),
+					FSlateIcon(FAppStyle::GetAppStyleSetName(), "PropertyWindow.Favorites_Disabled"),
 					FUIAction(FExecuteAction::CreateSP(this, &FPathContextMenu::ExecuteFavorite))
 				);
 			}
@@ -198,9 +227,37 @@ void FPathContextMenu::MakePathViewContextMenu(UToolMenu* Menu)
 					"AddToFavorites",
 					LOCTEXT("AddToFavorites", "Add To Favorites"),
 					LOCTEXT("AddToFavoritesTooltip", "Adds this folder to the favorites section for easy access."),
-					FSlateIcon(FEditorStyle::GetStyleSetName(), "PropertyWindow.Favorites_Enabled"),
+					FSlateIcon(FAppStyle::GetAppStyleSetName(), "Icons.Star"),
 					FUIAction(FExecuteAction::CreateSP(this, &FPathContextMenu::ExecuteFavorite))
 				);
+			}
+
+			static const IConsoleVariable* EnablePublicAssetFeatureCVar = IConsoleManager::Get().FindConsoleVariable(TEXT("AssetTools.EnablePublicAssetFeature"));
+			const bool bIsPublicAssetUIEnabled = EnablePublicAssetFeatureCVar && EnablePublicAssetFeatureCVar->GetBool();
+
+			FStringView SelectedFolderPathView(SelectedFolderPath);
+			if (bIsPublicAssetUIEnabled && FContentBrowserSingleton::Get().IsFolderShowPrivateContentToggleable(SelectedFolderPathView))
+			{
+				if (FContentBrowserSingleton::Get().IsShowingPrivateContent(SelectedFolderPathView))
+				{
+					Section.AddMenuEntry(
+						"DisallowPrivateContentEditing",
+						LOCTEXT("DisallowPrivateContentEditing", "Disallow Private Content Editing"),
+						LOCTEXT("DisallowPrivateContentEditingTooltip", "Hides Private Content and prevents editing the Public/Private state of content in this folder"),
+						FSlateIcon(FAppStyle::GetAppStyleSetName(), "ContentBrowser.PrivateContentEdit"),
+						FUIAction(FExecuteAction::CreateSP(this, &FPathContextMenu::ExecutePrivateContentEdit))
+					);
+				}
+				else
+				{
+					Section.AddMenuEntry(
+						"AllowPrivateContentEditing",
+						LOCTEXT("AllowPrivateContentEditing", "Allow Private Content Editing"),
+						LOCTEXT("AllowPrivateContentEditingTooltip", "Reveals Private Content and allows editing the Public/Private state of content in this folder"),
+						FSlateIcon(FAppStyle::GetAppStyleSetName(), "ContentBrowser.PrivateContentEdit"),
+						FUIAction(FExecuteAction::CreateSP(this, &FPathContextMenu::ExecutePrivateContentEdit))
+					);
+				}
 			}
 		}
 
@@ -222,7 +279,7 @@ void FPathContextMenu::MakePathViewContextMenu(UToolMenu* Menu)
 				// Delete
 				Section.AddMenuEntry(FGenericCommands::Get().Delete,
 					LOCTEXT("DeleteFolder", "Delete"),
-					LOCTEXT("DeleteFolderTooltip", "Removes this folder and all assets it contains.")
+					TAttribute<FText>::Create(TAttribute<FText>::FGetter::CreateSP(this, &FPathContextMenu::GetDeleteToolTip))
 					);
 			}
 		}
@@ -278,7 +335,7 @@ void FPathContextMenu::MakeSetColorSubMenu(UToolMenu* Menu)
 					.Padding(2, 0, 0, 0)
 					[
 						SNew(SButton)
-						.ButtonStyle( FEditorStyle::Get(), "Menu.Button" )
+						.ButtonStyle( FAppStyle::Get(), "Menu.Button" )
 						.OnClicked( this, &FPathContextMenu::OnColorClicked, Color )
 						[
 							SNew(SColorBlock)
@@ -296,14 +353,7 @@ void FPathContextMenu::MakeSetColorSubMenu(UToolMenu* Menu)
 
 void FPathContextMenu::ExecuteExplore()
 {
-	for (const FContentBrowserItem& SelectedItem : SelectedFolders)
-	{
-		FString ItemFilename;
-		if (SelectedItem.GetItemPhysicalPath(ItemFilename) && FPaths::DirectoryExists(ItemFilename))
-		{
-			FPlatformProcess::ExploreFolder(*IFileManager::Get().ConvertToAbsolutePathForExternalAppForRead(*ItemFilename));
-		}
-	}
+	ContentBrowserUtils::ExploreFolders(SelectedFolders, ParentContent.Pin().ToSharedRef());
 }
 
 bool FPathContextMenu::CanExecuteRename() const
@@ -327,34 +377,33 @@ void FPathContextMenu::ExecuteResetColor()
 
 void FPathContextMenu::ExecutePickColor()
 {
+	if (SelectedFolders.Num() == 0)
+	{
+		return;
+	}
+
 	// Spawn a color picker, so the user can select which color they want
-	TArray<FLinearColor*> LinearColorArray;
-	FColorPickerArgs PickerArgs;
-	PickerArgs.bIsModal = false;
-	PickerArgs.ParentWidget = ParentContent.Pin();
+	FLinearColor InitialColor = ContentBrowserUtils::GetDefaultColor();
 	if (SelectedFolders.Num() > 0)
 	{
 		// Make sure an color entry exists for all the paths, otherwise they won't update in realtime with the widget color
-		for (int32 FolderIndex = SelectedFolders.Num() - 1; FolderIndex >= 0; --FolderIndex)
+		for (const FContentBrowserItem& SelectedItem : SelectedFolders)
 		{
-			const FString Path = SelectedFolders[FolderIndex].GetVirtualPath().ToString();
-			TSharedPtr<FLinearColor> Color = ContentBrowserUtils::LoadColor(Path);
-			if (!Color.IsValid())
-			{
-				Color = MakeShareable(new FLinearColor(ContentBrowserUtils::GetDefaultColor()));
-				ContentBrowserUtils::SaveColor(Path, Color, true);
-			}
-			else
+			const FString Path = SelectedItem.GetInvariantPath().ToString();
+
+			TOptional<FLinearColor> Color = ContentBrowserUtils::GetPathColor(Path);
+			if (Color.IsSet())
 			{
 				// Default the color to the first valid entry
-				PickerArgs.InitialColorOverride = *Color.Get();
+				InitialColor = Color.GetValue();
+				break;
 			}
-			LinearColorArray.Add(Color.Get());
 		}
-		PickerArgs.LinearColorArray = &LinearColorArray;
 	}
 
-	PickerArgs.OnColorPickerWindowClosed = FOnWindowClosed::CreateSP(this, &FPathContextMenu::NewColorComplete);
+	FColorPickerArgs PickerArgs = FColorPickerArgs(InitialColor, FOnLinearColorValueChanged::CreateSP(this, &FPathContextMenu::OnLinearColorValueChanged));
+	PickerArgs.bIsModal = false;
+	PickerArgs.ParentWidget = ParentContent.Pin();
 
 	OpenColorPicker(PickerArgs);
 }
@@ -370,16 +419,20 @@ void FPathContextMenu::ExecuteFavorite()
 	OnFolderFavoriteToggled.ExecuteIfBound(PathsToUpdate);
 }
 
-void FPathContextMenu::NewColorComplete(const TSharedRef<SWindow>& Window)
+void FPathContextMenu::ExecutePrivateContentEdit()
 {
-	// Save the colors back in the config (ptr should have already updated by the widget)
+	TArray<FString> PathsToUpdate;
 	for (const FContentBrowserItem& SelectedItem : SelectedFolders)
 	{
-		const FString Path = SelectedItem.GetVirtualPath().ToString();
-		const TSharedPtr<FLinearColor> Color = ContentBrowserUtils::LoadColor(Path);
-		check(Color.IsValid());
-		ContentBrowserUtils::SaveColor(Path, Color);
+		PathsToUpdate.Add(SelectedItem.GetVirtualPath().ToString());
 	}
+
+	OnPrivateContentEditToggled.ExecuteIfBound(PathsToUpdate);
+}
+
+void FPathContextMenu::OnLinearColorValueChanged(const FLinearColor InColor)
+{
+	OnColorClicked(InColor);
 }
 
 FReply FPathContextMenu::OnColorClicked( const FLinearColor InColor )
@@ -387,14 +440,8 @@ FReply FPathContextMenu::OnColorClicked( const FLinearColor InColor )
 	// Make sure a color entry exists for all the paths, otherwise it can't save correctly
 	for (const FContentBrowserItem& SelectedItem : SelectedFolders)
 	{
-		const FString Path = SelectedItem.GetVirtualPath().ToString();
-		TSharedPtr<FLinearColor> Color = ContentBrowserUtils::LoadColor(Path);
-		if (!Color.IsValid())
-		{
-			Color = MakeShareable(new FLinearColor());
-		}
-		*Color.Get() = InColor;
-		ContentBrowserUtils::SaveColor(Path, Color);
+		const FString Path = SelectedItem.GetInvariantPath().ToString();
+		ContentBrowserUtils::SetPathColor(Path, InColor);
 	}
 
 	// Dismiss the menu here, as we can't make the 'clear' option appear if a folder has just had a color set for the first time
@@ -408,7 +455,7 @@ void FPathContextMenu::ResetColors()
 	// Clear the custom colors for all the selected paths
 	for (const FContentBrowserItem& SelectedItem : SelectedFolders)
 	{
-		ContentBrowserUtils::SaveColor(SelectedItem.GetVirtualPath().ToString(), nullptr);
+		ContentBrowserUtils::SetPathColor(SelectedItem.GetInvariantPath().ToString(), TOptional<FLinearColor>());
 	}
 }
 
@@ -420,6 +467,11 @@ void FPathContextMenu::ExecuteSaveFolder()
 void FPathContextMenu::ExecuteResaveFolder()
 {
 	SaveFilesWithinSelectedFolders(EContentBrowserItemSaveFlags::None);
+}
+
+void FPathContextMenu::CopySelectedFolder()
+{
+	CopySelectedFoldersToClipoard();
 }
 
 void FPathContextMenu::SaveFilesWithinSelectedFolders(EContentBrowserItemSaveFlags InSaveFlags)
@@ -457,6 +509,11 @@ void FPathContextMenu::SaveFilesWithinSelectedFolders(EContentBrowserItemSaveFla
 	}
 }
 
+void FPathContextMenu::CopySelectedFoldersToClipoard()
+{
+	ContentBrowserUtils::CopyFolderReferencesToClipboard(SelectedFolders);
+}
+
 bool FPathContextMenu::CanExecuteDelete() const
 {
 	bool bCanDelete = false;
@@ -465,6 +522,23 @@ bool FPathContextMenu::CanExecuteDelete() const
 		bCanDelete |= SelectedItem.CanDelete();
 	}
 	return bCanDelete;
+}
+
+FText FPathContextMenu::GetDeleteToolTip() const
+{
+	FText ErrorMessage;
+	bool bCanDelete = false;
+	for (const FContentBrowserItem& SelectedItem : SelectedFolders)
+	{
+		bCanDelete |= SelectedItem.CanDelete(&ErrorMessage);
+	}
+
+	if (!bCanDelete && !ErrorMessage.IsEmpty())
+	{
+		return ErrorMessage;
+	}
+
+	return LOCTEXT("DeleteFolderTooltip", "Removes this folder and all assets it contains.");
 }
 
 void FPathContextMenu::ExecuteDelete()
@@ -540,11 +614,13 @@ bool FPathContextMenu::SelectedHasCustomColors() const
 {
 	for (const FContentBrowserItem& SelectedItem : SelectedFolders)
 	{
-		// Ignore any that are the default color
-		const TSharedPtr<FLinearColor> Color = ContentBrowserUtils::LoadColor(SelectedItem.GetVirtualPath().ToString());
-		if (Color.IsValid() && !Color->Equals(ContentBrowserUtils::GetDefaultColor()))
+		if (const TOptional<FLinearColor> Color = ContentBrowserUtils::GetPathColor(SelectedItem.GetInvariantPath().ToString()))
 		{
-			return true;
+			// Ignore any that are the default color, in case the user used the deprecated SaveColor with bForce
+			if (!Color->Equals(ContentBrowserUtils::GetDefaultColor()))
+			{
+				return true;
+			}
 		}
 	}
 	return false;

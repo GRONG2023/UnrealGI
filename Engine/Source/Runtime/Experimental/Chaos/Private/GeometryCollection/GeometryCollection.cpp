@@ -10,11 +10,22 @@
 #include "GeometryCollection/GeometryCollectionUtility.h"
 #include "GeometryCollection/GeometryCollectionProximityUtility.h"
 #include "GeometryCollection/GeometryCollectionClusteringUtility.h"
+#include "GeometryCollection/GeometryCollectionConvexUtility.h"
+#include "GeometryCollection/Facades/CollectionHierarchyFacade.h"
+#include "GeometryCollection/Facades/CollectionRenderingFacade.h"
+#include "UObject/FortniteSeasonBranchObjectVersion.h"
+#include "UObject/FortniteMainBranchObjectVersion.h"
 
 #include <iostream>
 #include <fstream>
 #include "Chaos/ChaosArchive.h"
 #include "Voronoi/Voronoi.h"
+
+bool bChaosGeometryCollectionEnableCollisionParticles = true;
+FAutoConsoleVariableRef CVarChaosGeometryCollectionEnableCollisionParticles(
+	TEXT("p.Chaos.GC.EnableCollisionParticles"),
+	bChaosGeometryCollectionEnableCollisionParticles,
+	TEXT("Enable use of collision particles for collision [def:true]"));
 
 DEFINE_LOG_CATEGORY_STATIC(FGeometryCollectionLogging, Log, All);
 
@@ -29,16 +40,72 @@ const FName FGeometryCollection::MaterialGroup = "Material";
 const FName FGeometryCollection::SimulatableParticlesAttribute("SimulatableParticlesAttribute");
 const FName FGeometryCollection::SimulationTypeAttribute("SimulationType");
 const FName FGeometryCollection::StatusFlagsAttribute("StatusFlags");
+const FName FGeometryCollection::ExternalCollisionsAttribute("ExternalCollisions");
 
-FGeometryCollection::FGeometryCollection()
+
+bool FGeometryCollection::AreCollisionParticlesEnabled()
+{
+	return bChaosGeometryCollectionEnableCollisionParticles;
+}
+
+
+FGeometryCollection::FGeometryCollection(FGeometryCollectionDefaults InDefaults)
 	: FTransformCollection()
+	, FGeometryCollectionConvexPropertiesInterface(this)
+	, FGeometryCollectionProximityPropertiesInterface(this)
+	, Defaults(InDefaults)
 {
 	Construct();
 }
 
+void FGeometryCollection::DefineGeometrySchema(FManagedArrayCollection& InCollection)
+{
+	FTransformCollection::DefineTransformSchema(InCollection);
+
+	FManagedArrayCollection::FConstructionParameters TransformDependency(FTransformCollection::TransformGroup);
+	FManagedArrayCollection::FConstructionParameters VerticesDependency(FGeometryCollection::VerticesGroup);
+	FManagedArrayCollection::FConstructionParameters FacesDependency(FGeometryCollection::FacesGroup);
+
+	// Transform Group
+	InCollection.AddAttribute<int32>("TransformToGeometryIndex", FTransformCollection::TransformGroup);
+	InCollection.AddAttribute<int32>("SimulationType", FTransformCollection::TransformGroup);
+	InCollection.AddAttribute<int32>("StatusFlags", FTransformCollection::TransformGroup);
+	InCollection.AddAttribute<int32>("InitialDynamicState", FTransformCollection::TransformGroup);
+	InCollection.AddAttribute<int32>("ExemplarIndex", FTransformCollection::TransformGroup);
+
+	// Vertices Group
+	InCollection.AddAttribute<FVector3f>("Vertex", FGeometryCollection::VerticesGroup);
+	InCollection.AddAttribute<FVector3f>("Normal", FGeometryCollection::VerticesGroup);
+	GeometryCollection::UV::DefineUVSchema(InCollection);
+	InCollection.AddAttribute<FLinearColor>("Color", FGeometryCollection::VerticesGroup);
+	InCollection.AddAttribute<FVector3f>("TangentU", FGeometryCollection::VerticesGroup);
+	InCollection.AddAttribute<FVector3f>("TangentV", FGeometryCollection::VerticesGroup);
+	InCollection.AddAttribute<int32>("BoneMap", FGeometryCollection::VerticesGroup, TransformDependency);
+
+	// Faces Group
+	InCollection.AddAttribute<FIntVector>("Indices", FGeometryCollection::FacesGroup, VerticesDependency);
+	InCollection.AddAttribute<bool>("Visible", FGeometryCollection::FacesGroup);
+	InCollection.AddAttribute<int32>("MaterialIndex", FGeometryCollection::FacesGroup);
+	InCollection.AddAttribute<int32>("MaterialID", FGeometryCollection::FacesGroup);
+
+	// Geometry Group
+	InCollection.AddAttribute<int32>("TransformIndex", FGeometryCollection::GeometryGroup, TransformDependency);
+	InCollection.AddAttribute<FBox>("BoundingBox", FGeometryCollection::GeometryGroup);
+	InCollection.AddAttribute<float>("InnerRadius", FGeometryCollection::GeometryGroup);
+	InCollection.AddAttribute<float>("OuterRadius", FGeometryCollection::GeometryGroup);
+	InCollection.AddAttribute<int32>("VertexStart", FGeometryCollection::GeometryGroup, VerticesDependency);
+	InCollection.AddAttribute<int32>("VertexCount", FGeometryCollection::GeometryGroup);
+	InCollection.AddAttribute<int32>("FaceStart", FGeometryCollection::GeometryGroup, FacesDependency);
+	InCollection.AddAttribute<int32>("FaceCount", FGeometryCollection::GeometryGroup);
+
+	// Material Group
+	InCollection.AddAttribute<FGeometryCollectionSection>("Sections", FGeometryCollection::MaterialGroup, FacesDependency);
+}
 
 void FGeometryCollection::Construct()
 {
+	Version = GetLatestVersionNumber();
+
 	FManagedArrayCollection::FConstructionParameters TransformDependency(FTransformCollection::TransformGroup);
 	FManagedArrayCollection::FConstructionParameters VerticesDependency(FGeometryCollection::VerticesGroup);
 	FManagedArrayCollection::FConstructionParameters FacesDependency(FGeometryCollection::FacesGroup);
@@ -48,21 +115,23 @@ void FGeometryCollection::Construct()
 	AddExternalAttribute<int32>("SimulationType", FTransformCollection::TransformGroup, SimulationType);
 	AddExternalAttribute<int32>("StatusFlags", FTransformCollection::TransformGroup, StatusFlags);
 	AddExternalAttribute<int32>("InitialDynamicState", FTransformCollection::TransformGroup, InitialDynamicState);
+	AddExternalAttribute<int32>("ExemplarIndex", FTransformCollection::TransformGroup, ExemplarIndex);
 
 	// Vertices Group
-	AddExternalAttribute<FVector>("Vertex", FGeometryCollection::VerticesGroup, Vertex);
-	AddExternalAttribute<FVector>("Normal", FGeometryCollection::VerticesGroup, Normal);
-	AddExternalAttribute<FVector2D>("UV", FGeometryCollection::VerticesGroup, UV);
+	AddExternalAttribute<FVector3f>("Vertex", FGeometryCollection::VerticesGroup, Vertex);
+	AddExternalAttribute<FVector3f>("Normal", FGeometryCollection::VerticesGroup, Normal);
 	AddExternalAttribute<FLinearColor>("Color", FGeometryCollection::VerticesGroup, Color);
-	AddExternalAttribute<FVector>("TangentU", FGeometryCollection::VerticesGroup, TangentU);
-	AddExternalAttribute<FVector>("TangentV", FGeometryCollection::VerticesGroup, TangentV);
+	AddExternalAttribute<FVector3f>("TangentU", FGeometryCollection::VerticesGroup, TangentU);
+	AddExternalAttribute<FVector3f>("TangentV", FGeometryCollection::VerticesGroup, TangentV);
 	AddExternalAttribute<int32>("BoneMap", FGeometryCollection::VerticesGroup, BoneMap, TransformDependency);
+	GeometryCollection::UV::DefineUVSchema(*this);
 
 	// Faces Group
 	AddExternalAttribute<FIntVector>("Indices", FGeometryCollection::FacesGroup, Indices, VerticesDependency);
 	AddExternalAttribute<bool>("Visible", FGeometryCollection::FacesGroup, Visible);
 	AddExternalAttribute<int32>("MaterialIndex", FGeometryCollection::FacesGroup, MaterialIndex);
 	AddExternalAttribute<int32>("MaterialID", FGeometryCollection::FacesGroup, MaterialID);
+	AddExternalAttribute<bool>("Internal", FGeometryCollection::FacesGroup, Internal);
 
 	// Geometry Group
 	AddExternalAttribute<int32>("TransformIndex", FGeometryCollection::GeometryGroup, TransformIndex, TransformDependency);
@@ -76,11 +145,14 @@ void FGeometryCollection::Construct()
 
 	// Material Group
 	AddExternalAttribute<FGeometryCollectionSection>("Sections", FGeometryCollection::MaterialGroup, Sections, FacesDependency);
-}
 
+	InitializeInterfaces();
+}
 
 void FGeometryCollection::SetDefaults(FName Group, uint32 StartSize, uint32 NumElements)
 {
+	Super::SetDefaults(Group, StartSize, NumElements);
+
 	if (Group == FTransformCollection::TransformGroup)
 	{
 		for (uint32 Idx = StartSize; Idx < StartSize + NumElements; ++Idx)
@@ -90,6 +162,16 @@ void FGeometryCollection::SetDefaults(FName Group, uint32 StartSize, uint32 NumE
 			SimulationType[Idx] = FGeometryCollection::ESimulationTypes::FST_None;
 			StatusFlags[Idx] = 0;
 			InitialDynamicState[Idx] = static_cast<int32>(Chaos::EObjectStateType::Uninitialized);
+			ExemplarIndex[Idx] = INDEX_NONE;
+		}
+
+		FGeometryCollectionConvexUtility::SetDefaults(this, Group, StartSize, NumElements);
+	}
+	else if (Group == FGeometryCollection::VerticesGroup)
+	{
+		for (uint32 Idx = StartSize; Idx < StartSize + NumElements; ++Idx)
+		{
+			Color[Idx] = Defaults.DefaultVertexColor;
 		}
 	}
 }
@@ -98,7 +180,10 @@ void FGeometryCollection::SetDefaults(FName Group, uint32 StartSize, uint32 NumE
 int32 FGeometryCollection::AppendGeometry(const FGeometryCollection & Element, int32 MaterialIDOffset, bool ReindexAllMaterials, const FTransform& TransformRoot)
 {
 	// until we support a transform hierarchy this is just one.
-	check(Element.NumElements(FGeometryCollection::TransformGroup) > 0);
+	if (Element.NumElements(FGeometryCollection::TransformGroup) == 0)
+	{
+		return INDEX_NONE;
+	}
 
 	int NumTransforms = NumElements(FTransformCollection::TransformGroup);
 	int NumNewTransforms = Element.NumElements(FTransformCollection::TransformGroup);
@@ -110,18 +195,18 @@ int32 FGeometryCollection::AppendGeometry(const FGeometryCollection & Element, i
 	check(Element.NumElements(FGeometryCollection::VerticesGroup) > 0);
 
 	int NumNewVertices = Element.NumElements(FGeometryCollection::VerticesGroup);
-	const TManagedArray<FVector>& ElementVertices = Element.Vertex;
-	const TManagedArray<FVector>& ElementNormals = Element.Normal;
-	const TManagedArray<FVector2D>& ElementUVs = Element.UV;
+	const TManagedArray<FVector3f>& ElementVertices = Element.Vertex;
+	const TManagedArray<FVector3f>& ElementNormals = Element.Normal;
 	const TManagedArray<FLinearColor>& ElementColors = Element.Color;
-	const TManagedArray<FVector>& ElementTangentUs = Element.TangentU;
-	const TManagedArray<FVector>& ElementTangentVs = Element.TangentV;
+	const TManagedArray<FVector3f>& ElementTangentUs = Element.TangentU;
+	const TManagedArray<FVector3f>& ElementTangentVs = Element.TangentV;
 	const TManagedArray<int32>& ElementBoneMap = Element.BoneMap;
 
 	const TManagedArray<FIntVector>& ElementIndices = Element.Indices;
 	const TManagedArray<bool>& ElementVisible = Element.Visible;
 	const TManagedArray<int32>& ElementMaterialIndex = Element.MaterialIndex;
 	const TManagedArray<int32>& ElementMaterialID = Element.MaterialID;
+	const TManagedArray<bool>& ElementInternal = Element.Internal;
 
 	const TManagedArray<int32>& ElementTransformIndex = Element.TransformIndex;
 	const TManagedArray<FBox>& ElementBoundingBox = Element.BoundingBox;
@@ -132,13 +217,13 @@ int32 FGeometryCollection::AppendGeometry(const FGeometryCollection & Element, i
 	const TManagedArray<int32>& ElementFaceStart = Element.FaceStart;
 	const TManagedArray<int32>& ElementFaceCount = Element.FaceCount;
 
-	const TManagedArray<FTransform>& ElementTransform = Element.Transform;
 	const TManagedArray<FString>& ElementBoneName = Element.BoneName;
 	const TManagedArray<FGeometryCollectionSection>& ElementSections = Element.Sections;
 
 	const TManagedArray<int32>& ElementSimulationType = Element.SimulationType;
 	const TManagedArray<int32>& ElementStatusFlags = Element.StatusFlags;
 	const TManagedArray<int32>& ElementInitialDynamicState = Element.InitialDynamicState;
+	const TManagedArray<int32>& ElementExemplarIndex = Element.ExemplarIndex;
 
 	// --- TRANSFORM ---
 	for (int TransformIdx = 0; TransformIdx < NumNewTransforms; TransformIdx++)
@@ -146,26 +231,39 @@ int32 FGeometryCollection::AppendGeometry(const FGeometryCollection & Element, i
 		SimulationType[TransformIdx + StartTransformIndex] = ElementSimulationType[TransformIdx];
 		StatusFlags[TransformIdx + StartTransformIndex] = ElementStatusFlags[TransformIdx];
 		InitialDynamicState[TransformIdx + StartTransformIndex] = ElementInitialDynamicState[TransformIdx];
+		ExemplarIndex[TransformIdx + StartTransformIndex] = ElementExemplarIndex[TransformIdx];
 	}
 
 	// --- VERTICES GROUP ---
 
 	int NumVertices = NumElements(FGeometryCollection::VerticesGroup);
 	int VerticesIndex = AddElements(NumNewVertices, FGeometryCollection::VerticesGroup);
-	TManagedArray<FVector>& Vertices = Vertex;
-	TManagedArray<FVector>& Normals = Normal;
-	TManagedArray<FVector2D>& UVs = UV;
+	TManagedArray<FVector3f>& Vertices = Vertex;
+	TManagedArray<FVector3f>& Normals = Normal;
 	TManagedArray<FLinearColor>& Colors = Color;
-	TManagedArray<FVector>& TangentUs = TangentU;
-	TManagedArray<FVector>& TangentVs = TangentV;
+	TManagedArray<FVector3f>& TangentUs = TangentU;
+	TManagedArray<FVector3f>& TangentVs = TangentV;
 	TManagedArray<int32>& BoneMaps = BoneMap;
 	TManagedArray<FIntVector>& FaceIndices = Indices;
+
+	// Make sure we have enough UV layers to copy all the Element's UVs
+	int32 ExistingUVLayers = NumUVLayers();
+	int32 ElementUVLayers = Element.NumUVLayers();
+	if (ElementUVLayers > ExistingUVLayers)
+	{
+		SetNumUVLayers(ElementUVLayers);
+	}
 
 	for (int vdx = 0; vdx < NumNewVertices; vdx++)
 	{
 		Vertices[VerticesIndex + vdx] = ElementVertices[vdx];
 		Normals[VerticesIndex + vdx] = ElementNormals[vdx];
-		UVs[VerticesIndex + vdx] = ElementUVs[vdx];
+		
+		for (int UVLayerIndex = 0; UVLayerIndex < ElementUVLayers; UVLayerIndex++)
+		{
+			ModifyUV(VerticesIndex + vdx, UVLayerIndex) = Element.GetUV(vdx, UVLayerIndex);
+		}
+
 		Colors[VerticesIndex + vdx] = ElementColors[vdx];
 		TangentUs[VerticesIndex + vdx] = ElementTangentUs[vdx];
 		TangentVs[VerticesIndex + vdx] = ElementTangentVs[vdx];
@@ -182,6 +280,7 @@ int32 FGeometryCollection::AppendGeometry(const FGeometryCollection & Element, i
 	{
 		Indices[IndicesIndex + tdx] = FIntVector(VerticesIndex, VerticesIndex, VerticesIndex) + ElementIndices[tdx];
 		Visible[IndicesIndex + tdx] = ElementVisible[tdx];
+		Internal[IndicesIndex + tdx] = ElementInternal[tdx];
 		MaterialIndex[IndicesIndex + tdx] = ElementMaterialIndex[tdx];
 		// MaterialIDs need to be incremented
 		MaterialID[IndicesIndex + tdx] = MaterialIDOffset + ElementMaterialID[tdx];	
@@ -205,7 +304,6 @@ int32 FGeometryCollection::AppendGeometry(const FGeometryCollection & Element, i
 			VertexCount[GeometryIndex + tdx] = ElementVertexCount[tdx];
 			TransformIndex[GeometryIndex + tdx] = BoneMaps[VertexStart[GeometryIndex + tdx]];
 			TransformToGeometryIndex[TransformIndex[GeometryIndex + tdx]] = GeometryIndex + tdx;
-
 		}
 	}
 	else // Element input failed to create a geometry group
@@ -223,17 +321,21 @@ int32 FGeometryCollection::AppendGeometry(const FGeometryCollection & Element, i
 		// Bounding Box
 		for (int vdx = VerticesIndex; vdx < VerticesIndex+NumNewVertices; vdx++)
 		{
-			BoundingBox[GeometryIndex] += Vertices[vdx];
+			BoundingBox[GeometryIndex] += FVector(Vertices[vdx]);
 		}
 
 		// Find average particle
 		// @todo (CenterOfMass) : This need to be the center of mass instead
-		FVector Center(0);
+		FVector3f Center(0);
 		for (int vdx = VerticesIndex; vdx <  VerticesIndex + NumNewVertices; vdx++)
 		{
 			Center += Vertices[vdx];
 		}
-		if (NumNewVertices) Center /= NumNewVertices;
+
+		if(NumNewVertices)
+		{
+			Center /= static_cast<float>(NumNewVertices);
+		}
 
 		//
 		//  Inner/Outer Radius
@@ -258,12 +360,12 @@ int32 FGeometryCollection::AppendGeometry(const FGeometryCollection & Element, i
 			// Inner/Outer centroid
 			for (int fdx = IndicesIndex; fdx < IndicesIndex+NumNewIndices; fdx++)
 			{
-				FVector Centroid(0);
+				FVector3f Centroid(0);
 				for (int e = 0; e < 3; e++)
 				{
 					Centroid += Vertices[FaceIndices[fdx][e]];
 				}
-				Centroid /= 3;
+				Centroid /= 3.0f;
 
 				float Delta = (Center - Centroid).Size();
 				InnerR[GeometryIndex] = FMath::Min(InnerR[GeometryIndex], Delta);
@@ -276,7 +378,7 @@ int32 FGeometryCollection::AppendGeometry(const FGeometryCollection & Element, i
 				for (int e = 0; e < 3; e++)
 				{
 					int i = e, j = (e + 1) % 3;
-					FVector Edge = Vertices[FaceIndices[fdx][i]] + 0.5*(Vertices[FaceIndices[fdx][j]] - Vertices[FaceIndices[fdx][i]]);
+					FVector3f Edge = Vertices[FaceIndices[fdx][i]] + 0.5*(Vertices[FaceIndices[fdx][j]] - Vertices[FaceIndices[fdx][i]]);
 					float Delta = (Center - Edge).Size();
 					InnerR[GeometryIndex] = FMath::Min(InnerR[GeometryIndex], Delta);
 					OuterR[GeometryIndex] = FMath::Max(OuterR[GeometryIndex], Delta);
@@ -296,28 +398,93 @@ int32 FGeometryCollection::AppendGeometry(const FGeometryCollection & Element, i
 	return StartTransformIndex;
 }
 
+bool FGeometryCollection::AppendEmbeddedInstance(int32 InExemplarIndex, int32 InParentIndex, const FTransform& InTransform)
+{
+	if (InParentIndex == INDEX_NONE || InParentIndex >= NumElements(FGeometryCollection::TransformGroup))
+	{
+		return false;
+	}
+
+	// add a new embedded instance
+	int32 Element = AddElements(1, FGeometryCollection::TransformGroup);
+	Transform[Element] = FTransform3f(InTransform);
+	Parent[Element] = InParentIndex;
+	Children[InParentIndex].Add(Element);
+	SimulationType[Element] = FST_None;
+	ExemplarIndex[Element] = InExemplarIndex;
+	TransformToGeometryIndex[Element] = INDEX_NONE;
+
+	return true;
+}
+
+
+void FGeometryCollection::ReindexExemplarIndices(TArray<int32>& SortedRemovedIndices)
+{
+	for (int32 Index = 0; Index < NumElements(TransformGroup); ++Index)
+	{
+		if (ExemplarIndex[Index] > INDEX_NONE)
+		{
+			for (int32 RemovalIndex = SortedRemovedIndices.Num()-1; RemovalIndex >= 0; --RemovalIndex)
+			{
+				if (ExemplarIndex[Index] == SortedRemovedIndices[RemovalIndex])
+				{
+					ExemplarIndex[Index] = INDEX_NONE;
+					break;
+				}
+				else if (ExemplarIndex[Index] > SortedRemovedIndices[RemovalIndex])
+				{
+					ExemplarIndex[Index] -= (RemovalIndex + 1);
+					break;
+				}
+			}
+		}
+	}
+}
+
+
 // Input assumes that each face has a materialID that corresponds with a render material
 // This will rebuild all mesh sections
 void FGeometryCollection::ReindexMaterials()
 {
+	FGeometryCollection::ReindexMaterials(*this);
+}
+
+void FGeometryCollection::ReindexMaterials(FManagedArrayCollection& InCollection)
+{
+
+	if (!InCollection.HasAttribute("MaterialID", FGeometryCollection::FacesGroup) ||
+		!InCollection.HasAttribute("Sections", FGeometryCollection::MaterialGroup) ||
+		!InCollection.HasAttribute("MaterialIndex", FGeometryCollection::FacesGroup))
+	{
+		return;
+	}
+
+	TManagedArray<int32>& MaterialID = InCollection.ModifyAttribute<int32>("MaterialID", FGeometryCollection::FacesGroup);
+	TManagedArray<FGeometryCollectionSection>& Sections = InCollection.ModifyAttribute<FGeometryCollectionSection>("Sections", FGeometryCollection::MaterialGroup);
+	TManagedArray<int32>& MaterialIndex = InCollection.ModifyAttribute<int32>("MaterialIndex", FGeometryCollection::FacesGroup);
+
+	FManagedArrayCollection::FProcessingParameters ProcessingParams;
+	ProcessingParams.bDoValidation = false; // disable validation as this can be very costly ( only in editor )
+
 	// clear all sections	
 	TArray<int32> DelSections;
-	GeometryCollectionAlgo::ContiguousArray(DelSections, NumElements(FGeometryCollection::MaterialGroup));
-	Super::RemoveElements(FGeometryCollection::MaterialGroup, DelSections);
+	GeometryCollectionAlgo::ContiguousArray(DelSections, InCollection.NumElements(FGeometryCollection::MaterialGroup));
+	InCollection.RemoveElements(FGeometryCollection::MaterialGroup, DelSections, ProcessingParams);
 	DelSections.Reset(0);
 
 
 	// rebuild sections		
 
 	// count the number of triangles for each material section, adding a new section if the material ID is higher than the current number of sections
-	for (int FaceElement = 0, nf = NumElements(FGeometryCollection::FacesGroup) ; FaceElement < nf ; ++FaceElement)
+	
+	for (int FaceElement = 0, nf = InCollection.NumElements(FGeometryCollection::FacesGroup); FaceElement < nf ; ++FaceElement)
 	{
 		int32 Section = MaterialID[FaceElement];
 
-		while (Section + 1 > NumElements(FGeometryCollection::MaterialGroup))
+		while (Section + 1 > InCollection.NumElements(FGeometryCollection::MaterialGroup))
 		{
 			// add a new material section
-			int32 Element = AddElements(1, FGeometryCollection::MaterialGroup);
+			int32 Element = InCollection.AddElements(1, FGeometryCollection::MaterialGroup);
 
 			Sections[Element].MaterialID = Element;
 			Sections[Element].FirstIndex = -1;
@@ -330,7 +497,7 @@ void FGeometryCollection::ReindexMaterials()
 	}
 
 	// fixup the section FirstIndex and MaxVertexIndex
-	for (int SectionElement = 0; SectionElement < NumElements(FGeometryCollection::MaterialGroup); SectionElement++)
+	for (int SectionElement = 0; SectionElement < InCollection.NumElements(FGeometryCollection::MaterialGroup); SectionElement++)
 	{
 		if (SectionElement == 0)
 		{
@@ -343,7 +510,7 @@ void FGeometryCollection::ReindexMaterials()
 			Sections[SectionElement].FirstIndex = Sections[SectionElement - 1].FirstIndex + Sections[SectionElement - 1].NumTriangles * 3;
 		}
 
-		Sections[SectionElement].MaxVertexIndex = NumElements(FGeometryCollection::VerticesGroup) - 1;
+		Sections[SectionElement].MaxVertexIndex = InCollection.NumElements(FGeometryCollection::VerticesGroup) - 1;
 
 		// if a material group no longer has any triangles in it then add material section for removal
 		if (Sections[SectionElement].NumTriangles == 0)
@@ -353,97 +520,39 @@ void FGeometryCollection::ReindexMaterials()
 	}
 
 	// remap indices so the materials appear to be grouped
-	int Idx = 0;
-	for (int Section=0; Section < NumElements(FGeometryCollection::MaterialGroup); Section++)
+	const int32 NumSections = InCollection.NumElements(FGeometryCollection::MaterialGroup);
+	const int32 NumFaceElements = InCollection.NumElements(FGeometryCollection::FacesGroup);
+
+	// since we know the number of triangles per section we can precompute the start offset of each sections 
+	// this avoid nested loop that result in N * M operations (N=sections M=faces) and we can process it in (N + M) operations instead 
+	TArray<int32> OffsetPerSection;
+	OffsetPerSection.AddUninitialized(NumSections);
+	int32 SectionOffset = 0;
+	for (int Section = 0; Section < NumSections; Section++)
 	{
-		for (int FaceElement = 0; FaceElement < NumElements(FGeometryCollection::FacesGroup); FaceElement++)
-		{
-			int32 ID = (MaterialID)[FaceElement];
-	
-			if (Section == ID)
-			{
-				(MaterialIndex)[Idx++] = FaceElement;
-			}
-		}
+		OffsetPerSection[Section] = SectionOffset;
+		SectionOffset += Sections[Section].NumTriangles;
+	}
+
+	for (int FaceElement = 0; FaceElement < NumFaceElements; FaceElement++)
+	{
+		const int32 SectionID = MaterialID[FaceElement];
+		int32& SectionOffsetRef = OffsetPerSection[SectionID];
+		//ensure(MaterialIndex[SectionOffsetRef] == FaceElement);
+		MaterialIndex[SectionOffsetRef++] = FaceElement;
 	}
 
 	// delete unused material sections
 	if (DelSections.Num())
 	{
-		Super::RemoveElements(FGeometryCollection::MaterialGroup, DelSections);
+		InCollection.RemoveElements(FGeometryCollection::MaterialGroup, DelSections, ProcessingParams);
 	}
 }
 
-TArray<FGeometryCollectionSection> FGeometryCollection::BuildMeshSections(const TArray<FIntVector> &InputIndices, TArray<int32> BaseMeshOriginalIndicesIndex, TArray<FIntVector> &RetIndices) const
-{	
+TArray<FGeometryCollectionSection> FGeometryCollection::BuildMeshSections(const TArray<FIntVector>& InputIndices, const TArray<int32>& BaseMeshOriginalIndicesIndex, TArray<FIntVector>& RetIndices) const
+{
 
-	TArray<FGeometryCollectionSection> TmpSections;
-	TArray<FGeometryCollectionSection> RetSections;		
-
-	// count the number of triangles for each material section, adding a new section if the material ID is higher than the current number of sections
-	for (int FaceElement = 0; FaceElement < InputIndices.Num(); ++FaceElement)
-	{
-		int32 Section = MaterialID[BaseMeshOriginalIndicesIndex[FaceElement]];		
-
-		while (Section + 1 > TmpSections.Num())
-		{
-			// add a new material section
-			int32 Element = TmpSections.AddZeroed();
-
-			TmpSections[Element].MaterialID = Element;
-			TmpSections[Element].FirstIndex = -1;
-			TmpSections[Element].NumTriangles = 0;
-			TmpSections[Element].MinVertexIndex = 0;
-			TmpSections[Element].MaxVertexIndex = 0;
-		}
-
-		TmpSections[Section].NumTriangles++;
-	}
-
-	// fixup the section FirstIndex and MaxVertexIndex
-	for (int SectionElement = 0; SectionElement < TmpSections.Num(); SectionElement++)
-	{
-		if (SectionElement == 0)
-		{
-			TmpSections[SectionElement].FirstIndex = 0;
-		}
-		else
-		{
-			// Each subsequent section has an index that starts after the last one
-			// note the NumTriangles*3 - this is because indices are sent to the renderer in a flat array
-			TmpSections[SectionElement].FirstIndex = TmpSections[SectionElement - 1].FirstIndex + TmpSections[SectionElement - 1].NumTriangles * 3;
-		}
-
-		TmpSections[SectionElement].MaxVertexIndex = NumElements(FGeometryCollection::VerticesGroup) - 1;
-	}
-
-	// remap indices so the materials appear to be grouped
-	RetIndices.AddUninitialized(InputIndices.Num());
-	int Idx = 0;
-	for (int Section = 0; Section < TmpSections.Num(); Section++)
-	{
-		for (int FaceElement = 0; FaceElement < InputIndices.Num(); FaceElement++)
-		{
-			int32 ID = (MaterialID)[BaseMeshOriginalIndicesIndex[FaceElement]];
-
-			if (Section == ID)
-			{
-				RetIndices[Idx++] = InputIndices[FaceElement];				
-			}
-		}
-	}
-
-	// if a material group no longer has any triangles in it then add material section for removal
-	RetSections.Reserve(TmpSections.Num());
-	for (int SectionElement = 0; SectionElement < TmpSections.Num(); SectionElement++)
-	{
-		if (TmpSections[SectionElement].NumTriangles > 0)
-		{
-			RetSections.Push(TmpSections[SectionElement]);
-		}
-	}
-
-	return MoveTemp(RetSections);
+	return FGeometryCollectionSection::BuildMeshSections(*this, InputIndices, BaseMeshOriginalIndicesIndex, RetIndices);
 }
 
 
@@ -468,6 +577,9 @@ void FGeometryCollection::RemoveElements(const FName & Group, const TArray<int32
 
 			RemoveGeometryElements(GeometryIndices);
 
+			// Find convex hulls connected to transform
+			FGeometryCollectionConvexUtility::RemoveConvexHulls(this, SortedDeletionList);
+
 			Super::RemoveElements(Group, SortedDeletionList);
 		}
 		else if (Group == FGeometryCollection::GeometryGroup)
@@ -476,11 +588,13 @@ void FGeometryCollection::RemoveElements(const FName & Group, const TArray<int32
 		}
 		else if( Group == FGeometryCollection::FacesGroup)
 		{
+			BuildFaceToGeometryMapping();
 			Super::RemoveElements(Group, SortedDeletionList);
 			UpdateFaceGroupElements();
 		}
 		else if (Group == FGeometryCollection::VerticesGroup)
 		{
+			BuildVertexToGeometryMapping();
 			Super::RemoveElements(Group, SortedDeletionList);
 			UpdateVerticesGroupElements();
 		}
@@ -569,8 +683,14 @@ void FGeometryCollection::RemoveGeometryElements(const TArray<int32>& SortedGeom
 			int32 GeoIndex = SortedGeometryIndicesToDelete[DeleteIdx];
 			for (int Idx = 0; Idx < TransformToGeometryIndex.Num(); Idx++)
 			{
-				if (TransformToGeometryIndex[Idx] >= GeoIndex)
+				if (TransformToGeometryIndex[Idx] > GeoIndex)
+				{
 					TransformToGeometryIndex[Idx]--;
+				}
+				else if (TransformToGeometryIndex[Idx] == GeoIndex)
+				{
+					TransformToGeometryIndex[Idx] = INDEX_NONE;
+				}
 			}
 
 		}
@@ -585,6 +705,21 @@ void FGeometryCollection::Empty()
 	{
 		EmptyGroup(GroupName);
 	}
+	// re-initialize interfaces
+	InitializeInterfaces();
+	SetNumUVLayers(1);
+}
+
+void FGeometryCollection::Reset()
+{
+	Super::Reset();
+	Construct();
+}
+
+void FGeometryCollection::InitializeInterfaces()
+{
+	FGeometryCollectionConvexPropertiesInterface::InitializeInterface();
+	FGeometryCollectionProximityPropertiesInterface::InitializeInterface();
 }
 
 void FGeometryCollection::ReorderElements(FName Group, const TArray<int32>& NewOrder)
@@ -703,56 +838,105 @@ void FGeometryCollection::ReorderGeometryElements(const TArray<int32>& NewOrder)
 	Super::ReorderElements(GeometryGroup, NewOrder);
 }
 
+bool FGeometryCollection::BuildVertexToGeometryMapping(bool InSaved )
+{
+	bool AttributeAdded = false;
+
+	if (!FindAttribute<int32>("VertexToGeometryIndex", VerticesGroup))
+	{
+		FConstructionParameters NotSaved = { FName(""), InSaved };
+		AddAttribute<int32>("VertexToGeometryIndex", VerticesGroup, NotSaved);
+		AttributeAdded = true;
+	}
+
+	TManagedArray<int32>* VertexGeometryMap = FindAttribute<int32>("VertexToGeometryIndex", VerticesGroup);
+	if (ensure(VertexGeometryMap))
+	{
+		for (int32 GeometryIndex = NumElements(GeometryGroup) - 1; GeometryIndex >= 0; GeometryIndex--)
+		{
+			int VertexEnd = VertexStart[GeometryIndex] + VertexCount[GeometryIndex];
+			for (int32 VertexIndex = VertexStart[GeometryIndex]; VertexIndex < VertexEnd; VertexIndex++)
+			{
+				(*VertexGeometryMap)[VertexIndex] = GeometryIndex;
+			}
+		}
+	}
+	return AttributeAdded;
+}
+
 void FGeometryCollection::UpdateVerticesGroupElements()
 {
 	//
 	//  Reset the VertexCount array
 	//
-	int32 NumberOfVertices = Vertex.Num();
-	for (int32 GeometryIndex = 0, ng = TransformIndex.Num(); GeometryIndex < ng; ++GeometryIndex)
-	{
-		int32 VertexIndex = VertexStart[GeometryIndex];
-		if (VertexIndex != INDEX_NONE)
+	TManagedArray<int32>* VertexGeometryMap = FindAttribute<int32>("VertexToGeometryIndex", VerticesGroup);
+	if(ensure(VertexGeometryMap))
+	{ 
+		for (int32 GeometryIndex = NumElements(FGeometryCollection::GeometryGroup) - 1; GeometryIndex >= 0; GeometryIndex--)
 		{
-			int32 StartBoneMapTransformValue = BoneMap[VertexIndex];
-			int32 CurrentBoneMapTransformValue = StartBoneMapTransformValue;
-			while ((CurrentBoneMapTransformValue == StartBoneMapTransformValue) && (++VertexIndex < NumberOfVertices))
-			{
-				CurrentBoneMapTransformValue = BoneMap[VertexIndex];
-			}
-			VertexCount[GeometryIndex] = VertexIndex - VertexStart[GeometryIndex];
-		}
-		else
-		{
+			VertexStart[GeometryIndex] = INT_MAX;
 			VertexCount[GeometryIndex] = 0;
 		}
+
+		for (int32 VertexIndex = NumElements(VerticesGroup) - 1; VertexIndex >= 0; VertexIndex--)
+		{
+			VertexStart[ (*VertexGeometryMap)[VertexIndex] ] = FMath::Min(VertexStart[ (*VertexGeometryMap)[VertexIndex] ], VertexIndex);
+			VertexCount[ (*VertexGeometryMap)[VertexIndex] ]++;
+		}
 	}
+
+	ensure(HasContiguousVertices());
+}
+
+bool FGeometryCollection::BuildFaceToGeometryMapping(bool InSaved)
+{
+	bool AttributeAdded = false;
+
+	if (!FindAttribute<int32>("FaceToGeometryIndex", FacesGroup))
+	{
+		FConstructionParameters NotSaved = { FName(""), InSaved };
+		AddAttribute<int32>("FaceToGeometryIndex", FacesGroup, NotSaved);
+		AttributeAdded = true;
+	}
+
+	TManagedArray<int32>* FaceGeometryMap = FindAttribute<int32>("FaceToGeometryIndex", FacesGroup);
+	if (ensure(FaceGeometryMap))
+	{
+		for (int32 GeometryIndex = NumElements(GeometryGroup) - 1; GeometryIndex >= 0; GeometryIndex--)
+		{
+			int FaceEnd = FaceStart[GeometryIndex] + FaceCount[GeometryIndex];
+			for (int32 FaceIndex = FaceStart[GeometryIndex]; FaceIndex < FaceEnd; FaceIndex++)
+			{
+				(*FaceGeometryMap)[FaceIndex] = GeometryIndex;
+			}
+		}
+	}
+	return AttributeAdded;
 }
 
 void FGeometryCollection::UpdateFaceGroupElements()
 {
 	//
-	//  Reset the FaceCount array
+	//  Reset the FaceCount and NumFaces array
 	//
-	int32 NumberOfFaces = Indices.Num();
-	for (int32 GeometryIndex = 0, ng = TransformIndex.Num(); GeometryIndex < ng; ++GeometryIndex)
+
+	TManagedArray<int32>* FaceGeometryMap = FindAttribute<int32>("FaceToGeometryIndex", FacesGroup);
+	if (ensure(FaceGeometryMap))
 	{
-		int32 FaceIndex = FaceStart[GeometryIndex];
-		if (FaceIndex != INDEX_NONE)
+		for (int32 GeometryIndex = NumElements(FGeometryCollection::GeometryGroup) - 1; GeometryIndex >= 0; GeometryIndex--)
 		{
-			int32 StartBoneMapTransformValue = BoneMap[Indices[FaceIndex][0]];
-			int32 CurrentBoneMapTransformValue = StartBoneMapTransformValue;
-			while ((CurrentBoneMapTransformValue == StartBoneMapTransformValue) && (++FaceIndex < NumberOfFaces))
-			{
-				CurrentBoneMapTransformValue = BoneMap[Indices[FaceIndex][0]];
-			}
-			FaceCount[GeometryIndex] = FaceIndex - FaceStart[GeometryIndex];
-		}
-		else
-		{
+			FaceStart[GeometryIndex] = INT_MAX;
 			FaceCount[GeometryIndex] = 0;
 		}
+
+		for (int32 FaceIndex = NumElements(FacesGroup) - 1; FaceIndex >= 0; FaceIndex--)
+		{
+			FaceStart[(*FaceGeometryMap)[FaceIndex]] = FMath::Min(FaceStart[(*FaceGeometryMap)[FaceIndex]], FaceIndex);
+			FaceCount[(*FaceGeometryMap)[FaceIndex]]++;
+		}
 	}
+
+	ensure(HasContiguousVertices());
 }
 
 
@@ -788,6 +972,25 @@ bool FGeometryCollection::HasVisibleGeometry() const
 
 void FGeometryCollection::UpdateBoundingBox()
 {
+	FGeometryCollection::UpdateBoundingBox(*this, /*bSkipCheck*/ true);
+}
+
+void FGeometryCollection::UpdateBoundingBox(FManagedArrayCollection& InCollection, bool bSkipCheck)
+{
+	if (!bSkipCheck && (
+		!InCollection.HasAttribute("BoundingBox", FGeometryCollection::GeometryGroup) ||
+		!InCollection.HasAttribute("Vertex", FGeometryCollection::VerticesGroup) ||
+		!InCollection.HasAttribute("BoneMap", FGeometryCollection::VerticesGroup) ||
+		!InCollection.HasAttribute("TransformToGeometryIndex", FTransformCollection::TransformGroup))) 
+	{
+		return;
+	}
+
+	TManagedArray<FBox>& BoundingBox = InCollection.ModifyAttribute<FBox>("BoundingBox", FGeometryCollection::GeometryGroup);
+	const TManagedArray<FVector3f>& Vertex = InCollection.GetAttribute<FVector3f>("Vertex", FGeometryCollection::VerticesGroup);
+	const TManagedArray<int32>& BoneMap = InCollection.GetAttribute<int32>("BoneMap", FGeometryCollection::VerticesGroup);
+	const TManagedArray<int32>& TransformToGeometryIndex = InCollection.GetAttribute<int32>("TransformToGeometryIndex", FTransformCollection::TransformGroup);
+
 	if (BoundingBox.Num())
 	{
 		// Initialize BoundingBox
@@ -796,26 +999,50 @@ void FGeometryCollection::UpdateBoundingBox()
 			BoundingBox[Idx].Init();
 		}
 
-		// Build reverse map between TransformIdx and index in the GeometryGroup
-		TMap<int32, int32> GeometryGroupIndexMap;
-		for (int32 Idx = 0; Idx < NumElements(FGeometryCollection::GeometryGroup); ++Idx)
-		{
-			GeometryGroupIndexMap.Add(TransformIndex[Idx], Idx);
-		}
 		// Compute BoundingBox
 		for (int32 Idx = 0; Idx < Vertex.Num(); ++Idx)
 		{
-			int32 TransformIndexValue = BoneMap[Idx];
-			BoundingBox[GeometryGroupIndexMap[TransformIndexValue]] += Vertex[Idx];
+			const int32 TransformIndexValue = BoneMap[Idx];
+			if (TransformIndexValue != INDEX_NONE)
+			{
+				const int32 GeometryIndex = TransformToGeometryIndex[TransformIndexValue];
+				if (GeometryIndex != INDEX_NONE)
+				{
+					BoundingBox[GeometryIndex] += FVector(Vertex[Idx]);
+				}
+			}
 		}
 	}
 }
 
+
+FBoxSphereBounds FGeometryCollection::GetBoundingBox() const 
+{
+	TArray<FTransform> GlobalTransformArray;
+	GeometryCollectionAlgo::GlobalMatrices(Transform, Parent, GlobalTransformArray);
+	FBox CombinedBounds(EForceInit::ForceInit);
+	for (int32 GeoIdx = 0; GeoIdx < NumElements(FGeometryCollection::GeometryGroup); ++GeoIdx)
+	{
+		int32 TransformIdx = TransformIndex[GeoIdx];
+		CombinedBounds += BoundingBox[GeoIdx].TransformBy(GlobalTransformArray[TransformIdx]);
+	}
+	FBoxSphereBounds CombinedBoxSphereBounds(CombinedBounds);
+	return CombinedBoxSphereBounds;
+}
+
+
 void FGeometryCollection::Serialize(Chaos::FChaosArchive& Ar)
 {
+	if (Ar.IsCooking())
+	{
+		FGeometryCollectionConvexPropertiesInterface::CleanInterfaceForCook();
+		FGeometryCollectionProximityPropertiesInterface::CleanInterfaceForCook();
+	}
+
+	Ar.UsingCustomVersion(FFortniteSeasonBranchObjectVersion::GUID);
+	Ar.UsingCustomVersion(FFortniteMainBranchObjectVersion::GUID);
+
 	Super::Serialize(Ar);
-
-
 
 	if (Ar.IsLoading())
 	{
@@ -858,10 +1085,10 @@ void FGeometryCollection::Serialize(Chaos::FChaosArchive& Ar)
 			FS_Clustered = 0x00000002,
 		};
 
-		TManagedArray<FGeometryCollectionBoneNode>* BoneHierarchyPtr = FindAttribute<FGeometryCollectionBoneNode>("BoneHierarchy", FTransformCollection::TransformGroup);
+		const TManagedArray<FGeometryCollectionBoneNode>* BoneHierarchyPtr = FindAttribute<FGeometryCollectionBoneNode>("BoneHierarchy", FTransformCollection::TransformGroup);
 		if (BoneHierarchyPtr)
 		{
-			TManagedArray<FGeometryCollectionBoneNode>& BoneHierarchy = *BoneHierarchyPtr;
+			const TManagedArray<FGeometryCollectionBoneNode>& BoneHierarchy = *BoneHierarchyPtr;
 
 			for (int Idx = 0; Idx < BoneHierarchy.Num(); Idx++)
 			{
@@ -869,7 +1096,7 @@ void FGeometryCollection::Serialize(Chaos::FChaosArchive& Ar)
 				{
 					AddAttribute<int32>("Level", FGeometryCollection::TransformGroup);
 				}
-				TManagedArray<int32>& Level = GetAttribute<int32>("Level", FGeometryCollection::TransformGroup);
+				TManagedArray<int32>& Level = ModifyAttribute<int32>("Level", FGeometryCollection::TransformGroup);
 				Level[Idx] = BoneHierarchy[Idx].Level;
 
 				SimulationType[Idx] = ESimulationTypes::FST_Rigid;
@@ -886,21 +1113,19 @@ void FGeometryCollection::Serialize(Chaos::FChaosArchive& Ar)
 			}
 		}
 
-		RemoveAttribute("ExplodedTransform", FTransformCollection::TransformGroup);
-		RemoveAttribute("ExplodedVector", FTransformCollection::TransformGroup);
+
 
 		// Version 5 introduced accurate SimulationType tagging
 		if (Version < 5)
 		{
-			UE_LOG(FGeometryCollectionLogging, Warning, TEXT("GeometryCollection is has inaccurate simulation type tags. Updating tags based on transform topology."));
-			TManagedArray<bool>* SimulatableParticles = FindAttribute<bool>(FGeometryCollection::SimulatableParticlesAttribute, FTransformCollection::TransformGroup);
+			UE_LOG(FGeometryCollectionLogging, Log, TEXT("GeometryCollection has inaccurate simulation type tags. Updating tags based on transform topology."));
+			const TManagedArray<bool>* SimulatableParticles = FindAttribute<bool>(FGeometryCollection::SimulatableParticlesAttribute, FTransformCollection::TransformGroup);
 			TArray<bool> RigidChildren; RigidChildren.Init(false,NumElements(FTransformCollection::TransformGroup));
 			const TArray<int32> RecursiveOrder = GeometryCollectionAlgo::ComputeRecursiveOrder(*this);
 			for (const int32 TransformGroupIndex : RecursiveOrder)
 			{
-				//SimulationType[TransformGroupIndex] = ESimulationTypes::FST_None;
-				SimulationType[TransformGroupIndex] = ESimulationTypes::FST_Rigid;
-				
+				SimulationType[TransformGroupIndex] = ESimulationTypes::FST_None;
+
 				if(!Children[TransformGroupIndex].Num())
 				{ // leaf nodes
 					if (TransformToGeometryIndex[TransformGroupIndex] > INDEX_NONE)
@@ -930,14 +1155,254 @@ void FGeometryCollection::Serialize(Chaos::FChaosArchive& Ar)
 				{
 					RigidChildren[Parent[TransformGroupIndex]] = true;
 				}
-
 			}
-			
+
 			// Structure is conditioned, now considered up to date.
 			Version = 5;
 		}
 
+		// Version 6 introduced the Exemplar Index array
+		if (Version < 6)
+		{
+			ExemplarIndex.Fill(INDEX_NONE);
+
+			// Structure is conditioned, now considered up to date.
+			Version = 6;
+		}
+
+		if (Version < 7)
+		{
+			if (HasAttribute("TransformToConvexIndex", FTransformCollection::TransformGroup))
+			{
+				TManagedArray<int32> TransformToConvexIndex = MoveTemp(ModifyAttribute<int32>("TransformToConvexIndex", FTransformCollection::TransformGroup));
+				RemoveAttribute("TransformToConvexIndex", FTransformCollection::TransformGroup);
+				// if we don't already have the one-to-many version, convert the previous one-to-one mapping to the new format
+				if (!HasAttribute("TransformToConvexIndices", FTransformCollection::TransformGroup))
+				{
+					FManagedArrayCollection::FConstructionParameters ConvexDependency(FGeometryCollection::ConvexGroup);
+					TManagedArray<TSet<int32>>& IndexSets = AddAttribute<TSet<int32>>("TransformToConvexIndices", FTransformCollection::TransformGroup, ConvexDependency);
+					for (int32 TransformIdx = 0; TransformIdx < TransformToConvexIndex.Num(); TransformIdx++)
+					{
+						int32 ConvexIdx = TransformToConvexIndex[TransformIdx];
+						if (ConvexIdx != INDEX_NONE)
+						{
+							IndexSets[TransformIdx].Add(ConvexIdx);
+						}
+					}
+				}
+			}
+			Version = 7;
+		}
+
+		// Version 8 introduced multiple UVs.
+		if (Version < 8)
+		{
+			if (!HasAttribute("UVs", FGeometryCollection::VerticesGroup))
+			{
+				// Note: As UVs is an external attribute that is always added by Construct, this should never be encountered
+				UE_LOG(FGeometryCollectionLogging, Log, TEXT("GeometryCollection updated to multiple UV sets."));
+				AddAttribute<TArray<FVector2f>>("UVs", FGeometryCollection::VerticesGroup);
+			}
+
+			TManagedArray<TArray<FVector2f>>& MultipleUVs = ModifyAttribute<TArray<FVector2f>>("UVs", FGeometryCollection::VerticesGroup);
+			int32 MinUVLayers = 8;
+			for (int32 VertIdx = 0; VertIdx < MultipleUVs.Num(); ++VertIdx)
+			{
+				MinUVLayers = FMath::Min(MultipleUVs[VertIdx].Num(), MinUVLayers);
+			}
+			if (MinUVLayers < 1)
+			{
+				for (int32 VertIdx = 0; VertIdx < MultipleUVs.Num(); ++VertIdx)
+				{
+					MultipleUVs[VertIdx].SetNum(1);
+				}
+			}
+
+			if (const TManagedArray<FVector2f>* SingleUV = FindAttribute<FVector2f>("UV", FGeometryCollection::VerticesGroup))
+			{
+				for (int32 VertIdx = 0; VertIdx < MultipleUVs.Num(); ++VertIdx)
+				{
+					if (SingleUV)
+					{
+						MultipleUVs[VertIdx][0] = (*SingleUV)[VertIdx];
+					}
+				}
+
+				RemoveAttribute("UV", FGeometryCollection::VerticesGroup);
+			}
+
+			// Structure is conditioned, now considered up to date.
+			Version = 8;
+		}
+
+		// Version 9 fixed fully-invisible geometry and invalid exemplars left in the hierarchy (artifacts from old fracture + the Version 5 change)
+		if (Version < 9)
+		{
+			auto HasVisibleFaces = [this](int32 TransformGroupIndex) -> bool
+			{
+				int32 GeometryIndex = TransformToGeometryIndex[TransformGroupIndex];
+				if (GeometryIndex == INDEX_NONE)
+				{
+					return false;
+				}
+				int32 Start = FaceStart[GeometryIndex], Count = FaceCount[GeometryIndex];
+				for (int32 FaceIndex = Start; FaceIndex < Start + Count; FaceIndex++)
+				{
+					if (Visible[FaceIndex])
+					{
+						return true;
+					}
+				}
+				return false;
+			};
+		
+			TArray<int32> InvalidTransforms, InvalidGeometry;
+			TArray<bool> RigidChildren; RigidChildren.Init(false, NumElements(FTransformCollection::TransformGroup));
+			const TArray<int32> RecursiveOrder = GeometryCollectionAlgo::ComputeRecursiveOrder(*this);
+			for (const int32 TransformGroupIndex : RecursiveOrder)
+			{
+				bool bHasExemplar = ExemplarIndex[TransformGroupIndex] > INDEX_NONE;
+				bool bHasGeometry = HasVisibleFaces(TransformGroupIndex);
+				bool bHasRigidChildren = RigidChildren[TransformGroupIndex];
+				bool bKeep = true;
+				if (SimulationType[TransformGroupIndex] == ESimulationTypes::FST_None && !bHasExemplar) // handle exemplars with no exemplar (remove or convert to rigid)
+				{
+					if (bHasGeometry)
+					{
+						SimulationType[TransformGroupIndex] = ESimulationTypes::FST_Rigid;
+					}
+					else
+					{
+						InvalidTransforms.Add(TransformGroupIndex);
+						bKeep = false;
+					}
+				}
+				else if (SimulationType[TransformGroupIndex] == ESimulationTypes::FST_Rigid ) // handle internal rigids
+				{
+					if (bHasRigidChildren)
+					{
+						SimulationType[TransformGroupIndex] = ESimulationTypes::FST_Clustered;
+					}
+				}
+				if (bKeep && SimulationType[TransformGroupIndex] != ESimulationTypes::FST_None && Parent[TransformGroupIndex] != INDEX_NONE)
+				{
+					RigidChildren[Parent[TransformGroupIndex]] = true;
+				}
+			}
+			if (InvalidGeometry.Num() > 0)
+			{
+				UE_LOG(FGeometryCollectionLogging, Log, TEXT("Removing %d invalid, fully-invisible geometries from geometry collection."), InvalidGeometry.Num());
+				InvalidGeometry.Sort();
+				RemoveElements(GeometryGroup, InvalidGeometry);
+			}
+			if (InvalidTransforms.Num() > 0)
+			{
+				UE_LOG(FGeometryCollectionLogging, Log, TEXT("Removing %d invalid, empty transforms from geometry collection."), InvalidTransforms.Num());
+				InvalidTransforms.Sort();
+				RemoveElements(TransformGroup, InvalidTransforms);
+			}
+			
+			Version = 9;
+		}
+
+		Chaos::Facades::FCollectionHierarchyFacade HierarchyFacade(*this);
+		if (Ar.CustomVer(FFortniteSeasonBranchObjectVersion::GUID) < FFortniteSeasonBranchObjectVersion::ChaosGeometryCollectionSaveLevelsAttribute
+			|| !HierarchyFacade.HasLevelAttribute()
+			|| !HierarchyFacade.IsLevelAttributePersistent()
+			)
+		{
+			// Level attribute previously serialized with bSave = false, so was not serializing level data.
+			// We now compute this during cook and need to serialize, so convert attribute to bSave = true
+			// this is handled by the facade 
+			HierarchyFacade.GenerateLevelAttribute();
+		}
+
+		if (Version < 10)
+		{
+			if (!HasAttribute(GeometryCollection::UV::UVLayerNames[0], VerticesGroup) || HasAttribute("UVs", VerticesGroup))
+			{
+				TManagedArray<TArray<FVector2f>>* OrigUVs = FindAttributeTyped<TArray<FVector2f>>("UVs", VerticesGroup);
+				if (OrigUVs)
+				{
+					// Note: We take the max of the num layers because in practice there have been some vertices with inconsistent layer counts
+					// and it seems better to transfer all the data (with missing data left as zeros) than to potentially lose data
+					int32 NumLayers = 1;
+					for (int32 Idx = 0; Idx < OrigUVs->Num(); ++Idx)
+					{
+						NumLayers = FMath::Max((*OrigUVs)[Idx].Num(), NumLayers);
+					}
+					NumLayers = FMath::Min((int32)GeometryCollectionUV::MAX_NUM_UV_CHANNELS, NumLayers); // make sure we never exceed max layers
+					SetNumUVLayers(NumLayers);
+
+					for (int32 Idx = 0; Idx < OrigUVs->Num(); ++Idx)
+					{
+						TArray<FVector2f>& VertexLayers = (*OrigUVs)[Idx];
+						int32 NumVertexLayers = FMath::Min(VertexLayers.Num(), NumLayers);
+						for (int32 LayerIdx = 0; LayerIdx < NumVertexLayers; ++LayerIdx)
+						{
+							ModifyUV(Idx, LayerIdx) = VertexLayers[LayerIdx];
+						}
+						for (int32 LayerIdx = NumVertexLayers; LayerIdx < NumLayers; ++LayerIdx)
+						{
+							ModifyUV(Idx, LayerIdx) = FVector2f(0, 0); // explicitly zero UVs of any missing layers
+						}
+					}
+
+					RemoveAttribute("UVs", VerticesGroup);
+				}
+				else
+				{
+					SetNumUVLayers(1);
+				}
+			}
+
+			Version = 10;
+		}
+
+		if (Ar.CustomVer(FFortniteMainBranchObjectVersion::GUID) < FFortniteMainBranchObjectVersion::ChaosGeometryCollectionInternalFacesAttribute)
+		{
+			if (!HasAttribute("Internal", FacesGroup))
+			{
+				AddExternalAttribute<bool>("Internal", FacesGroup, Internal);
+			}
+
+			for (int32 FaceIdx = 0; FaceIdx < MaterialID.Num(); ++FaceIdx)
+			{
+				Internal[FaceIdx] = bool(MaterialID[FaceIdx] & 1);
+			}
+		}
+
+		if (Ar.CustomVer(FFortniteMainBranchObjectVersion::GUID) < FFortniteMainBranchObjectVersion::ChaosGeometryCollectionConnectionEdgeGroup)
+		{
+			// Migrate old Connections TSet<int32> data to arrays of edge data
+			// Note we intentionally do *not* use the facade here, as the migration is specific to how the data is at the current moment, and the facade may change w/ future data changes.
+			if (TManagedArray<TSet<int32>>* Connections = FindAttribute<TSet<int32>>("Connections", TransformGroup))
+			{
+				const FName ConnectionGroupName = "ConnectionEdge";
+				AddGroup(ConnectionGroupName);
+				TManagedArray<int32>& Starts = AddAttribute<int32>("ConnectionEdgeStarts", ConnectionGroupName, FConstructionParameters(FTransformCollection::TransformGroup, true));
+				TManagedArray<int32>& Ends = AddAttribute<int32>("ConnectionEdgeEnds", ConnectionGroupName, FConstructionParameters(FTransformCollection::TransformGroup, true));
+				for (int32 TransformIdx = 0; TransformIdx < NumElements(TransformGroup); ++TransformIdx)
+				{
+					for (int32 NbrIdx : (*Connections)[TransformIdx])
+					{
+						if (TransformIdx < NbrIdx)
+						{
+							int32 EdgeIdx = AddElements(1, ConnectionGroupName);
+							Starts[EdgeIdx] = TransformIdx;
+							Ends[EdgeIdx] = NbrIdx;
+						}
+					}
+				}
+				RemoveAttribute("Connections", TransformGroup);
+			}
+		}
+
+		// Finally, make sure expected interfaces are initialized
+		InitializeInterfaces();
 	}
+
+	ensure(Version == GetLatestVersionNumber());
 }
 
 bool FGeometryCollection::HasContiguousVertices( ) const
@@ -1075,122 +1540,168 @@ bool FGeometryCollection::HasContiguousRenderFaces() const
 
 	return true;
 }
-FGeometryCollection* FGeometryCollection::NewGeometryCollection(const TArray<float>& RawVertexArray, const TArray<int32>& RawIndicesArray, bool ReverseVertexOrder)
+
+int32 FGeometryCollection::NumUVLayers() const
 {
+	return GeometryCollection::UV::GetNumUVLayers(*this);
+}
 
-	FGeometryCollection* RestCollection = new FGeometryCollection();
+bool FGeometryCollection::SetNumUVLayers(int32 NumLayers)
+{
+	return GeometryCollection::UV::SetNumUVLayers(*this, NumLayers);
+}
 
-	int NumNewVertices = RawVertexArray.Num() / 3;
-	int VerticesIndex = RestCollection->AddElements(NumNewVertices, FGeometryCollection::VerticesGroup);
-	
-	int NumNewIndices = RawIndicesArray.Num() / 3;
-	int IndicesIndex = RestCollection->AddElements(NumNewIndices, FGeometryCollection::FacesGroup);
-	
-	int NumNewParticles = 1; // 1 particle for this geometry structure
-	int ParticlesIndex = RestCollection->AddElements(NumNewParticles, FGeometryCollection::TransformGroup);
-
-	TManagedArray<FVector>& Vertices = RestCollection->Vertex;
-	TManagedArray<FVector>&  Normals = RestCollection->Normal;
-	TManagedArray<FVector>&  TangentU = RestCollection->TangentU;
-	TManagedArray<FVector>&  TangentV = RestCollection->TangentV;
-	TManagedArray<FVector2D>&  UVs = RestCollection->UV;
-	TManagedArray<FLinearColor>&  Colors = RestCollection->Color;
-	TManagedArray<FIntVector>&  Indices = RestCollection->Indices;
-	TManagedArray<bool>&  Visible = RestCollection->Visible;
-	TManagedArray<int32>&  MaterialID = RestCollection->MaterialID;
-	TManagedArray<int32>&  MaterialIndex = RestCollection->MaterialIndex;
-	TManagedArray<FTransform>&  Transform = RestCollection->Transform;
-
-	// set the vertex information
-	FVector TempVertices(0.f, 0.f, 0.f);
-	for (int32 Idx = 0; Idx < NumNewVertices; ++Idx)
+bool FGeometryCollection::IsVisible(int32 Element) const
+{
+	if (!IsRigid(Element))
 	{
-		Vertices[Idx] = FVector(RawVertexArray[3 * Idx], RawVertexArray[3 * Idx + 1], RawVertexArray[3 * Idx + 2]);
-		TempVertices += Vertices[Idx];
-
-		UVs[Idx] = FVector2D(0, 0);
-		Colors[Idx] = FLinearColor::White;
+		return false;
 	}
 
-	// set the particle information
-	TempVertices /= (float)NumNewVertices;
-	Transform[0] = FTransform(TempVertices);
-	Transform[0].NormalizeRotation();
-
-	// set the index information
-	TArray<FVector> FaceNormals;
-	FaceNormals.SetNum(NumNewIndices);
-	for (int32 Idx = 0; Idx < NumNewIndices; ++Idx)
+	if (TransformToGeometryIndex[Element] > INDEX_NONE)
 	{
-		int32 VertexIdx1, VertexIdx2, VertexIdx3;
-		if (!ReverseVertexOrder)
+		int32 CurrFace = FaceStart[TransformToGeometryIndex[Element]];
+		for (int32 FaceOffset = 0; FaceOffset < FaceCount[TransformToGeometryIndex[Element]]; ++FaceOffset)
 		{
-			VertexIdx1 = RawIndicesArray[3 * Idx];
-			VertexIdx2 = RawIndicesArray[3 * Idx + 1];
-			VertexIdx3 = RawIndicesArray[3 * Idx + 2];
-		}
-		else
-		{
-			VertexIdx1 = RawIndicesArray[3 * Idx];
-			VertexIdx2 = RawIndicesArray[3 * Idx + 2];
-			VertexIdx3 = RawIndicesArray[3 * Idx + 1];
-		}
-
-		Indices[Idx] = FIntVector(VertexIdx1, VertexIdx2, VertexIdx3);
-		Visible[Idx] = true;
-		MaterialID[Idx] = 0;
-		MaterialIndex[Idx] = Idx;
-
-		const FVector Edge1 = Vertices[VertexIdx1] - Vertices[VertexIdx2];
-		const FVector Edge2 = Vertices[VertexIdx1] - Vertices[VertexIdx3];
-		FaceNormals[Idx] = (Edge2 ^ Edge1).GetSafeNormal();
-	}
-
-	// Compute vertexNormals
-	TArray<FVector> VertexNormals;
-	VertexNormals.SetNum(NumNewVertices);
-	for (int32 Idx = 0; Idx < NumNewVertices; ++Idx)
-	{
-		VertexNormals[Idx] = FVector(0.f, 0.f, 0.f);
-	}
-
-	for (int32 Idx = 0; Idx < NumNewIndices; ++Idx)
-	{
-		VertexNormals[Indices[Idx][0]] += FaceNormals[Idx];
-		VertexNormals[Indices[Idx][1]] += FaceNormals[Idx];
-		VertexNormals[Indices[Idx][2]] += FaceNormals[Idx];
-	}
-
-	for (int32 Idx = 0; Idx < NumNewVertices; ++Idx)
-	{
-		Normals[Idx] = (VertexNormals[Idx] / 3.f).GetSafeNormal();
-	}
-
-	for (int IndexIdx = 0; IndexIdx < NumNewIndices; IndexIdx++)
-	{
-		FIntVector Tri = Indices[IndexIdx];
-		for (int idx = 0; idx < 3; idx++)
-		{
-			const FVector Normal = Normals[Tri[idx]];
-			const FVector Edge = (Vertices[Tri[(idx + 1) % 3]] - Vertices[Tri[idx]]);
-			TangentU[Tri[idx]] = (Edge ^ Normal).GetSafeNormal();
-			TangentV[Tri[idx]] = (Normal ^ TangentU[Tri[idx]]).GetSafeNormal();
+			if (Visible[CurrFace + FaceOffset])
+			{
+				return true;
+			}
 		}
 	}
 
-	// Build the Geometry Group
-	GeometryCollection::AddGeometryProperties(RestCollection);
+	return false;;
+}
 
-	// add a material section
-	TManagedArray<FGeometryCollectionSection>&  Sections = RestCollection->Sections;
-	int Element = RestCollection->AddElements(1, FGeometryCollection::MaterialGroup);
-	Sections[Element].MaterialID = 0;
-	Sections[Element].FirstIndex = 0;
-	Sections[Element].NumTriangles = Indices.Num();
-	Sections[Element].MinVertexIndex = 0;
-	Sections[Element].MaxVertexIndex = Vertices.Num() - 1;
+FGeometryCollection* FGeometryCollection::NewGeometryCollection(const TArray<float>& RawVertexArray, const TArray<int32>& RawIndicesArray, bool ReverseVertexOrder, const FGeometryCollectionDefaults RawDefaults)
+{
+	FGeometryCollection* Collection = new FGeometryCollection(RawDefaults);
+	FGeometryCollection::Init(Collection, RawVertexArray, RawIndicesArray, ReverseVertexOrder);
+	return Collection;
+}
 
-	return RestCollection;
+void FGeometryCollection::Init(FGeometryCollection* Collection, const TArray<float>& RawVertexArray, const TArray<int32>& RawIndicesArray, bool ReverseVertexOrder)
+{
+	if (Collection)
+	{
+		int NumNewVertices = RawVertexArray.Num() / 3;
+		int VerticesIndex = Collection->AddElements(NumNewVertices, FGeometryCollection::VerticesGroup);
+
+		int NumNewIndices = RawIndicesArray.Num() / 3;
+		int IndicesIndex = Collection->AddElements(NumNewIndices, FGeometryCollection::FacesGroup);
+
+		int NumNewParticles = 1; // 1 particle for this geometry structure
+		int ParticlesIndex = Collection->AddElements(NumNewParticles, FGeometryCollection::TransformGroup);
+
+		TManagedArray<FVector3f>& Vertices = Collection->Vertex;
+		TManagedArray<FVector3f>& Normals = Collection->Normal;
+		TManagedArray<FVector3f>& TangentU = Collection->TangentU;
+		TManagedArray<FVector3f>& TangentV = Collection->TangentV;
+		TManagedArray<FLinearColor>& Colors = Collection->Color;
+		TManagedArray<FIntVector>& Indices = Collection->Indices;
+		TManagedArray<bool>& Visible = Collection->Visible;
+		TManagedArray<int32>& MaterialID = Collection->MaterialID;
+		TManagedArray<int32>& MaterialIndex = Collection->MaterialIndex;
+		TManagedArray<bool>& Internal = Collection->Internal;
+		TManagedArray<FTransform3f>& Transform = Collection->Transform;
+		TManagedArray<int32>& BoneMap = Collection->BoneMap;
+		
+		Collection->SetNumUVLayers(1);
+
+		// set the vertex information
+		TManagedArray<FVector2f>* UV0 = Collection->FindUVLayer(0);
+		FVector3f TempVertices(0.f, 0.f, 0.f);
+		for (int32 Idx = 0; Idx < NumNewVertices; ++Idx)
+		{
+			Vertices[Idx] = FVector3f(RawVertexArray[3 * Idx], RawVertexArray[3 * Idx + 1], RawVertexArray[3 * Idx + 2]);
+			TempVertices += Vertices[Idx];
+			(*UV0)[Idx] = FVector2f::ZeroVector;
+
+			Colors[Idx] = Collection->Defaults.DefaultVertexColor;
+			BoneMap[Idx] = 0;
+		}
+
+		
+
+		// set the particle information
+		TempVertices /= (float)NumNewVertices;
+		Transform[0] = FTransform3f(TempVertices);
+		Transform[0].NormalizeRotation();
+
+		// set the index information
+		TArray<FVector3f> FaceNormals;
+		FaceNormals.SetNum(NumNewIndices);
+		for (int32 Idx = 0; Idx < NumNewIndices; ++Idx)
+		{
+			int32 VertexIdx1, VertexIdx2, VertexIdx3;
+			if (!ReverseVertexOrder)
+			{
+				VertexIdx1 = RawIndicesArray[3 * Idx];
+				VertexIdx2 = RawIndicesArray[3 * Idx + 1];
+				VertexIdx3 = RawIndicesArray[3 * Idx + 2];
+			}
+			else
+			{
+				VertexIdx1 = RawIndicesArray[3 * Idx];
+				VertexIdx2 = RawIndicesArray[3 * Idx + 2];
+				VertexIdx3 = RawIndicesArray[3 * Idx + 1];
+			}
+
+			Indices[Idx] = FIntVector(VertexIdx1, VertexIdx2, VertexIdx3);
+			Visible[Idx] = true;
+			Internal[Idx] = false;
+			MaterialID[Idx] = 0;
+			MaterialIndex[Idx] = Idx;
+
+			const FVector3f Edge1 = Vertices[VertexIdx1] - Vertices[VertexIdx2];
+			const FVector3f Edge2 = Vertices[VertexIdx1] - Vertices[VertexIdx3];
+			FaceNormals[Idx] = (Edge2 ^ Edge1).GetSafeNormal();
+		}
+
+		// Compute vertexNormals
+		TArray<FVector3f> VertexNormals;
+		VertexNormals.SetNum(NumNewVertices);
+		for (int32 Idx = 0; Idx < NumNewVertices; ++Idx)
+		{
+			VertexNormals[Idx] = FVector3f(0.f, 0.f, 0.f);
+		}
+
+		for (int32 Idx = 0; Idx < NumNewIndices; ++Idx)
+		{
+			VertexNormals[Indices[Idx][0]] += FaceNormals[Idx];
+			VertexNormals[Indices[Idx][1]] += FaceNormals[Idx];
+			VertexNormals[Indices[Idx][2]] += FaceNormals[Idx];
+		}
+
+		for (int32 Idx = 0; Idx < NumNewVertices; ++Idx)
+		{
+			Normals[Idx] = (VertexNormals[Idx] / 3.f).GetSafeNormal();
+		}
+
+		for (int IndexIdx = 0; IndexIdx < NumNewIndices; IndexIdx++)
+		{
+			FIntVector Tri = Indices[IndexIdx];
+			for (int idx = 0; idx < 3; idx++)
+			{
+				const FVector3f Normal = Normals[Tri[idx]];
+				const FVector3f Edge = (Vertices[Tri[(idx + 1) % 3]] - Vertices[Tri[idx]]);
+				TangentU[Tri[idx]] = (Edge ^ Normal).GetSafeNormal();
+				TangentV[Tri[idx]] = (Normal ^ TangentU[Tri[idx]]).GetSafeNormal();
+			}
+		}
+
+		// Build the Geometry Group
+		GeometryCollection::AddGeometryProperties(Collection);
+
+		// add a material section
+		TManagedArray<FGeometryCollectionSection>& Sections = Collection->Sections;
+		int Element = Collection->AddElements(1, FGeometryCollection::MaterialGroup);
+		Sections[Element].MaterialID = 0;
+		Sections[Element].FirstIndex = 0;
+		Sections[Element].NumTriangles = Indices.Num();
+		Sections[Element].MinVertexIndex = 0;
+		Sections[Element].MaxVertexIndex = Vertices.Num() - 1;
+	}
 }
 
 void FGeometryCollection::WriteDataToHeaderFile(const FString &Name, const FString &Path)
@@ -1223,7 +1734,7 @@ void FGeometryCollection::WriteDataToHeaderFile(const FString &Name, const FStri
 	DataFile << "const TArray<float> " << TCHAR_TO_UTF8(*Name) << "::RawVertexArray = {" << endl;
 
 	int32 NumVertices = NumElements(FGeometryCollection::VerticesGroup);
-	const TManagedArray<FVector>& VertexArray = Vertex;
+	const TManagedArray<FVector3f>& VertexArray = Vertex;
 	for (int32 IdxVertex = 0; IdxVertex < NumVertices; ++IdxVertex)
 	{
 		DataFile << "                                                    " <<
@@ -1256,12 +1767,12 @@ void FGeometryCollection::WriteDataToHeaderFile(const FString &Name, const FStri
 	DataFile << "const TArray<FTransform> " << TCHAR_TO_UTF8(*Name) << "::RawTransformArray = {" << endl;
 
 	int32 NumTransforms = NumElements(FGeometryCollection::TransformGroup);
-	const TManagedArray<FTransform>& TransformArray = Transform;
+	const TManagedArray<FTransform3f>& TransformArray = Transform;
 	for (int32 IdxTransform = 0; IdxTransform < NumTransforms; ++IdxTransform)
 	{
-		FQuat Rotation = TransformArray[IdxTransform].GetRotation();
-		FVector Translation = TransformArray[IdxTransform].GetTranslation();
-		FVector Scale3D = TransformArray[IdxTransform].GetScale3D();
+		FQuat4f Rotation = TransformArray[IdxTransform].GetRotation();
+		FVector3f Translation = TransformArray[IdxTransform].GetTranslation();
+		FVector3f Scale3D = TransformArray[IdxTransform].GetScale3D();
 
 		DataFile << "   FTransform(FQuat(" <<
 			Rotation.X << ", " <<
@@ -1306,13 +1817,13 @@ void FGeometryCollection::WriteDataToOBJFile(const FString &Name, const FString 
 	TArray<FTransform> GlobalTransformArray;
 	GeometryCollectionAlgo::GlobalMatrices(Transform, Parent, GlobalTransformArray);
 
-	TArray<FVector> VertexInWorldArray;
+	TArray<FVector3f> VertexInWorldArray;
 	VertexInWorldArray.SetNum(NumVertices);
 
 	for (int32 IdxVertex = 0; IdxVertex < NumVertices; ++IdxVertex)
 	{
 		FTransform LocalTransform = GlobalTransformArray[BoneMap[IdxVertex]];
-		FVector VertexInWorld = LocalTransform.TransformPosition(Vertex[IdxVertex]);
+		FVector3f VertexInWorld = (FVector3f)LocalTransform.TransformPosition((FVector)Vertex[IdxVertex]);
 
 		VertexInWorldArray[IdxVertex] = VertexInWorld;
 	}
@@ -1326,7 +1837,7 @@ void FGeometryCollection::WriteDataToOBJFile(const FString &Name, const FString 
 
 		DataFile.open(string(TCHAR_TO_UTF8(*FullPath)));
 
-		DataFile << "# File exported from UE4" << endl;
+		DataFile << "# File exported from Unreal Engine" << endl;
 		DataFile << "# " << NumVertices << " points" << endl;
 		DataFile << "# " << NumVertices * 3 << " vertices" << endl;
 		DataFile << "# " << NumFaces << " primitives" << endl;
@@ -1358,7 +1869,7 @@ void FGeometryCollection::WriteDataToOBJFile(const FString &Name, const FString 
 		DataFile.open(string(TCHAR_TO_UTF8(*FullPath)));
 		DataFile << "# Vertex Visibility - vertices whose visibility flag are true" << endl;
 
-		TManagedArray<bool>& VertexVisibility = GetAttribute<bool>("VertexVisibility", FGeometryCollection::VerticesGroup);
+		const TManagedArray<bool>& VertexVisibility = ModifyAttribute<bool>("VertexVisibility", FGeometryCollection::VerticesGroup);
 		int num = 0;
 		for (int32 IdxVertex = 0; IdxVertex < NumVertices; ++IdxVertex)
 		{
@@ -1393,9 +1904,10 @@ FGeometryCollection* FGeometryCollection::NewGeometryCollection(const TArray<flo
 																const TManagedArray<int32>& RawParentArray,
 																const TManagedArray<TSet<int32>>& RawChildrenArray,
 																const TManagedArray<int32>& RawSimulationTypeArray,
-															    const TManagedArray<int32>& RawStatusFlagsArray)
+															    const TManagedArray<int32>& RawStatusFlagsArray,
+																const FGeometryCollectionDefaults RawDefaults)
 {
-	FGeometryCollection* RestCollection = new FGeometryCollection();
+	FGeometryCollection* RestCollection = new FGeometryCollection(RawDefaults);
 
 	int NumNewVertices = RawVertexArray.Num() / 3;
 	int VerticesIndex = RestCollection->AddElements(NumNewVertices, FGeometryCollection::VerticesGroup);
@@ -1403,32 +1915,35 @@ FGeometryCollection* FGeometryCollection::NewGeometryCollection(const TArray<flo
 	int NumNewIndices = RawIndicesArray.Num() / 3;
 	int IndicesIndex = RestCollection->AddElements(NumNewIndices, FGeometryCollection::FacesGroup);
 
-	TManagedArray<FVector>& Vertices = RestCollection->Vertex;
-	TManagedArray<FVector>&  Normals = RestCollection->Normal;
-	TManagedArray<FVector>&  TangentU = RestCollection->TangentU;
-	TManagedArray<FVector>&  TangentV = RestCollection->TangentV;
-	TManagedArray<FVector2D>&  UVs = RestCollection->UV;
+	TManagedArray<FVector3f>& Vertices = RestCollection->Vertex;
+	TManagedArray<FVector3f>&  Normals = RestCollection->Normal;
+	TManagedArray<FVector3f>&  TangentU = RestCollection->TangentU;
+	TManagedArray<FVector3f>&  TangentV = RestCollection->TangentV;
 	TManagedArray<FLinearColor>&  Colors = RestCollection->Color;
 	TManagedArray<int32>& BoneMap = RestCollection->BoneMap;
 	TManagedArray<FIntVector>&  Indices = RestCollection->Indices;
 	TManagedArray<bool>&  Visible = RestCollection->Visible;
 	TManagedArray<int32>&  MaterialID = RestCollection->MaterialID;
 	TManagedArray<int32>&  MaterialIndex = RestCollection->MaterialIndex;
-	TManagedArray<FTransform>&  Transform = RestCollection->Transform;
+	TManagedArray<bool>& Internal = RestCollection->Internal;
+	TManagedArray<FTransform3f>&  Transform = RestCollection->Transform;
 	TManagedArray<int32>& Parent = RestCollection->Parent;
 	TManagedArray<TSet<int32>>& Children = RestCollection->Children;
 	TManagedArray<int32>& SimulationType = RestCollection->SimulationType;
 	TManagedArray<int32>& StatusFlags = RestCollection->StatusFlags;
 	TManagedArray<int32>& InitialDynamicState = RestCollection->InitialDynamicState;
 
+	RestCollection->SetNumUVLayers(1);
+
 	// set the vertex information
+	TManagedArray<FVector2f>* UV0 = RestCollection->FindUVLayer(0);
 	for (int32 Idx = 0; Idx < NumNewVertices; ++Idx)
 	{
-		Vertices[Idx] = FVector(RawVertexArray[3 * Idx], RawVertexArray[3 * Idx + 1], RawVertexArray[3 * Idx + 2]);
+		Vertices[Idx] = FVector3f(RawVertexArray[3 * Idx], RawVertexArray[3 * Idx + 1], RawVertexArray[3 * Idx + 2]);
 		BoneMap[Idx] = RawBoneMapArray[Idx];
+		(*UV0)[Idx] = FVector2f::ZeroVector;
 
-		UVs[Idx] = FVector2D(0, 0);
-		Colors[Idx] = FLinearColor::White;
+		Colors[Idx] = RestCollection->Defaults.DefaultVertexColor;
 	}
 
 	// Transforms
@@ -1437,7 +1952,7 @@ FGeometryCollection* FGeometryCollection::NewGeometryCollection(const TArray<flo
 
 	for (int32 Idx = 0; Idx < NumNewTransforms; ++Idx)
 	{
-		Transform[Idx] = RawTransformArray[Idx];
+		Transform[Idx] = FTransform3f(RawTransformArray[Idx]);
 		Transform[Idx].NormalizeRotation();
 
 		Parent[Idx] = RawParentArray[Idx];
@@ -1459,7 +1974,7 @@ FGeometryCollection* FGeometryCollection::NewGeometryCollection(const TArray<flo
 	}
 
 	// set the index information
-	TArray<FVector> FaceNormals;
+	TArray<FVector3f> FaceNormals;
 	FaceNormals.SetNum(NumNewIndices);
 	for (int32 Idx = 0; Idx < NumNewIndices; ++Idx)
 	{
@@ -1470,20 +1985,21 @@ FGeometryCollection* FGeometryCollection::NewGeometryCollection(const TArray<flo
 
 		Indices[Idx] = FIntVector(VertexIdx1, VertexIdx2, VertexIdx3);
 		Visible[Idx] = true;
+		Internal[Idx] = false;
 		MaterialID[Idx] = 0;
 		MaterialIndex[Idx] = Idx;
 
-		const FVector Edge1 = Vertices[VertexIdx1] - Vertices[VertexIdx2];
-		const FVector Edge2 = Vertices[VertexIdx1] - Vertices[VertexIdx3];
+		const FVector3f Edge1 = Vertices[VertexIdx1] - Vertices[VertexIdx2];
+		const FVector3f Edge2 = Vertices[VertexIdx1] - Vertices[VertexIdx3];
 		FaceNormals[Idx] = (Edge2 ^ Edge1).GetSafeNormal();
 	}
 
 	// Compute vertexNormals
-	TArray<FVector> VertexNormals;
+	TArray<FVector3f> VertexNormals;
 	VertexNormals.SetNum(NumNewVertices);
 	for (int32 Idx = 0; Idx < NumNewVertices; ++Idx)
 	{
-		VertexNormals[Idx] = FVector(0.f, 0.f, 0.f);
+		VertexNormals[Idx] = FVector3f(0.f, 0.f, 0.f);
 	}
 
 	for (int32 Idx = 0; Idx < NumNewIndices; ++Idx)
@@ -1503,8 +2019,8 @@ FGeometryCollection* FGeometryCollection::NewGeometryCollection(const TArray<flo
 		FIntVector Tri = Indices[IndexIdx];
 		for (int idx = 0; idx < 3; idx++)
 		{
-			const FVector Normal = Normals[Tri[idx]];
-			const FVector Edge = (Vertices[Tri[(idx + 1) % 3]] - Vertices[Tri[idx]]);
+			const FVector3f Normal = Normals[Tri[idx]];
+			const FVector3f Edge = (Vertices[Tri[(idx + 1) % 3]] - Vertices[Tri[idx]]);
 			TangentU[Tri[idx]] = (Edge ^ Normal).GetSafeNormal();
 			TangentV[Tri[idx]] = (Normal ^ TangentU[Tri[idx]]).GetSafeNormal();
 		}
@@ -1513,7 +2029,8 @@ FGeometryCollection* FGeometryCollection::NewGeometryCollection(const TArray<flo
 	// Build the Geometry Group
 	GeometryCollection::AddGeometryProperties(RestCollection);
 
-	FGeometryCollectionProximityUtility::UpdateProximity(RestCollection);
+	FGeometryCollectionProximityUtility ProximityUtility(RestCollection);
+	ProximityUtility.UpdateProximity();
 
 	// add a material section
 	TManagedArray<FGeometryCollectionSection>&  Sections = RestCollection->Sections;
@@ -1535,7 +2052,7 @@ TArray<TArray<int32>> FGeometryCollection::ConnectionGraph()
 	TArray<TArray<int32>> Connectivity;
 	Connectivity.Init(TArray<int32>(), NumTransforms);
 
-	TArray<FTransform> GlobalMatrices;
+	TArray<FTransform3f> GlobalMatrices;
 	GeometryCollectionAlgo::GlobalMatrices(Transform, Parent, GlobalMatrices);
 
 	TArray<FVector> Pts;
@@ -1545,7 +2062,7 @@ TArray<TArray<int32>> FGeometryCollection::ConnectionGraph()
 		if (IsGeometry(TransformGroupIndex))
 		{
 			Remap.Add(Pts.Num(), TransformGroupIndex);
-			Pts.Add(GlobalMatrices[TransformGroupIndex].GetTranslation());
+			Pts.Add(FVector(GlobalMatrices[TransformGroupIndex].GetTranslation()));
 		}
 	}
 
@@ -1625,3 +2142,6 @@ void FGeometryCollection::UpdateOldAttributeNames()
 	}
 	this->RemoveGroup("Structure");
 }
+
+
+

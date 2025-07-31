@@ -1,37 +1,80 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "SCollectionView.h"
-#include "Misc/ConfigCacheIni.h"
-#include "Modules/ModuleManager.h"
-#include "Widgets/SOverlay.h"
-#include "Layout/WidgetPath.h"
-#include "Framework/Application/MenuStack.h"
-#include "Framework/Application/SlateApplication.h"
-#include "Framework/Commands/UICommandList.h"
-#include "Widgets/Layout/SSeparator.h"
-#include "Widgets/Images/SImage.h"
-#include "Framework/MultiBox/MultiBoxExtender.h"
-#include "Framework/MultiBox/MultiBoxBuilder.h"
-#include "Widgets/Input/SButton.h"
-#include "EditorStyleSet.h"
-#include "ISourceControlProvider.h"
-#include "ISourceControlModule.h"
-#include "CollectionManagerModule.h"
-#include "ContentBrowserUtils.h"
-#include "HistoryManager.h"
 
+#include "AssetRegistry/AssetData.h"
 #include "CollectionAssetManagement.h"
 #include "CollectionContextMenu.h"
+#include "CollectionManagerModule.h"
+#include "CollectionViewTypes.h"
 #include "CollectionViewUtils.h"
+#include "ContentBrowserDelegates.h"
+#include "ContentBrowserModule.h"
+#include "ContentBrowserPluginFilters.h"
+#include "ContentBrowserUtils.h"
+#include "CoreGlobals.h"
 #include "DragAndDrop/AssetDragDropOp.h"
 #include "DragAndDrop/CollectionDragDropOp.h"
+#include "Framework/Application/MenuStack.h"
+#include "Framework/Application/SlateApplication.h"
+#include "Framework/Commands/UIAction.h"
+#include "Framework/Commands/UICommandList.h"
+#include "Framework/MultiBox/MultiBoxBuilder.h"
+#include "Framework/MultiBox/MultiBoxExtender.h"
+#include "Framework/SlateDelegates.h"
+#include "Framework/Views/ITypedTableView.h"
+#include "GenericPlatform/ICursor.h"
+#include "HistoryManager.h"
+#include "ICollectionManager.h"
+#include "ISourceControlModule.h"
+#include "ISourceControlProvider.h"
+#include "ISourceControlState.h"
+#include "Input/DragAndDrop.h"
+#include "Input/Events.h"
+#include "InputCoreTypes.h"
+#include "Layout/Children.h"
+#include "Layout/Geometry.h"
+#include "Layout/Margin.h"
+#include "Layout/SlateRect.h"
+#include "Layout/WidgetPath.h"
+#include "Math/Color.h"
+#include "Math/Vector2D.h"
+#include "Misc/CString.h"
+#include "Misc/ConfigCacheIni.h"
+#include "Misc/TextFilterUtils.h"
+#include "Modules/ModuleManager.h"
+#include "ProfilingDebugging/CpuProfilerTrace.h"
+#include "SAssetTagItem.h"
+#include "SlotBase.h"
+#include "SourcesData.h"
 #include "SourcesSearch.h"
 #include "SourcesViewWidgets.h"
-#include "ContentBrowserModule.h"
-#include "Widgets/Layout/SExpandableArea.h"
-#include "Widgets/Input/SSearchBox.h"
+#include "TelemetryRouter.h"
+#include "Styling/AppStyle.h"
+#include "Styling/ISlateStyle.h"
+#include "Styling/SlateColor.h"
+#include "Templates/Tuple.h"
+#include "Textures/SlateIcon.h"
+#include "UObject/NameTypes.h"
+#include "UObject/UnrealNames.h"
+#include "Widgets/Images/SImage.h"
+#include "Widgets/Input/SButton.h"
+#include "Widgets/Input/SCheckBox.h"
+#include "Widgets/Layout/SBorder.h"
+#include "Widgets/SBoxPanel.h"
+#include "Widgets/SNullWidget.h"
+#include "Widgets/SOverlay.h"
+#include "Widgets/Views/ITableRow.h"
+#include "Widgets/Views/STableRow.h"
+
+class SWidget;
+struct FSlateBrush;
 
 #define LOCTEXT_NAMESPACE "ContentBrowser"
+
+// Workaround to hide Save As Collection buttons until collections support the AliasDataSource
+bool bHideSaveCollectionButton = false;
+FAutoConsoleVariableRef CVarHideSaveSearchButton(TEXT("ContentBrowser.HideSaveCollectionButton"), bHideSaveCollectionButton, TEXT("Hide the Content Browser button to save search as a dynamic collection."));
 
 namespace CollectionViewFilter
 {
@@ -89,14 +132,16 @@ void SCollectionView::Construct( const FArguments& InArgs )
 	bQueueCollectionItemsUpdate = false;
 	bQueueSCCRefresh = true;
 
+	IsDocked = InArgs._IsDocked;
+
 	FCollectionManagerModule& CollectionManagerModule = FCollectionManagerModule::GetModule();
 	CollectionManagerModule.Get().OnCollectionCreated().AddSP( this, &SCollectionView::HandleCollectionCreated );
 	CollectionManagerModule.Get().OnCollectionRenamed().AddSP( this, &SCollectionView::HandleCollectionRenamed );
 	CollectionManagerModule.Get().OnCollectionReparented().AddSP( this, &SCollectionView::HandleCollectionReparented );
 	CollectionManagerModule.Get().OnCollectionDestroyed().AddSP( this, &SCollectionView::HandleCollectionDestroyed );
 	CollectionManagerModule.Get().OnCollectionUpdated().AddSP( this, &SCollectionView::HandleCollectionUpdated );
-	CollectionManagerModule.Get().OnAssetsAdded().AddSP( this, &SCollectionView::HandleAssetsAddedToCollection );
-	CollectionManagerModule.Get().OnAssetsRemoved().AddSP( this, &SCollectionView::HandleAssetsRemovedFromCollection );
+	CollectionManagerModule.Get().OnAssetsAddedToCollection().AddSP( this, &SCollectionView::HandleAssetsAddedToCollection );
+	CollectionManagerModule.Get().OnAssetsRemovedFromCollection().AddSP( this, &SCollectionView::HandleAssetsRemovedFromCollection );
 
 	ISourceControlModule::Get().RegisterProviderChanged(FSourceControlProviderChanged::FDelegate::CreateSP(this, &SCollectionView::HandleSourceControlProviderChanged));
 	SourceControlStateChangedDelegateHandle = ISourceControlModule::Get().GetProvider().RegisterSourceControlStateChanged_Handle(FSourceControlStateChanged::FDelegate::CreateSP(this, &SCollectionView::HandleSourceControlStateChanged));
@@ -122,65 +167,45 @@ void SCollectionView::Construct( const FArguments& InArgs )
 		CollectionListContextMenuOpening = FOnContextMenuOpening::CreateSP( this, &SCollectionView::MakeCollectionTreeContextMenu );
 	}
 
+	SearchPtr = InArgs._ExternalSearch;
+	if (SearchPtr)
+	{
+		SearchPtr->OnSearchChanged().AddSP(this, &SCollectionView::SetCollectionsSearchFilterText);
+	}
+
 	ExternalSearchPtr = InArgs._ExternalSearch;
 	TitleContent = SNew(SHorizontalBox);
-	SetAllowExternalSearch(true);
+
 
 	PreventSelectionChangedDelegateCount = 0;
 
 	TSharedRef< SWidget > HeaderContent = SNew(SHorizontalBox)
+			.Visibility(this, &SCollectionView::GetHeaderVisibility)
 			+ SHorizontalBox::Slot()
 			.FillWidth(1.0f)
 			.Padding(0.0f)
 			[
 				TitleContent.ToSharedRef()
 			]
-
 			+SHorizontalBox::Slot()
 			.AutoWidth()
 			.VAlign(VAlign_Center)
 			.Padding(2.0f, 0.0f, 0.0f, 0.0f)
 			[
 				SNew(SButton)
-				.ButtonStyle(FEditorStyle::Get(), "FlatButton")
-				.ToolTipText(this, &SCollectionView::GetSwitchCollectionViewModeToolTipText)
-				.OnClicked(this, &SCollectionView::OnSwitchCollectionViewMode)
-				.ContentPadding(FMargin(2, 2))
-				.ForegroundColor(FEditorStyle::GetSlateColor("DefaultForeground"))
-				.Visibility(this, &SCollectionView::GetCollectionButtonsVisibility)
-				[
-					SNew(SImage)
-					.Image(this, &SCollectionView::GetSwitchCollectionViewModeIcon)
-				]
-			]
-
-			+SHorizontalBox::Slot()
-			.AutoWidth()
-			.VAlign(VAlign_Center)
-			.Padding(2.0f, 0.0f, 0.0f, 0.0f)
-			[
-				SNew(SButton)
-				.ButtonStyle(FEditorStyle::Get(), "FlatButton")
+				.ButtonStyle(FAppStyle::Get(), "SimpleButton")
 				.ToolTipText(LOCTEXT("AddCollectionButtonTooltip", "Add a collection."))
-				.OnClicked(this, &SCollectionView::MakeAddCollectionMenu)
+				.OnClicked(this, &SCollectionView::OnAddCollectionClicked)
 				.ContentPadding( FMargin(2, 2) )
-				.Visibility(this, &SCollectionView::GetCollectionButtonsVisibility)
+				.Visibility(bAllowCollectionButtons ? EVisibility::Visible : EVisibility::Collapsed)
 				[
 					SNew(SImage)
-					.Image( FEditorStyle::GetBrush("ContentBrowser.AddCollectionButtonIcon") )
+					.Image(FAppStyle::Get().GetBrush("Icons.PlusCircle"))
+					.ColorAndOpacity(FSlateColor::UseForeground())
 				]
 			];
 
 	TSharedRef< SWidget > BodyContent = SNew(SVerticalBox)
-			// Separator
-			+SVerticalBox::Slot()
-			.AutoHeight()
-			.Padding(0, 0, 0, 1)
-			[
-				SNew(SSeparator)
-				.Visibility(InArgs._ShowSeparator ? EVisibility::Visible : EVisibility::Collapsed)
-			]
-
 			// Collections tree
 			+SVerticalBox::Slot()
 			.FillHeight(1.f)
@@ -198,42 +223,6 @@ void SCollectionView::Construct( const FArguments& InArgs )
 				.Visibility(this, &SCollectionView::GetCollectionTreeVisibility)
 			];
 
-	TSharedPtr< SWidget > Content;
-	if ( InArgs._AllowCollapsing )
-	{
-		Content = SAssignNew(CollectionsExpandableAreaPtr, SExpandableArea)
-			.MaxHeight(200)
-			.BorderImage( FEditorStyle::GetBrush("NoBorder") )
-			.HeaderPadding( FMargin(4.0f, 0.0f, 0.0f, 0.0f) )
-			.HeaderContent()
-			[
-				SNew(SBox)
-				.Padding(FMargin(6.0f, 0.0f, 0.0f, 0.0f))
-				[
-					HeaderContent
-				]
-			]
-			.BodyContent()
-			[
-				BodyContent
-			];
-	}
-	else
-	{
-		Content = SNew( SVerticalBox )
-		+SVerticalBox::Slot()
-		.AutoHeight()
-		.Padding(FMargin(12.0f, 0.0f, 0.0f, 0.0f))
-		[
-			HeaderContent
-		]
-
-		+SVerticalBox::Slot()
-		[
-			BodyContent
-		];
-	}
-
 	ChildSlot
 	[
 		SNew(SOverlay)
@@ -241,9 +230,18 @@ void SCollectionView::Construct( const FArguments& InArgs )
 		// Main content
 		+SOverlay::Slot()
 		[
-			Content.ToSharedRef()
+			SNew(SVerticalBox)
+			+ SVerticalBox::Slot()
+			.AutoHeight()
+			.Padding(FMargin(12.0f, 0.0f, 0.0f, 0.0f))
+			[
+				HeaderContent
+			]
+			+ SVerticalBox::Slot()
+			[
+				BodyContent
+			]
 		]
-
 		// Drop target overlay
 		+SOverlay::Slot()
 		[
@@ -261,61 +259,6 @@ void SCollectionView::Construct( const FArguments& InArgs )
 	UpdateCollectionItems();
 }
 
-void SCollectionView::SetAllowExternalSearch(const bool InAllowExternalSearch)
-{
-	if (bAllowExternalSearch == InAllowExternalSearch)
-	{
-		return;
-	}
-	bAllowExternalSearch = InAllowExternalSearch;
-
-	if (SearchPtr)
-	{
-		SearchPtr->OnSearchChanged().RemoveAll(this);
-	}
-	TitleContent->ClearChildren();
-
-	SearchPtr = bAllowExternalSearch ? ExternalSearchPtr : nullptr;
-	if (!SearchPtr)
-	{
-		SearchPtr = MakeShared<FSourcesSearch>();
-		SearchPtr->Initialize();
-		SearchPtr->SetHintText(LOCTEXT("CollectionsViewSearchBoxHint", "Search Collections"));
-	}
-	SearchPtr->OnSearchChanged().AddSP(this, &SCollectionView::SetCollectionsSearchFilterText);
-
-	if (SearchPtr == ExternalSearchPtr)
-	{
-		// If using an external search then just show the title and don't hide it when collapsing
-		TitleContent->AddSlot()
-		[
-			SNew(STextBlock)
-			.Font(FEditorStyle::GetFontStyle("ContentBrowser.SourceTitleFont"))
-			.Text(LOCTEXT("CollectionsListTitle", "Collections"))
-		];
-	}
-	else
-	{
-		// If using an internal search then show the title or search box depending on whether we're collapsed or not
-		TitleContent->AddSlot()
-		[
-			SNew(STextBlock)
-			.Font(FEditorStyle::GetFontStyle("ContentBrowser.SourceTitleFont"))
-			.Text(LOCTEXT("CollectionsListTitle", "Collections"))
-			.Visibility(this, &SCollectionView::GetCollectionsTitleTextVisibility)
-		];
-
-		TitleContent->AddSlot()
-		[
-			SNew(SBox)
-			.VAlign(VAlign_Center)
-			.Visibility(this, &SCollectionView::GetCollectionsSearchBoxVisibility)
-			[
-				SearchPtr->GetWidget()
-			]
-		];
-	}
-}
 
 void SCollectionView::HandleCollectionCreated( const FCollectionNameType& Collection )
 {
@@ -359,12 +302,12 @@ void SCollectionView::HandleCollectionUpdated( const FCollectionNameType& Collec
 	}
 }
 
-void SCollectionView::HandleAssetsAddedToCollection( const FCollectionNameType& Collection, const TArray<FName>& AssetsAdded )
+void SCollectionView::HandleAssetsAddedToCollection( const FCollectionNameType& Collection, TConstArrayView<FSoftObjectPath> AssetsAdded )
 {
 	HandleCollectionUpdated(Collection);
 }
 
-void SCollectionView::HandleAssetsRemovedFromCollection( const FCollectionNameType& Collection, const TArray<FName>& AssetsRemoved )
+void SCollectionView::HandleAssetsRemovedFromCollection( const FCollectionNameType& Collection, TConstArrayView<FSoftObjectPath> AssetsRemoved )
 {
 	HandleCollectionUpdated(Collection);
 }
@@ -380,6 +323,8 @@ void SCollectionView::HandleSourceControlProviderChanged(ISourceControlProvider&
 
 void SCollectionView::HandleSourceControlStateChanged()
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(SCollectionView::HandleSourceControlStateChanged);
+
 	// Update the status of each collection
 	for (const auto& AvailableCollectionInfo : AvailableCollections)
 	{
@@ -389,6 +334,8 @@ void SCollectionView::HandleSourceControlStateChanged()
 
 void SCollectionView::UpdateCollectionItemStatus( const TSharedRef<FCollectionItem>& CollectionItem )
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(SCollectionView::UpdateCollectionItemStatus);
+
 	int32 NewObjectCount = 0;
 	TOptional<ECollectionItemStatus> NewStatus;
 
@@ -628,11 +575,6 @@ void SCollectionView::SetSelectedCollections(const TArray<FCollectionNameType>& 
 	// Prevent the selection changed delegate since the invoking code requested it
 	FScopedPreventSelectionChangedDelegate DelegatePrevention( SharedThis(this) );
 
-	// Expand the collections area if we are indeed selecting at least one collection
-	if ( bEnsureVisible && CollectionsToSelect.Num() > 0 && CollectionsExpandableAreaPtr.IsValid() )
-	{
-		CollectionsExpandableAreaPtr->SetExpanded(true);
-	}
 
 	// Clear the selection to start, then add the selected items as they are found
 	CollectionTreePtr->ClearSelection();
@@ -697,7 +639,7 @@ TArray<FCollectionNameType> SCollectionView::GetSelectedCollections() const
 	return RetArray;
 }
 
-void SCollectionView::SetSelectedAssetPaths(const TArray<FName>& SelectedAssets)
+void SCollectionView::SetSelectedAssetPaths(const TArray<FSoftObjectPath>& SelectedAssets)
 {
 	if ( QuickAssetManagement.IsValid() )
 	{
@@ -744,16 +686,12 @@ void SCollectionView::SaveSettings(const FString& IniFilename, const FString& In
 		GConfig->SetString(*IniSection, *(SettingsString + InSubKey), *CollectionsString, IniFilename);
 	};
 
-	const bool IsCollectionsExpanded = CollectionsExpandableAreaPtr.IsValid() ? CollectionsExpandableAreaPtr->IsExpanded() : true;
-	GConfig->SetBool(*IniSection, *(SettingsString + TEXT(".CollectionsExpanded")), IsCollectionsExpanded, IniFilename);
 	SaveCollectionsArrayToIni(TEXT(".SelectedCollections"), CollectionTreePtr->GetSelectedItems());
 	{
 		TSet<TSharedPtr<FCollectionItem>> ExpandedCollectionItems;
 		CollectionTreePtr->GetExpandedItems(ExpandedCollectionItems);
 		SaveCollectionsArrayToIni(TEXT(".ExpandedCollections"), ExpandedCollectionItems.Array());
 	}
-
-	GConfig->SetInt(*IniSection, *(SettingsString + TEXT(".ViewMode")), (int32)CollectionViewMode, IniFilename);
 }
 
 void SCollectionView::LoadSettings(const FString& IniFilename, const FString& IniSection, const FString& SettingsString)
@@ -786,13 +724,6 @@ void SCollectionView::LoadSettings(const FString& IniFilename, const FString& In
 		return RetCollectionsArray;
 	};
 
-	// Collection expansion state
-	bool bCollectionsExpanded = false;
-	if (CollectionsExpandableAreaPtr.IsValid() && GConfig->GetBool(*IniSection, *(SettingsString + TEXT(".CollectionsExpanded")), bCollectionsExpanded, IniFilename))
-	{
-		CollectionsExpandableAreaPtr->SetExpanded(bCollectionsExpanded);
-	}
-
 	// Selected Collections
 	TArray<FCollectionNameType> NewSelectedCollections = LoadCollectionsArrayFromIni(TEXT(".SelectedCollections"));
 	if (NewSelectedCollections.Num() > 0)
@@ -811,15 +742,6 @@ void SCollectionView::LoadSettings(const FString& IniFilename, const FString& In
 	if (NewExpandedCollections.Num() > 0)
 	{
 		SetExpandedCollections(NewExpandedCollections);
-	}
-
-	// View Mode
-	{
-		int32 CollectionViewModeInt = 0;
-		GConfig->GetInt(*IniSection, *(SettingsString + TEXT(".ViewMode")), CollectionViewModeInt, IniFilename);
-		CollectionViewMode = (EAssetTagItemViewMode)CollectionViewModeInt;
-
-		CollectionTreePtr->RebuildList();
 	}
 }
 
@@ -902,7 +824,7 @@ FReply SCollectionView::OnDrop( const FGeometry& MyGeometry, const FDragDropEven
 	return FReply::Unhandled();
 }
 
-void SCollectionView::MakeSaveDynamicCollectionMenu(FText InQueryString)
+void SCollectionView::MakeSaveDynamicCollectionMenu(FText InQueryString, FSimpleDelegate OnSaveSearchClicked)
 {
 	// Get all menu extenders for this context menu from the content browser module
 	FContentBrowserModule& ContentBrowserModule = FModuleManager::GetModuleChecked<FContentBrowserModule>( TEXT("ContentBrowser") );
@@ -922,7 +844,15 @@ void SCollectionView::MakeSaveDynamicCollectionMenu(FText InQueryString)
 
 	CollectionContextMenu->UpdateProjectSourceControl();
 
-	CollectionContextMenu->MakeSaveDynamicCollectionSubMenu(MenuBuilder, InQueryString);
+	if(OnSaveSearchClicked.IsBound())
+	{
+		MakeSaveSearchMenu(MenuBuilder, OnSaveSearchClicked);
+	}
+
+	if (!bHideSaveCollectionButton)
+	{
+		CollectionContextMenu->MakeSaveDynamicCollectionSubMenu(MenuBuilder, InQueryString);
+	}
 
 	FWidgetPath WidgetPath;
 	if (FSlateApplication::Get().GeneratePathToWidgetUnchecked(AsShared(), WidgetPath, EVisibility::All)) // since the collection window can be hidden, we need to manually search the path with a EVisibility::All instead of the default EVisibility::Visible
@@ -937,12 +867,32 @@ void SCollectionView::MakeSaveDynamicCollectionMenu(FText InQueryString)
 	}
 }
 
+void SCollectionView::MakeSaveSearchMenu(FMenuBuilder& InMenuBuilder, FSimpleDelegate OnSaveSearchClicked) const
+{
+	InMenuBuilder.BeginSection("ContentBrowserSaveSearch", LOCTEXT("ContentBrowserCreateFilterMenuHeading", "Create Filter"));
+
+	InMenuBuilder.AddMenuEntry(
+		LOCTEXT("ContentBrowserSaveAsCustomFilter", "Save as Custom Filter"),
+		LOCTEXT("ContentBrowserSaveAsCustomFilterTooltip", "Save the current search text as a custom filter in the filter bar"),
+		FSlateIcon(),
+		FUIAction(OnSaveSearchClicked)
+	);
+	
+	InMenuBuilder.EndSection();
+}
+
+FReply SCollectionView::OnAddCollectionClicked()
+{
+	MakeAddCollectionMenu(AsShared());
+	return FReply::Handled();
+}
+
 bool SCollectionView::ShouldAllowSelectionChangedDelegate() const
 {
 	return PreventSelectionChangedDelegateCount == 0;
 }
 
-FReply SCollectionView::MakeAddCollectionMenu()
+void SCollectionView::MakeAddCollectionMenu(TSharedRef<SWidget> MenuParent)
 {
 	// Get all menu extenders for this context menu from the content browser module
 	FContentBrowserModule& ContentBrowserModule = FModuleManager::GetModuleChecked<FContentBrowserModule>( TEXT("ContentBrowser") );
@@ -965,86 +915,12 @@ FReply SCollectionView::MakeAddCollectionMenu()
 	CollectionContextMenu->MakeNewCollectionSubMenu(MenuBuilder, ECollectionStorageMode::Static, SCollectionView::FCreateCollectionPayload());
 
 	FSlateApplication::Get().PushMenu(
-		AsShared(),
+		MenuParent,
 		FWidgetPath(),
 		MenuBuilder.MakeWidget(),
 		FSlateApplication::Get().GetCursorPos(),
 		FPopupTransitionEffect( FPopupTransitionEffect::TopMenu )
 		);
-
-	return FReply::Handled();
-}
-
-EVisibility SCollectionView::GetCollectionsTitleTextVisibility() const
-{
-	// Only show the title text if we have an expansion area, but are collapsed
-	return (CollectionsExpandableAreaPtr.IsValid() && !CollectionsExpandableAreaPtr->IsExpanded()) ? EVisibility::Visible : EVisibility::Collapsed;
-}
-
-EVisibility SCollectionView::GetCollectionsSearchBoxVisibility() const
-{
-	// Only show the search box if we have an expanded expansion area, or aren't currently using an expansion area
-	return (!CollectionsExpandableAreaPtr.IsValid() || CollectionsExpandableAreaPtr->IsExpanded()) ? EVisibility::Visible : EVisibility::Collapsed;
-}
-
-EVisibility SCollectionView::GetCollectionButtonsVisibility() const
-{
-	return (bAllowCollectionButtons && ( !CollectionsExpandableAreaPtr.IsValid() || CollectionsExpandableAreaPtr->IsExpanded() ) ) ? EVisibility::Visible : EVisibility::Collapsed;
-}
-
-const FSlateBrush* SCollectionView::GetSwitchCollectionViewModeIcon() const
-{
-	switch (CollectionViewMode)
-	{
-	case EAssetTagItemViewMode::Standard:
-		return FEditorStyle::GetBrush("ContentBrowser.Sources.Collections.Compact");
-
-	case EAssetTagItemViewMode::Compact:
-		return FEditorStyle::GetBrush("ContentBrowser.Sources.Collections");
-
-	default:
-		break;
-	}
-	check(false);
-	return nullptr;
-}
-
-FText SCollectionView::GetSwitchCollectionViewModeToolTipText() const
-{
-	switch (CollectionViewMode)
-	{
-	case EAssetTagItemViewMode::Standard:
-		return LOCTEXT("SwitchToCompactView_ToolTip", "Switch to compact view");
-
-	case EAssetTagItemViewMode::Compact:
-		return LOCTEXT("SwitchToStanardView_ToolTip", "Switch to standard view");
-
-	default:
-		break;
-	}
-	check(false);
-	return FText();
-}
-
-FReply SCollectionView::OnSwitchCollectionViewMode()
-{
-	switch (CollectionViewMode)
-	{
-	case EAssetTagItemViewMode::Standard:
-		CollectionViewMode = EAssetTagItemViewMode::Compact;
-		break;
-
-	case EAssetTagItemViewMode::Compact:
-		CollectionViewMode = EAssetTagItemViewMode::Standard;
-		break;
-
-	default:
-		check(false);
-		break;
-	}
-
-	CollectionTreePtr->RebuildList();
-	return FReply::Handled();
 }
 
 void SCollectionView::CreateCollectionItem( ECollectionShareType::Type CollectionType, ECollectionStorageMode::Type StorageMode, const FCreateCollectionPayload& InCreationPayload )
@@ -1186,7 +1062,7 @@ void SCollectionView::DeleteCollectionItems( const TArray<TSharedPtr<FCollection
 		else
 		{
 			// Display a warning
-			const FVector2D& CursorPos = FSlateApplication::Get().GetCursorPos();
+			const FVector2f& CursorPos = FSlateApplication::Get().GetCursorPos();
 			FSlateRect MessageAnchor(CursorPos.X, CursorPos.Y, CursorPos.X, CursorPos.Y);
 			ContentBrowserUtils::DisplayMessage(
 				FText::Format( LOCTEXT("CollectionDestroyFailed", "Failed to destroy collection. {0}"), CollectionManagerModule.Get().GetLastError() ),
@@ -1232,9 +1108,14 @@ EVisibility SCollectionView::GetCollectionTreeVisibility() const
 	return AvailableCollections.Num() > 0 ? EVisibility::Visible : EVisibility::Collapsed;
 }
 
+EVisibility SCollectionView::GetHeaderVisibility() const
+{
+	return IsDocked.Get() ? EVisibility::Collapsed : EVisibility::SelfHitTestInvisible;
+}
+
 const FSlateBrush* SCollectionView::GetCollectionViewDropTargetBorder() const
 {
-	return bDraggedOver ? FEditorStyle::GetBrush("ContentBrowser.CollectionTreeDragDropBorder") : FEditorStyle::GetBrush("NoBorder");
+	return bDraggedOver ? FAppStyle::GetBrush("ContentBrowser.CollectionTreeDragDropBorder") : FAppStyle::GetBrush("NoBorder");
 }
 
 TSharedRef<ITableRow> SCollectionView::GenerateCollectionRow( TSharedPtr<FCollectionItem> CollectionItem, const TSharedRef<STableViewBase>& OwnerTable )
@@ -1271,7 +1152,6 @@ TSharedRef<ITableRow> SCollectionView::GenerateCollectionRow( TSharedPtr<FCollec
 			SAssignNew(CollectionTreeItem, SCollectionTreeItem)
 			.ParentWidget(SharedThis(this))
 			.CollectionItem(CollectionItem)
-			.ViewMode(CollectionViewMode)
 			.OnNameChangeCommit(this, &SCollectionView::CollectionNameChangeCommit)
 			.OnVerifyRenameCommit(this, &SCollectionView::CollectionVerifyRenameCommit)
 			.OnValidateDragDrop(this, &SCollectionView::ValidateDragDropOnCollectionItem)
@@ -1398,7 +1278,7 @@ bool SCollectionView::ValidateDragDropOnCollectionItem(TSharedRef<FCollectionIte
 
 			if (!bIsValidDrag)
 			{
-				DragDropOp->SetToolTip(CollectionManagerModule.Get().GetLastError(), FEditorStyle::GetBrush(TEXT("Graph.ConnectorFeedback.Error")));
+				DragDropOp->SetToolTip(CollectionManagerModule.Get().GetLastError(), FAppStyle::GetBrush(TEXT("Graph.ConnectorFeedback.Error")));
 				break;
 			}
 		}
@@ -1454,19 +1334,23 @@ FReply SCollectionView::HandleDragDropOnCollectionItem(TSharedRef<FCollectionIte
 	}
 	else if (Operation->IsOfType<FAssetDragDropOp>())
 	{
+			
 		TSharedPtr<FAssetDragDropOp> DragDropOp = StaticCastSharedPtr<FAssetDragDropOp>(Operation);
 		const TArray<FAssetData>& DroppedAssets = DragDropOp->GetAssets();
 
-		TArray<FName> ObjectPaths;
+		TArray<FSoftObjectPath> ObjectPaths;
 		ObjectPaths.Reserve(DroppedAssets.Num());
 		for (const FAssetData& AssetData : DroppedAssets)
 		{
-			ObjectPaths.Add(AssetData.ObjectPath);
+			ObjectPaths.Add(AssetData.GetSoftObjectPath());
 		}
 
+		const double BeginTimeSec = FPlatformTime::Seconds();
 		int32 NumAdded = 0;
 		FText Message;
-		if (CollectionManagerModule.Get().AddToCollection(CollectionItem->CollectionName, CollectionItem->CollectionType, ObjectPaths, &NumAdded))
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
+		if (CollectionManagerModule.Get().AddToCollection(CollectionItem->CollectionName, CollectionItem->CollectionType, UE::SoftObjectPath::Private::ConvertSoftObjectPaths(ObjectPaths), &NumAdded))
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 		{
 			if (DroppedAssets.Num() == 1)
 			{
@@ -1481,6 +1365,17 @@ FReply SCollectionView::HandleDragDropOnCollectionItem(TSharedRef<FCollectionIte
 				Args.Add(TEXT("Number"), NumAdded);
 				Args.Add(TEXT("CollectionName"), FText::FromName(CollectionItem->CollectionName));
 				Message = FText::Format(LOCTEXT("CollectionAssetsAdded", "Added {Number} asset(s) to {CollectionName}"), Args);
+			}
+
+			const double DurationSec = FPlatformTime::Seconds() - BeginTimeSec;
+
+			{
+				FAssetAddedToCollectionTelemetryEvent AssetAdded;
+				AssetAdded.DurationSec = DurationSec;
+				AssetAdded.NumAdded = NumAdded;
+				AssetAdded.CollectionShareType = CollectionItem->CollectionType;
+				AssetAdded.Workflow = ECollectionTelemetryAssetAddedWorkflow::DragAndDrop;
+				FTelemetryRouter::Get().ProvideTelemetry(AssetAdded);
 			}
 		}
 		else
@@ -1610,6 +1505,8 @@ bool SCollectionView::CollectionNameChangeCommit( const TSharedPtr< FCollectionI
 			NewCollectionParentKey = FCollectionNameType(ParentCollectionItem->CollectionName, ParentCollectionItem->CollectionType);
 		}
 
+		double BeginTimeSec = FPlatformTime::Seconds();
+
 		// If we canceled the name change when creating a new asset, we want to silently remove it
 		if ( !bChangeConfirmed )
 		{
@@ -1646,6 +1543,13 @@ bool SCollectionView::CollectionNameChangeCommit( const TSharedPtr< FCollectionI
 		{
 			CollectionItem->OnCollectionCreatedEvent.Execute(FCollectionNameType(NewNameFinal, CollectionItem->CollectionType));
 			CollectionItem->OnCollectionCreatedEvent.Unbind();
+		}
+		
+		{
+			FCollectionCreatedTelemetryEvent CollectionCreatedEvent;
+			CollectionCreatedEvent.DurationSec = FPlatformTime::Seconds() - BeginTimeSec;
+			CollectionCreatedEvent.CollectionShareType = CollectionItem->CollectionType;
+			FTelemetryRouter::Get().ProvideTelemetry(CollectionCreatedEvent);
 		}
 	}
 	else

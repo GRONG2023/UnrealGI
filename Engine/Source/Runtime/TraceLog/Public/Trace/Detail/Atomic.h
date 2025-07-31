@@ -2,12 +2,18 @@
 
 #pragma once
 
+#include "HAL/Platform.h"
 #include <atomic>
 
 #if PLATFORM_CPU_X86_FAMILY
 #	include <immintrin.h>
 #endif
 
+#if !defined(TRACE_PRIVATE_THREAD_YIELD)
+#	define TRACE_PRIVATE_THREAD_YIELD 0
+#endif
+
+namespace UE {
 namespace Trace {
 namespace Private {
 
@@ -16,6 +22,8 @@ template <typename Type> Type	AtomicLoadRelaxed(Type volatile* Source);
 template <typename Type> Type	AtomicLoadAcquire(Type volatile* Source);
 template <typename Type> void	AtomicStoreRelaxed(Type volatile* Target, Type Value);
 template <typename Type> void	AtomicStoreRelease(Type volatile* Target, Type Value);
+template <typename Type> Type	AtomicExchangeAcquire(Type volatile* Target, Type Value);
+template <typename Type> Type	AtomicExchangeRelease(Type volatile* Target, Type Value);
 template <typename Type> bool	AtomicCompareExchangeRelaxed(Type volatile* Target, Type New, Type Expected);
 template <typename Type> bool	AtomicCompareExchangeAcquire(Type volatile* Target, Type New, Type Expected);
 template <typename Type> bool	AtomicCompareExchangeRelease(Type volatile* Target, Type New, Type Expected);
@@ -27,7 +35,10 @@ void							PlatformYield();
 ////////////////////////////////////////////////////////////////////////////////
 inline void PlatformYield()
 {
-#if PLATFORM_CPU_X86_FAMILY
+#if TRACE_PRIVATE_THREAD_YIELD
+	extern void ThreadYield();
+	ThreadYield();
+#elif PLATFORM_CPU_X86_FAMILY
 	_mm_pause();
 #elif PLATFORM_CPU_ARM_FAMILY
 #	if defined(_MSC_VER) && !defined(__clang__) // MSVC
@@ -70,6 +81,22 @@ inline void AtomicStoreRelease(Type volatile* Target, Type Value)
 {
 	std::atomic<Type>* T = (std::atomic<Type>*) Target;
 	T->store(Value, std::memory_order_release);
+}
+
+////////////////////////////////////////////////////////////////////////////////
+template <typename Type>
+inline Type AtomicExchangeAcquire(Type volatile* Target, Type Value)
+{
+	std::atomic<Type>* T = (std::atomic<Type>*) Target;
+	return T->exchange(Value, std::memory_order_acquire);
+}
+
+////////////////////////////////////////////////////////////////////////////////
+template <typename Type>
+inline Type AtomicExchangeRelease(Type volatile* Target, Type Value)
+{
+	std::atomic<Type>* T = (std::atomic<Type>*) Target;
+	return T->exchange(Value, std::memory_order_release);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -122,3 +149,4 @@ inline Type AtomicAddRelease(Type volatile* Target, Type Value)
 
 } // namespace Private
 } // namespace Trace
+} // namespace UE

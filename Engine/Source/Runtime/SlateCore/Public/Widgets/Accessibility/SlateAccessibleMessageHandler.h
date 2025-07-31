@@ -18,19 +18,19 @@ class SWindow;
  * Message handling system for Slate Accessibility API, dealing with both receiving events and pushing them back to the platform layer.
  * The message handler is also responsible for processing the Slate widget tree and queuing/processing accessibility requests for widget data from the platform.
  */
-class SLATECORE_API FSlateAccessibleMessageHandler : public FGenericAccessibleMessageHandler
+class FSlateAccessibleMessageHandler : public FGenericAccessibleMessageHandler
 {
 public:
-	FSlateAccessibleMessageHandler();
+	SLATECORE_API FSlateAccessibleMessageHandler();
 
 	// FGenericAccessibleMessageHandler
-	virtual void OnActivate() override;
-	virtual void OnDeactivate() override;
-	virtual TSharedPtr<IAccessibleWidget> GetAccessibleWindow(const TSharedRef<FGenericWindow>& InWindow) const override;
-	virtual AccessibleWidgetId GetAccessibleWindowId(const TSharedRef<FGenericWindow>& InWindow) const override;
-	virtual TSharedPtr<IAccessibleWidget> GetAccessibleWidgetFromId(AccessibleWidgetId Id) const override;
-	virtual void RunInThread(const TFunction<void()>& InFunction, bool bWaitForCompletion = true, ENamedThreads::Type InThread = ENamedThreads::GameThread) override;
-	virtual void MakeAccessibleAnnouncement(const FString& AnnouncementString) override;
+	SLATECORE_API virtual void OnActivate() override;
+	SLATECORE_API virtual void OnDeactivate() override;
+	SLATECORE_API virtual TSharedPtr<IAccessibleWidget> GetAccessibleWindow(const TSharedRef<FGenericWindow>& InWindow) const override;
+	SLATECORE_API virtual AccessibleWidgetId GetAccessibleWindowId(const TSharedRef<FGenericWindow>& InWindow) const override;
+	SLATECORE_API virtual TSharedPtr<IAccessibleWidget> GetAccessibleWidgetFromId(AccessibleWidgetId Id) const override;
+	SLATECORE_API virtual void RunInThread(const TFunction<void()>& InFunction, bool bWaitForCompletion = true, ENamedThreads::Type InThread = ENamedThreads::GameThread) override;
+	SLATECORE_API virtual void MakeAccessibleAnnouncement(const FString& AnnouncementString) override;
 	//~
 
 	/**
@@ -38,18 +38,43 @@ public:
 	 *
 	 * @param Widget The widget that is being deleted.
 	 */
-	void OnWidgetRemoved(SWidget* Widget);
+	SLATECORE_API void OnWidgetRemoved(SWidget* Widget);
 
+	/**
+	 * The arguments that make up an accessible event raised by an SWidget.
+	 * It is up to the user to create an instance of this struct when they want to raise an accessible event from an SWidget
+	 * to be passed to an accessible event handler.
+	 * @see OnWidgetEventRaised
+	 */
+	struct FSlateWidgetAccessibleEventArgs
+	{
+		FSlateWidgetAccessibleEventArgs(TSharedRef<SWidget> InWidget, EAccessibleEvent InEvent, FVariant InOldValue = FVariant(), FVariant InNewValue = FVariant(), FAccessibleUserIndex InSlateUserIndex = 0)
+			: Widget(InWidget)
+			, Event(InEvent)
+			, OldValue(InOldValue)
+			, NewValue(InNewValue)
+			, SlateUserIndex(InSlateUserIndex)
+		{}
+			
+		/** The widget that's raising the accessible event */
+		TSharedRef<SWidget> Widget;
+		/** The type of event being raised. */
+		EAccessibleEvent Event;
+		/** The value of the property being changed before the change took place. */
+		FVariant OldValue;
+		/** The value of the property being changed after the change took place. Alternatively, can contain any miscellaneous data for the accessible event. */
+		FVariant NewValue;
+		/** The index of the Slate user that feedback for the accessible event should be directed towards. */
+		FAccessibleUserIndex SlateUserIndex;
+	};
 	/**
 	 * Callback for a Slate widget indicating that a property change occurred. This may also be used by certain events
 	 * such as Notification which don't have an 'OldValue'. Only NewValue should be set for those types of events.
 	 *
-	 * @param Widget The widget raising the event.
-	 * @param Event The type of event being raised.
-	 * @param OldValue The value of the property being changed before the change occurred.
-	 * @param NewValue The value of the property being changed after the change occurred, or any miscellaneous data for the event.
+	 * @param Args The arguments for the accessible event being raised.
+	 * @see FSlateWidgetAccessibleEventArgs
 	 */
-	void OnWidgetEventRaised(TSharedRef<SWidget> Widget, EAccessibleEvent Event, FVariant OldValue = FVariant(), FVariant NewValue = FVariant());
+	SLATECORE_API void OnWidgetEventRaised(const FSlateWidgetAccessibleEventArgs& Args);
 
 	/**
 	 * Refresh the accessible widget tree next available tick. This should be called any time the Slate tree changes.
@@ -60,32 +85,16 @@ public:
 	* Processes all the queued tasks in the AccessibleTaskQueue
 	* Should only be called from FSlateApplication::TickPlatform() 
 	*/
-	void ProcessAccessibleTasks();
+	SLATECORE_API void ProcessAccessibleTasks();
 
 	/**
 	 * Process any pending Slate widgets and update the accessible widget tree.
 	 */
-	void Tick();
+	SLATECORE_API void Tick();
 
-	/**
-	* Returns the Widget that currently has accessibility focus in the application.
-	* accessibility focusable widgets are a superset of keyboard/gamepad focusable widgetes.
-	* i.e A widget can support accessibility focus but NOT keyboard/gamepad focus.
-	* Can return nullptr if no widget has accessibility focus. Up to caller to do validity check.
-	* @return  The widget that currently has accessible focus.
-	*/
-	TSharedPtr<FSlateAccessibleWidget> GetAccessibilityFocusedWidget() const;
 
-	/**
-	* Sets the currently accessibility focused widget in the application.
-	* If you're trying to clear the accessibility focus, use ClearAccessibilityFocus() 
-	* @param NewAccessibleFocusedWidget The widget that  now has accessible focus
-	*/
-	void SetAccessibilityFocusedWidget(const TSharedRef<FSlateAccessibleWidget>& NewAccessibilityFocusedWidget);
-
-	/** Reset the accessibility focused widget to nullptr*/
-	void ClearAccessibilityFocus();
 private:
+	SLATECORE_API void HandleAccessibleWidgetFocusChangeEvent(const TSharedRef<IAccessibleWidget>& FocusWidget, bool bIsWidgetGainingFocus, FAccessibleUserIndex UserIndex);
 	/**
 	*  A helper class that wraps an accessibility task and the event to be triggered when the task finishes executing. 
 	*/
@@ -120,7 +129,7 @@ private:
 	};
 
 	/** Queues an FSlateAccessibleTask to be processed in the Game Thread */
-	void EnqueueAccessibleTask(const FSlateAccessibleTask& InAccessibleTask);
+	SLATECORE_API void EnqueueAccessibleTask(const FSlateAccessibleTask& InAccessibleTask);
 
 	struct FWidgetAndParent {
 		FWidgetAndParent(TWeakPtr<SWidget> InWidget, TSharedRef<FSlateAccessibleWidget> InParent)
@@ -154,14 +163,7 @@ private:
 
 #if ACCESSIBILITY_DEBUG_RESPONSIVENESS
 	FEvent* EnqueueEvent;
-#endif 
-
-	/** 
-	* The widget tht currently has accessibility focus 
-	* @see GetAccessibilityFocusedWidget, SetAccessibilityFocusedWidget
-	*/
-	TWeakPtr<FSlateAccessibleWidget> AccessibilityFocusedWidget;
-
+#endif
 	/** If true, Tick() will begin the update process to the accessible widget tree. Use MarkDirty() to set. */
 	bool bDirty;
 };

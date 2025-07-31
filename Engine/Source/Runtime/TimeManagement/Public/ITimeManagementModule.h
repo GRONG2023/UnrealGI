@@ -5,13 +5,13 @@
 #include "CoreMinimal.h"
 #include "Modules/ModuleInterface.h"
 #include "Modules/ModuleManager.h"
-
+#include "Widgets/SFrameRatePicker.h"
 
 #define TIMEMANAGEMENT_MODULE_NAME TEXT("TimeManagement")
 
 class FTimedDataInputCollection;
 
-class TIMEMANAGEMENT_API ITimeManagementModule : public IModuleInterface
+class ITimeManagementModule : public IModuleInterface
 {
 public:
 	
@@ -35,4 +35,10 @@ public:
 
 	/** Get the collection of the ITimedDataInput and ITimedDataInputGroups. */
 	virtual FTimedDataInputCollection& GetTimedDataInputCollection() = 0;
+
+	/** Returns all stored common frame rates */
+	virtual TArrayView<const struct FCommonFrameRateInfo> GetAllCommonFrameRates() = 0;
+
+	/** Returns a widget allowing for the user to pick a specific frame rate */
+	virtual TSharedRef<SFrameRatePicker> CreateFrameRatePicker(SFrameRatePicker::FArguments Arguments) = 0;
 };

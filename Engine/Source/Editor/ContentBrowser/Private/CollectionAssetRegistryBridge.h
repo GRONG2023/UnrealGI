@@ -2,7 +2,7 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
+#include "Containers/UnrealString.h"
 
 struct FAssetData;
 
@@ -22,6 +22,6 @@ private:
 	/** Handler for when an asset was renamed in the asset registry */
 	void OnAssetRenamed(const FAssetData& AssetData, const FString& OldObjectPath);
 
-	/** Handler for when an asset was removed from the asset registry */
-	void OnAssetRemoved(const FAssetData& AssetData);
+	/** Handler for when assets were removed from the asset registry */
+	void OnAssetsRemoved(TConstArrayView<FAssetData> AssetDatas);
 };

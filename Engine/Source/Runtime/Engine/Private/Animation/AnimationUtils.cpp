@@ -5,17 +5,20 @@
 =============================================================================*/ 
 
 #include "AnimationUtils.h"
+#include "Animation/AnimSequence.h"
 #include "Misc/ConfigCacheIni.h"
+#include "Animation/AnimSequenceDecompressionContext.h"
 #include "UObject/Package.h"
+#include "Animation/Skeleton.h"
 #include "AnimationRuntime.h"
 #include "Animation/AnimSet.h"
 #include "Animation/AnimationSettings.h"
 #include "Animation/AnimBoneCompressionCodec.h"
 #include "Animation/AnimBoneCompressionSettings.h"
 #include "Animation/AnimCurveCompressionSettings.h"
+#include "Animation/VariableFrameStrippingSettings.h"
 #include "AnimationCompression.h"
 #include "Engine/SkeletalMeshSocket.h"
-#include "AnimEncoding.h"
 #include "UObject/LinkerLoad.h"
 
 /** Array to keep track of SkeletalMeshes we have built metadata for, and log out the results just once. */
@@ -53,7 +56,8 @@ void FAnimationUtils::BuildSkeletonMetaData(USkeleton* Skeleton, TArray<FBoneDat
 		ensure(SrcTransform.IsRotationNormalized());
 
 		BoneData.Orientation = SrcTransform.GetRotation();
-		BoneData.Position = SrcTransform.GetTranslation();
+		BoneData.Position = (FVector3f)SrcTransform.GetTranslation();
+		BoneData.Scale = (FVector3f)SrcTransform.GetScale3D();
 		BoneData.Name = RefSkeleton.GetBoneName(BoneIndex);
 
 		if ( BoneIndex > 0 )
@@ -83,19 +87,15 @@ void FAnimationUtils::BuildSkeletonMetaData(USkeleton* Skeleton, TArray<FBoneDat
 	}
 
 	// Enumerate children (bones that refer to this bone as parent).
-	for ( int32 BoneIndex = 0 ; BoneIndex < OutBoneData.Num() ; ++BoneIndex )
+	for(int32 BoneIndex = 1; BoneIndex < OutBoneData.Num(); ++BoneIndex)
 	{
-		FBoneData& BoneData = OutBoneData[BoneIndex];
-		// Exclude the root bone as it is the child of nothing.
-		for ( int32 BoneIndex2 = 1 ; BoneIndex2 < OutBoneData.Num() ; ++BoneIndex2 )
+		const int32 ParentIndex = OutBoneData[BoneIndex].GetParent();
+		if (OutBoneData.IsValidIndex(ParentIndex))
 		{
-			if ( OutBoneData[BoneIndex2].GetParent() == BoneIndex )
-			{
-				BoneData.Children.Add(BoneIndex2);
-			}
+			OutBoneData[ParentIndex].Children.Add(BoneIndex);
 		}
 	}
-
+	
 	// Enumerate end effectors.  For each end effector, propagate its index up to all ancestors.
 	if( bEnableLogging )
 	{
@@ -235,7 +235,7 @@ void FAnimationUtils::ComputeCompressionError(const FCompressibleAnimData& Compr
 	ErrorStats.MaxErrorTime = 0.0f;
 	int32 MaxErrorTrack = -1;
 
-	if (CompressedData.AnimData != nullptr && CompressedData.AnimData->CompressedNumberOfFrames > 0)
+	if (CompressedData.AnimData != nullptr && CompressedData.AnimData->CompressedNumberOfKeys > 0)
 	{
 		const bool bCanUseCompressedData = CompressedData.AnimData->IsValid();
 		if (!bCanUseCompressedData)
@@ -282,16 +282,15 @@ void FAnimationUtils::ComputeCompressionError(const FCompressibleAnimData& Compr
 
 		const FTransform EndEffectorDummyBoneSocket(FQuat::Identity, FVector(END_EFFECTOR_DUMMY_BONE_LENGTH_SOCKET));
 		const FTransform EndEffectorDummyBone(FQuat::Identity, FVector(END_EFFECTOR_DUMMY_BONE_LENGTH));
-		const FAnimKeyHelper Helper(CompressibleAnimData.SequenceLength, CompressedData.AnimData->CompressedNumberOfFrames);
-		const float KeyLength = Helper.TimePerKey() + SMALL_NUMBER;
 
-		FAnimSequenceDecompressionContext DecompContext(CompressibleAnimData.SequenceLength, CompressibleAnimData.Interpolation, CompressibleAnimData.AnimFName, *CompressedData.AnimData);
+		FAnimSequenceDecompressionContext DecompContext(CompressibleAnimData.SampledFrameRate, CompressibleAnimData.GetNumberOfFrames(), CompressibleAnimData.Interpolation, CompressibleAnimData.AnimFName, *CompressedData.AnimData, RefPose,
+			CompressibleAnimData.TrackToSkeletonMapTable, nullptr, CompressibleAnimData.bIsValidAdditive, CompressibleAnimData.AdditiveType);
 
 		const TArray<FBoneData>& BoneData = CompressibleAnimData.BoneData;
 
-		for (int32 FrameIndex = 0; FrameIndex< CompressedData.AnimData->CompressedNumberOfFrames; FrameIndex++)
+		for (int32 KeyIndex = 0; KeyIndex< CompressedData.AnimData->CompressedNumberOfKeys; KeyIndex++)
 		{
-			const float Time = (float)FrameIndex * KeyLength;
+			const double Time = CompressibleAnimData.SampledFrameRate.AsSeconds(KeyIndex);
 			DecompContext.Seek(Time);
 
 			// get the raw and compressed atom for each bone
@@ -319,7 +318,7 @@ void FAnimationUtils::ComputeCompressionError(const FCompressibleAnimData& Compr
 
 						FTransform AdditiveRawTransform;
 						FTransform AdditiveNewTransform;
-						FAnimationUtils::ExtractTransformFromTrack(Time, CompressibleAnimData.NumFrames, CompressibleAnimData.SequenceLength, CompressibleAnimData.RawAnimationData[BoneIndexData.TrackIndex], CompressibleAnimData.Interpolation, AdditiveRawTransform);
+						FAnimationUtils::ExtractTransformFromTrack(CompressibleAnimData.RawAnimationData[BoneIndexData.TrackIndex], Time, CompressibleAnimData.NumberOfKeys, CompressibleAnimData.SequenceLength, CompressibleAnimData.Interpolation, AdditiveRawTransform);
 						CompressedData.Codec->DecompressBone(DecompContext, BoneIndexData.TrackIndex, AdditiveNewTransform);
 
 						const ScalarRegister VBlendWeight(1.f);
@@ -328,7 +327,7 @@ void FAnimationUtils::ComputeCompressionError(const FCompressibleAnimData& Compr
 					}
 					else
 					{
-						FAnimationUtils::ExtractTransformFromTrack(Time, CompressibleAnimData.NumFrames, CompressibleAnimData.SequenceLength, CompressibleAnimData.RawAnimationData[BoneIndexData.TrackIndex], CompressibleAnimData.Interpolation, RawTransforms[BoneIndex]);
+						FAnimationUtils::ExtractTransformFromTrack(CompressibleAnimData.RawAnimationData[BoneIndexData.TrackIndex], Time, CompressibleAnimData.NumberOfKeys, CompressibleAnimData.SequenceLength,  CompressibleAnimData.Interpolation, RawTransforms[BoneIndex]);
 						CompressedData.Codec->DecompressBone(DecompContext, BoneIndexData.TrackIndex, NewTransforms[BoneIndex]);
 					}
 				}
@@ -451,7 +450,7 @@ UObject* FAnimationUtils::GetDefaultAnimSequenceOuter(UAnimSet* InAnimSet, bool 
 		return NewPackage;
 	}
 
-	return NULL;
+	return nullptr;
 }
 
 
@@ -520,6 +519,7 @@ FString FAnimationUtils::GetAnimationKeyFormatString(AnimationKeyFormat InFormat
  * @param TrackHeights [OUT]	The computed track heights
  *
  */
+#if WITH_EDITOR
 void FAnimationUtils::CalculateTrackHeights(const FCompressibleAnimData& CompressibleAnimData, int32 NumTracks, TArray<int32>& TrackHeights)
 {
 	TrackHeights.Empty();
@@ -554,6 +554,7 @@ void FAnimationUtils::CalculateTrackHeights(const FCompressibleAnimData& Compres
 		}
 	}
 }
+#endif // WITH_EDITOR
 
 /**
  * Checks a set of key times to see if the spacing is uniform or non-uniform.
@@ -577,7 +578,7 @@ bool FAnimationUtils::HasUniformKeySpacing(int32 NumFrames, const TArray<float>&
 	{
 		float DeltaTime = Times[i] - Times[i-1];
 
-		if (fabs(DeltaTime - FirstDelta) > KINDA_SMALL_NUMBER)
+		if (fabs(DeltaTime - FirstDelta) > UE_KINDA_SMALL_NUMBER)
 		{
 			return false;
 		}
@@ -637,6 +638,7 @@ struct FBoneTestItem
 	{}
 };
 
+#if WITH_EDITOR
 template<int32 PERTURBATION_ERROR_MODE>
 void CalcErrorsLoop(const TArray<FBoneTestItem>& BonesToTest, const FCompressibleAnimData& CompressibleAnimData, const TArray<FTransform>& RawAtoms, const TArray<FTransform>& RawTransforms, TArray<FTransform>& NewTransforms, FAnimPerturbationError& ThisBoneError)
 {
@@ -735,7 +737,7 @@ void FAnimationUtils::TallyErrorsFromPerturbation(
 	}
 
 
-	for (int32 Frame = 0; Frame < CompressibleAnimData.NumFrames; ++Frame)
+	for (int32 KeyIndex = 0; KeyIndex < CompressibleAnimData.NumberOfKeys; ++KeyIndex)
 	{
 		//Build Locals For Frame
 		if (CompressibleAnimData.IsCancelled())
@@ -746,7 +748,7 @@ void FAnimationUtils::TallyErrorsFromPerturbation(
 		for (const FTrackBoneMapping& TrackAndBone : TracksAndBonesToTest)
 		{
 			const FRawAnimSequenceTrack& RawTrack = CompressibleAnimData.RawAnimationData[TrackAndBone.TrackIndex];
-			ExtractTransformForFrameFromTrackSafe(RawTrack, Frame, RawAtoms[TrackAndBone.BoneIndex]);
+			ExtractTransformForFrameFromTrackSafe(RawTrack, KeyIndex, RawAtoms[TrackAndBone.BoneIndex]);
 		}
 
 		//Build Reference Component Space for Frame
@@ -839,10 +841,12 @@ void FAnimationUtils::TallyErrorsFromPerturbation(
 		Error.MaxErrorInScaleDueToScale = FMath::Sqrt(Error.MaxErrorInScaleDueToScale);*/
 	}
 }
+#endif // WITH_EDITOR
 
 static UAnimBoneCompressionSettings* DefaultBoneCompressionSettings = nullptr;
 static UAnimBoneCompressionSettings* DefaultRecorderBoneCompressionSettings = nullptr;
 static UAnimCurveCompressionSettings* DefaultCurveCompressionSettings = nullptr;
+static UVariableFrameStrippingSettings* DefaultVariableFrameStrippingSettings = nullptr;
 
 static void EnsureDependenciesAreLoaded(UObject* Object)
 {
@@ -878,14 +882,24 @@ static void EnsureDependenciesAreLoaded(UObject* Object)
 	}
 }
 
-UObject* GetDefaultAnimationCompressionSettings(const TCHAR* IniValueName)
+
+
+UObject* GetDefaultAnimationCompressionSettings(const TCHAR* IniValueName, bool bIsFatal)
 {
-	FConfigSection* AnimDefaultObjectSettingsSection = GConfig->GetSectionPrivate(TEXT("Animation.DefaultObjectSettings"), false, true, GEngineIni);
+	const FConfigSection* AnimDefaultObjectSettingsSection = GConfig->GetSection(TEXT("Animation.DefaultObjectSettings"), false, GEngineIni);
 	const FConfigValue* Value = AnimDefaultObjectSettingsSection != nullptr ? AnimDefaultObjectSettingsSection->Find(IniValueName) : nullptr;
 
 	if (Value == nullptr)
 	{
-		UE_LOG(LogAnimationCompression, Fatal, TEXT("Couldn't find default compression setting for '%s' under '[Animation.DefaultObjectSettings]'"), IniValueName);
+		if (bIsFatal)
+		{
+			UE_LOG(LogAnimationCompression, Fatal, TEXT("Couldn't find default compression setting for '%s' under '[Animation.DefaultObjectSettings]'"), IniValueName);
+		}
+		else
+		{
+			UE_LOG(LogAnimationCompression, Warning, TEXT("Couldn't find default compression setting for '%s' under '[Animation.DefaultObjectSettings]'"), IniValueName);
+		}
+
 		return nullptr;
 	}
 
@@ -894,7 +908,16 @@ UObject* GetDefaultAnimationCompressionSettings(const TCHAR* IniValueName)
 
 	if (DefaultCompressionSettings == nullptr)
 	{
-		UE_LOG(LogAnimationCompression, Fatal, TEXT("Couldn't load default compression settings asset with path '%s'"), *CompressionSettingsName);
+		if (bIsFatal)
+		{
+			UE_LOG(LogAnimationCompression, Fatal, TEXT("Couldn't load default compression settings asset with path '%s'"), *CompressionSettingsName);
+		}
+		else
+		{
+			UE_LOG(LogAnimationCompression, Warning, TEXT("Couldn't load default compression settings asset with path '%s'"), *CompressionSettingsName);
+		}
+
+		return nullptr;
 	}
 
 	// Force load the default settings and all its dependencies just in case it hasn't happened yet
@@ -905,11 +928,28 @@ UObject* GetDefaultAnimationCompressionSettings(const TCHAR* IniValueName)
 	return DefaultCompressionSettings;
 }
 
+#if WITH_EDITOR
+
+void FAnimationUtils::PreloadCompressionSettings()
+{
+	GetDefaultAnimationBoneCompressionSettings();
+	GetDefaultAnimationRecorderBoneCompressionSettings();
+	GetDefaultAnimationCurveCompressionSettings();
+	GetDefaultVariableFrameStrippingSettings();
+}
+
+#endif
+
 UAnimBoneCompressionSettings* FAnimationUtils::GetDefaultAnimationBoneCompressionSettings()
 {
 	if (DefaultBoneCompressionSettings == nullptr)
 	{
-		DefaultBoneCompressionSettings = Cast<UAnimBoneCompressionSettings>(GetDefaultAnimationCompressionSettings(TEXT("BoneCompressionSettings")));
+		DefaultBoneCompressionSettings = Cast<UAnimBoneCompressionSettings>(GetDefaultAnimationCompressionSettings(TEXT("BoneCompressionSettings"), false));
+
+		if (DefaultBoneCompressionSettings == nullptr)
+		{
+			DefaultBoneCompressionSettings = Cast<UAnimBoneCompressionSettings>(GetDefaultAnimationCompressionSettings(TEXT("BoneCompressionSettingsFallback"), true));
+		}
 	}
 
 	return DefaultBoneCompressionSettings;
@@ -919,7 +959,7 @@ UAnimBoneCompressionSettings* FAnimationUtils::GetDefaultAnimationRecorderBoneCo
 {
 	if (DefaultRecorderBoneCompressionSettings == nullptr)
 	{
-		DefaultRecorderBoneCompressionSettings = Cast<UAnimBoneCompressionSettings>(GetDefaultAnimationCompressionSettings(TEXT("AnimationRecorderBoneCompressionSettings")));
+		DefaultRecorderBoneCompressionSettings = Cast<UAnimBoneCompressionSettings>(GetDefaultAnimationCompressionSettings(TEXT("AnimationRecorderBoneCompressionSettings"), true));
 	}
 
 	return DefaultRecorderBoneCompressionSettings;
@@ -929,10 +969,25 @@ UAnimCurveCompressionSettings* FAnimationUtils::GetDefaultAnimationCurveCompress
 {
 	if (DefaultCurveCompressionSettings == nullptr)
 	{
-		DefaultCurveCompressionSettings = Cast<UAnimCurveCompressionSettings>(GetDefaultAnimationCompressionSettings(TEXT("CurveCompressionSettings")));
+		DefaultCurveCompressionSettings = Cast<UAnimCurveCompressionSettings>(GetDefaultAnimationCompressionSettings(TEXT("CurveCompressionSettings"), false));
+
+		if (DefaultCurveCompressionSettings == nullptr)
+		{
+			DefaultCurveCompressionSettings = Cast<UAnimCurveCompressionSettings>(GetDefaultAnimationCompressionSettings(TEXT("CurveCompressionSettingsFallback"), true));
+		}
 	}
 
 	return DefaultCurveCompressionSettings;
+}
+
+UVariableFrameStrippingSettings* FAnimationUtils::GetDefaultVariableFrameStrippingSettings()
+{
+	if (DefaultVariableFrameStrippingSettings == nullptr)
+	{
+		DefaultVariableFrameStrippingSettings = Cast<UVariableFrameStrippingSettings>(GetDefaultAnimationCompressionSettings(TEXT("VariableFrameStrippingSettings"), true));
+	}
+
+	return DefaultVariableFrameStrippingSettings;
 }
 
 void FAnimationUtils::EnsureAnimSequenceLoaded(UAnimSequence& AnimSeq)
@@ -941,6 +996,8 @@ void FAnimationUtils::EnsureAnimSequenceLoaded(UAnimSequence& AnimSeq)
 	EnsureDependenciesAreLoaded(AnimSeq.GetSkeleton());
 	EnsureDependenciesAreLoaded(AnimSeq.BoneCompressionSettings);
 	EnsureDependenciesAreLoaded(AnimSeq.CurveCompressionSettings);
+	EnsureDependenciesAreLoaded(AnimSeq.RefPoseSeq);
+	EnsureDependenciesAreLoaded(AnimSeq.VariableFrameStrippingSettings);
 }
 
 void FAnimationUtils::ExtractTransformForFrameFromTrackSafe(const FRawAnimSequenceTrack& RawTrack, int32 Frame, FTransform& OutAtom)
@@ -965,15 +1022,20 @@ void FAnimationUtils::ExtractTransformForFrameFromTrack(const FRawAnimSequenceTr
 	if (RawTrack.ScaleKeys.Num() > 0)
 	{
 		const int32 ScaleKeyIndex1 = FMath::Min(Frame, RawTrack.ScaleKeys.Num() - 1);
-		OutAtom = FTransform(RawTrack.RotKeys[RotKeyIndex1], RawTrack.PosKeys[PosKeyIndex1], RawTrack.ScaleKeys[ScaleKeyIndex1]);
+		OutAtom = FTransform(FQuat(RawTrack.RotKeys[RotKeyIndex1]), FVector(RawTrack.PosKeys[PosKeyIndex1]), FVector(RawTrack.ScaleKeys[ScaleKeyIndex1]));
 	}
 	else
 	{
-		OutAtom = FTransform(RawTrack.RotKeys[RotKeyIndex1], RawTrack.PosKeys[PosKeyIndex1], DefaultScale3D);
+		OutAtom = FTransform(FQuat(RawTrack.RotKeys[RotKeyIndex1]), FVector(RawTrack.PosKeys[PosKeyIndex1]), FVector(DefaultScale3D));
 	}
 }
 
 void FAnimationUtils::ExtractTransformFromTrack(float Time, int32 NumFrames, float SequenceLength, const FRawAnimSequenceTrack& RawTrack, EAnimInterpolationType Interpolation, FTransform &OutAtom)
+{
+	ExtractTransformFromTrack(RawTrack, static_cast<double>(Time), NumFrames, static_cast<double>(SequenceLength), Interpolation, OutAtom);
+}
+
+void FAnimationUtils::ExtractTransformFromTrack(const FRawAnimSequenceTrack& RawTrack, double Time, int32 NumFrames, double SequenceLength, EAnimInterpolationType Interpolation, FTransform &OutAtom)
 {
 	// Bail out (with rather wacky data) if data is empty for some reason.
 	if (RawTrack.PosKeys.Num() == 0 || RawTrack.RotKeys.Num() == 0)
@@ -1019,13 +1081,13 @@ void FAnimationUtils::ExtractTransformFromTrack(float Time, int32 NumFrames, flo
 		const int32 ScaleKeyIndex1 = FMath::Min(KeyIndex1, RawTrack.ScaleKeys.Num() - 1);
 		const int32 ScaleKeyIndex2 = FMath::Min(KeyIndex2, RawTrack.ScaleKeys.Num() - 1);
 
-		KeyAtom1 = FTransform(RawTrack.RotKeys[RotKeyIndex1], RawTrack.PosKeys[PosKeyIndex1], RawTrack.ScaleKeys[ScaleKeyIndex1]);
-		KeyAtom2 = FTransform(RawTrack.RotKeys[RotKeyIndex2], RawTrack.PosKeys[PosKeyIndex2], RawTrack.ScaleKeys[ScaleKeyIndex2]);
+		KeyAtom1 = FTransform(FQuat(RawTrack.RotKeys[RotKeyIndex1]), FVector(RawTrack.PosKeys[PosKeyIndex1]), FVector(RawTrack.ScaleKeys[ScaleKeyIndex1]));
+		KeyAtom2 = FTransform(FQuat(RawTrack.RotKeys[RotKeyIndex2]), FVector(RawTrack.PosKeys[PosKeyIndex2]), FVector(RawTrack.ScaleKeys[ScaleKeyIndex2]));
 	}
 	else
 	{
-		KeyAtom1 = FTransform(RawTrack.RotKeys[RotKeyIndex1], RawTrack.PosKeys[PosKeyIndex1], DefaultScale3D);
-		KeyAtom2 = FTransform(RawTrack.RotKeys[RotKeyIndex2], RawTrack.PosKeys[PosKeyIndex2], DefaultScale3D);
+		KeyAtom1 = FTransform(FQuat(RawTrack.RotKeys[RotKeyIndex1]), FVector(RawTrack.PosKeys[PosKeyIndex1]), DefaultScale3D);
+		KeyAtom2 = FTransform(FQuat(RawTrack.RotKeys[RotKeyIndex2]), FVector(RawTrack.PosKeys[PosKeyIndex2]), DefaultScale3D);
 	}
 
 	// 	UE_LOG(LogAnimation, Log, TEXT(" *  *  *  Position. PosKeyIndex1: %3d, PosKeyIndex2: %3d, Alpha: %f"), PosKeyIndex1, PosKeyIndex2, Alpha);
@@ -1042,6 +1104,11 @@ void FAnimationUtils::ExtractTransformFromTrack(float Time, int32 NumFrames, flo
 #if WITH_EDITOR
 void FAnimationUtils::ExtractTransformFromCompressionData(const FCompressibleAnimData& CompressibleAnimData, FCompressibleAnimDataResult& CompressedAnimData, float Time, int32 TrackIndex, bool bUseRawData, FTransform& OutBoneTransform)
 {
+	ExtractTransformFromCompressionData(CompressibleAnimData, CompressedAnimData, (double)Time, TrackIndex, bUseRawData, OutBoneTransform);
+}
+
+void FAnimationUtils::ExtractTransformFromCompressionData(const FCompressibleAnimData& CompressibleAnimData, FCompressibleAnimDataResult& CompressedAnimData, double Time, int32 TrackIndex, bool bUseRawData, FTransform& OutBoneTransform)
+{
 	FUECompressedAnimDataMutable& AnimDataMutable = static_cast<FUECompressedAnimDataMutable&>(*CompressedAnimData.AnimData);
 
 	// If the caller didn't request that raw animation data be used . . .
@@ -1050,13 +1117,13 @@ void FAnimationUtils::ExtractTransformFromCompressionData(const FCompressibleAni
 		// Build our read-only version from the mutable source
 		FUECompressedAnimData AnimData(AnimDataMutable);
 
-		FAnimSequenceDecompressionContext DecompContext(CompressibleAnimData.SequenceLength, CompressibleAnimData.Interpolation, CompressibleAnimData.AnimFName, AnimData);
+		FAnimSequenceDecompressionContext DecompContext(CompressibleAnimData.SampledFrameRate, CompressibleAnimData.GetNumberOfFrames(), CompressibleAnimData.Interpolation, CompressibleAnimData.AnimFName, AnimData, CompressibleAnimData.RefLocalPoses, CompressibleAnimData.TrackToSkeletonMapTable, nullptr, CompressibleAnimData.bIsValidAdditive, CompressibleAnimData.AdditiveType);
 		DecompContext.Seek(Time);
 		CompressedAnimData.Codec->DecompressBone(DecompContext, TrackIndex, OutBoneTransform);
 		return;
 	}
 
-	FAnimationUtils::ExtractTransformFromTrack(Time, CompressibleAnimData.NumFrames, CompressibleAnimData.SequenceLength, CompressibleAnimData.RawAnimationData[TrackIndex], CompressibleAnimData.Interpolation, OutBoneTransform);
+	FAnimationUtils::ExtractTransformFromTrack(CompressibleAnimData.RawAnimationData[TrackIndex], Time, CompressibleAnimData.NumberOfKeys, CompressibleAnimData.SequenceLength, CompressibleAnimData.Interpolation, OutBoneTransform);
 }
 
 bool FAnimationUtils::CompressAnimBones(FCompressibleAnimData& AnimSeq, FCompressibleAnimDataResult& Target)

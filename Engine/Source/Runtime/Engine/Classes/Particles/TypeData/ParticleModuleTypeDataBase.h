@@ -36,6 +36,9 @@ class UParticleModuleTypeDataBase : public UParticleModule
 	// @todo document
 	virtual FParticleEmitterInstance* CreateInstance(UParticleEmitter* InEmitterParent, UParticleSystemComponent* InComponent);
 
+	virtual const FVertexFactoryType* GetVertexFactoryType() const { return nullptr; }
+	virtual EPrimitiveType GetPrimitiveType() const { return PT_TriangleList; }
+
 	/** Cache any desired module pointers inside this type data */
 	virtual void CacheModuleInfo(UParticleEmitter* Emitter) {}
 
@@ -49,6 +52,16 @@ class UParticleModuleTypeDataBase : public UParticleModule
 	/** Determine if motion blur is enabled for the owning emitter. */
 	virtual bool		IsMotionBlurEnabled() const  { return false; }
 
+
+	/**
+	* Collect all the data required for PSO precaching 
+	*/
+	struct FPSOPrecacheParams
+	{
+		EPrimitiveType PrimitiveType;
+		FPSOPrecacheVertexFactoryDataList VertexFactoryDataList;
+	};
+	virtual void CollectPSOPrecacheData(const UParticleEmitter* Emitter, FPSOPrecacheParams& OutParams) {};
 };
 
 

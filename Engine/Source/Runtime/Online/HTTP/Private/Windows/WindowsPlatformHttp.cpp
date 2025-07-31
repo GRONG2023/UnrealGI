@@ -4,13 +4,8 @@
 #include "Misc/CommandLine.h"
 #include "Misc/Parse.h"
 #include "Misc/ConfigCacheIni.h"
-#if WITH_LIBCURL
-	#include "Curl/CurlHttp.h"
-	#include "Curl/CurlHttpManager.h"
-#else // ^^^ WITH_LIBCURL ^^^ // vvv !WITH_LIBCURL vvv
-	#include "WinHttp/WinHttpHttpManager.h"
-	#include "WinHttp/WinHttpHttpRequest.h"
-#endif // !WITH_LIBCURL
+#include "Curl/CurlHttp.h"
+#include "Curl/CurlHttpManager.h"
 #include "Http.h"
 #include "WinHttp/Support/WinHttpTypes.h" // Always include for OS proxy settings
 
@@ -82,36 +77,24 @@ void FWindowsPlatformHttp::Init()
 
 	FGenericPlatformHttp::Init();
 
-#if WITH_LIBCURL
 	FCurlHttpManager::InitCurl();
-#endif // WITH_WINHTTP
 }
 
 void FWindowsPlatformHttp::Shutdown()
 {
-#if WITH_LIBCURL
 	FCurlHttpManager::ShutdownCurl();
-#endif // WITH_LIBCURL
 
 	FGenericPlatformHttp::Shutdown();
 }
 
 FHttpManager * FWindowsPlatformHttp::CreatePlatformHttpManager()
 {
-#if WITH_LIBCURL
 	return new FCurlHttpManager();
-#else // ^^^ WITH_LIBCURL ^^^ // vvv WITH_LIBCURL vvv
-	return new FWinHttpHttpManager();
-#endif // !WITH_LIBCURL
 }
 
 IHttpRequest* FWindowsPlatformHttp::ConstructRequest()
 {
-#if WITH_LIBCURL
-		return new FCurlHttpRequest();
-#else // ^^^ WITH_LIBCURL ^^^ // vvv WITH_LIBCURL vvv
-		return new FWinHttpHttpRequest();
-#endif // !WITH_LIBCURL
+	return new FCurlHttpRequest();
 }
 
 FString FWindowsPlatformHttp::GetMimeType(const FString& FilePath)
@@ -203,10 +186,7 @@ bool FWindowsPlatformHttp::IsOperatingSystemProxyInformationSupported()
 
 bool FWindowsPlatformHttp::VerifyPeerSslCertificate(bool verify)
 {
-	bool prev = false;
-#if WITH_LIBCURL
-	prev = FCurlHttpManager::CurlRequestOptions.bVerifyPeer;
+	bool bPreviousValue = FCurlHttpManager::CurlRequestOptions.bVerifyPeer;
 	FCurlHttpManager::CurlRequestOptions.bVerifyPeer = verify;
-#endif // #if WITH_LIBCURL
-	return prev;
+	return bPreviousValue;
 }

@@ -1,10 +1,18 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "K2Node_Knot.h"
-#include "EdGraphSchema_K2.h"
-#include "Kismet2/Kismet2NameValidators.h"
-#include "BlueprintNodeSpawner.h"
+
 #include "BlueprintActionDatabaseRegistrar.h"
+#include "BlueprintNodeSpawner.h"
+#include "EdGraph/EdGraphPin.h"
+#include "EdGraphSchema_K2.h"
+#include "Internationalization/Internationalization.h"
+#include "Kismet2/Kismet2NameValidators.h"
+#include "Misc/AssertionMacros.h"
+#include "Templates/Casts.h"
+#include "Templates/UnrealTemplate.h"
+#include "UObject/Class.h"
+#include "UObject/NameTypes.h"
 
 #define LOCTEXT_NAMESPACE "K2Node_Knot"
 
@@ -147,15 +155,26 @@ void UK2Node_Knot::PropagatePinTypeFromDirection(bool bFromInput)
 	// into this function but the recursion guard will stop it
 	for (UEdGraphPin* InPin : MySourcePin->LinkedTo)
 	{
-		if (UK2Node_Knot* KnotNode = Cast<UK2Node_Knot>(InPin->GetOwningNode()))
+		if (InPin)
 		{
-			KnotNode->PropagatePinTypeFromDirection(bFromInput);
+			if (UK2Node_Knot * KnotNode = Cast<UK2Node_Knot>(InPin->GetOwningNode()))
+			{
+				KnotNode->PropagatePinTypeFromDirection(bFromInput);
+			}
 		}
 	}
 
 	UEdGraphPin* TypeSource = MySourcePin->LinkedTo.Num() ? MySourcePin->LinkedTo[0] : nullptr;
 	if (TypeSource)
 	{
+		// if the type in the source and dest matches the type source then
+		// lets early return to avoid expensive propagation in PinConnectionListChanged
+		if (MySourcePin->PinType == TypeSource->PinType &&
+			MyDestinationPin->PinType == TypeSource->PinType)
+		{
+			return;
+		}
+
 		MySourcePin->PinType = TypeSource->PinType;
 		MyDestinationPin->PinType = TypeSource->PinType;
 

@@ -11,6 +11,7 @@
 #include "BehaviorTree/BTNode.h"
 #include "BehaviorTree/BTTaskNode.h"
 #include "BehaviorTree/BTAuxiliaryNode.h"
+#include "BehaviorTree/Tasks/BTTask_RunBehaviorDynamic.h"
 #include "BehaviorTreeGraphNode_CompositeDecorator.h"
 #include "BehaviorTreeEditor.h"
 #include "Editor/UnrealEdEngine.h"
@@ -19,6 +20,7 @@
 #include "EngineUtils.h"
 #include "UnrealEdGlobals.h"
 #include "BehaviorTreeGraphNode_Decorator.h"
+#include "BehaviorTreeGraphNode_Root.h"
 #include "BehaviorTreeGraphNode_Service.h"
 #include "BehaviorTree/BehaviorTree.h"
 #include "BehaviorTreeDelegates.h"
@@ -35,8 +37,8 @@ FBehaviorTreeDebugger::FBehaviorTreeDebugger()
 	StepBackIntoIdx = INDEX_NONE;
 	StepBackOverIdx = INDEX_NONE;
 	StepOutIdx = INDEX_NONE;
-	SavedTimestamp = 0.0f;
-	CurrentTimestamp = 0.0f;
+	SavedTimestamp = 0.;
+	CurrentTimestamp = 0.;
 
 	FEditorDelegates::BeginPIE.AddRaw(this, &FBehaviorTreeDebugger::OnBeginPIE);
 	FEditorDelegates::EndPIE.AddRaw(this, &FBehaviorTreeDebugger::OnEndPIE);
@@ -227,7 +229,7 @@ void FBehaviorTreeDebugger::Tick(float DeltaTime)
 		if (ActiveStepIndex == LatestStepIndex)
 		{
 			TArray<FString> RuntimeDescriptions;
-			TreeInstance->StoreDebuggerRuntimeValues(RuntimeDescriptions, ShowInstance.RootNode, DebuggerInstanceIndex);
+			TreeInstance->StoreDebuggerRuntimeValues(RuntimeDescriptions, ShowInstance.RootNode, IntCastChecked<uint16>(DebuggerInstanceIndex));
 
 			UpdateAssetRuntimeDescription(RuntimeDescriptions, RootNode.Get());
 		}
@@ -765,7 +767,7 @@ void FBehaviorTreeDebugger::FindMatchingTreeInstance()
 {
 	KnownInstances.Reset();
 
-    // Find the world for the dedicated server if any, otherwise fallback to the PIE world
+	// Find the world for the dedicated server if any, otherwise fallback to the PIE world
 	UWorld* PlayWorld = nullptr;
 	for (const FWorldContext& PieContext : GEditor->GetWorldContexts())
 	{
@@ -852,6 +854,17 @@ int32 FBehaviorTreeDebugger::GetShownStateIndex() const
 #endif
 
 	return 0;
+}
+
+bool FBehaviorTreeDebugger::IsBehaviorExecutionPaused() const
+{
+#if USE_BEHAVIORTREE_DEBUGGER
+	if (TreeInstance.IsValid() && TreeInstance->DebuggerSteps.IsValidIndex(ActiveStepIndex))
+	{
+		return TreeInstance->DebuggerSteps[ActiveStepIndex].bIsExecutionPaused;
+	}
+#endif
+	return false;
 }
 
 void FBehaviorTreeDebugger::StepForwardInto()
@@ -1066,25 +1079,16 @@ void FBehaviorTreeDebugger::StopPlaySession()
  
 		// @TODO: we need a unified flow to leave debugging mode from the different debuggers to prevent strong coupling between modules.
 		// Each debugger (Blueprint & BehaviorTree for now) could then take the appropriate actions to resume the session.
-  		if (FSlateApplication::Get().InKismetDebuggingMode())
-  		{
-  			FSlateApplication::Get().LeaveDebuggingMode();
-  		}
+		if (FSlateApplication::Get().InKismetDebuggingMode())
+		{
+			FSlateApplication::Get().LeaveDebuggingMode();
+		}
 	}
 }
 
 void FBehaviorTreeDebugger::PausePlaySession()
 {
-	bool bPaused = false;
-	ForEachGameWorld([&](UWorld* World)
-	{
-		if (!World->bDebugPauseExecution)
-		{
-			World->bDebugPauseExecution = true;
-			bPaused = true;
-		}
-	});
-	if (bPaused)
+	if (GUnrealEd->SetPIEWorldsPaused(true))
 	{
 		GUnrealEd->PlaySessionPaused();
 	}
@@ -1092,16 +1096,7 @@ void FBehaviorTreeDebugger::PausePlaySession()
 
 void FBehaviorTreeDebugger::ResumePlaySession()
 {
-	bool bResumed = false;
-	ForEachGameWorld([&](UWorld* World)
-	{
-		if (World->bDebugPauseExecution)
-		{
-			World->bDebugPauseExecution = false;
-			bResumed = true;
-		}
-	});
-	if(bResumed)
+	if (GUnrealEd->SetPIEWorldsPaused(false))
 	{
 		// @TODO: we need a unified flow to leave debugging mode from the different debuggers to prevent strong coupling between modules.
 		// Each debugger (Blueprint & BehaviorTree for now) could then take the appropriate actions to resume the session.
@@ -1206,12 +1201,32 @@ void FBehaviorTreeDebugger::UpdateDebuggerViewOnTick()
 #if USE_BEHAVIORTREE_DEBUGGER
 	if (IsDebuggerRunning() && TreeInstance.IsValid())
 	{
-		const float GameTime = GEditor && GEditor->PlayWorld ? GEditor->PlayWorld->GetTimeSeconds() : 0.0f;
+		const double GameTime = GEditor && GEditor->PlayWorld ? GEditor->PlayWorld->GetTimeSeconds() : 0.;
 		CurrentTimestamp = GameTime;
 
 		TreeInstance->StoreDebuggerBlackboard(CurrentValues);
 	}
 #endif
+}
+
+class UBehaviorTree* FBehaviorTreeDebugger::GetDynamicSubtreeTaskBehaviorTree(const UBTTask_RunBehaviorDynamic* Node) const
+{
+	if (UBehaviorTreeComponent* TreeComp = TreeInstance.Get())
+	{
+		if (TreeComp->DebuggerSteps.IsValidIndex(ActiveStepIndex))
+		{
+			const FBehaviorTreeExecutionStep& ActiveStep = TreeComp->DebuggerSteps[ActiveStepIndex];
+			if (ActiveStep.InstanceStack.IsValidIndex(DebuggerInstanceIndex))
+			{
+				const FBehaviorTreeDebuggerInstance& DebugInstance = ActiveStep.InstanceStack[DebuggerInstanceIndex];
+				if (DebugInstance.RuntimeDesc.IsValidIndex(Node->GetExecutionIndex()))
+				{
+					return Node->GetBehaviorAssetFromRuntimeValue(DebugInstance.RuntimeDesc[Node->GetExecutionIndex()]);
+				}
+			}
+		}
+	}
+	return nullptr;
 }
 
 FText FBehaviorTreeDebugger::FindValueForKey(const FName& InKeyName, bool bUseCurrentState) const
@@ -1244,7 +1259,7 @@ FText FBehaviorTreeDebugger::FindValueForKey(const FName& InKeyName, bool bUseCu
 #endif
 }
 
-float FBehaviorTreeDebugger::GetTimeStamp(bool bUseCurrentState) const
+double FBehaviorTreeDebugger::GetTimeStamp(bool bUseCurrentState) const
 {
 	return bUseCurrentState ? CurrentTimestamp : SavedTimestamp;
 }
@@ -1377,17 +1392,8 @@ void FBehaviorTreeDebugger::UpdateCurrentSubtree()
 
 static int32 GetNumActiveInstances(const FBehaviorTreeExecutionStep& StepInfo, class UBehaviorTree*& ActiveSubtree)
 {
-	for (int32 Idx = StepInfo.InstanceStack.Num() - 1; Idx >= 0; Idx--)
-	{
-		//if (StepInfo.InstanceStack[Idx].ActivePath.Num())
-		{
-			ActiveSubtree = StepInfo.InstanceStack[Idx].TreeAsset;
-			return Idx + 1;
-		}
-	}
-
-	ActiveSubtree = NULL;
-	return 0;
+	ActiveSubtree = !StepInfo.InstanceStack.IsEmpty() ? StepInfo.InstanceStack.Last().TreeAsset : nullptr;
+	return StepInfo.InstanceStack.Num();
 }
 
 void FBehaviorTreeDebugger::UpdateAvailableActions()

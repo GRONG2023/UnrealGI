@@ -82,7 +82,7 @@ FORCEINLINE void AdjustParticleBaseSizeForUVFlipping(FVector& OutSize, EParticle
 }
 
 UENUM()
-enum EParticleSortMode
+enum EParticleSortMode : int
 {
 	PSORTMODE_None,
 	PSORTMODE_ViewProjDepth,
@@ -93,7 +93,7 @@ enum EParticleSortMode
 };
 
 UENUM()
-enum EEmitterNormalsMode
+enum EEmitterNormalsMode : int
 {
 	/** Default mode, normals are based on the camera facing geometry. */
 	ENM_CameraFacing,
@@ -110,9 +110,10 @@ struct FParticleRequiredModule
 	uint32 NumBoundingVertices;
 	uint32 NumBoundingTriangles;
 	float AlphaThreshold;
-	TArray<FVector2D> FrameData;
+	TArray<FVector2f> FrameData;
 	FRHIShaderResourceView* BoundingGeometryBufferSRV;
 	uint8 bCutoutTexureIsValid : 1;
+	uint8 bUseVelocityForMotionBlur : 1;
 };
 
 
@@ -128,7 +129,7 @@ class UParticleModuleRequired : public UParticleModule
 	
 	/** The material to utilize for the emitter at this LOD level.						*/
 	UPROPERTY(EditAnywhere, Category=Emitter)
-	class UMaterialInterface* Material;
+	TObjectPtr<class UMaterialInterface> Material;
 
 	/** The distance at which PSA_FacingCameraDistanceBlend	is fully PSA_Square */
 	UPROPERTY(EditAnywhere, Category = Emitter, meta = (UIMin = "0", DisplayAfter="ScreenAlignment"))
@@ -200,12 +201,27 @@ class UParticleModuleRequired : public UParticleModule
 	UPROPERTY(EditAnywhere, Category=Emitter, meta=(DisplayName = "Remove HMD Roll"))
 	uint8 bRemoveHMDRoll:1;
 
+	/** If true, gpu simulation positions are offset to support double precision vectors. Cpu sims always support large world coordinates. */
+	UPROPERTY(EditAnywhere, Category=Emitter)
+	uint8 bSupportLargeWorldCoordinates:1;
+
 	/**
 	 *	If true, select the emitter duration from the range
 	 *		[EmitterDurationLow..EmitterDuration]
 	 */
 	UPROPERTY(EditAnywhere, Category = Duration)
 	uint8 bEmitterDurationUseRange : 1;
+
+
+	UPROPERTY(EditAnywhere, Category = Rendering)
+	uint8 bOverrideUseVelocityForMotionBlur : 1;
+
+	/**
+	 * When supported by the vertex factory will use particle velocity for motion blur approximation.
+	 * This will be inaccurate in some cases, i.e. sprite rotation, but may provide a reasonable result vs having this disabled
+	 */
+	UPROPERTY(EditAnywhere, Category = Rendering, meta=(EditCondition = "bOverrideUseVelocityForMotionBlur"))
+	uint8 bUseVelocityForMotionBlur : 1;
 
 	/** 
 	 *	How long, in seconds, the emitter will run before looping.
@@ -378,7 +394,7 @@ class UParticleModuleRequired : public UParticleModule
 	* Texture to generate bounding geometry from.
 	*/
 	UPROPERTY(EditAnywhere, Category = ParticleCutout)
-	UTexture2D* CutoutTexture;
+	TObjectPtr<UTexture2D> CutoutTexture;
 
 	/**
 	 *	The maximum number of particles to DRAW for this emitter.
@@ -436,6 +452,8 @@ class UParticleModuleRequired : public UParticleModule
 	virtual bool GenerateLODModuleValues(UParticleModule* SourceModule, float Percentage, UParticleLODLevel* LODLevel) override;
 	//~ End UParticleModule Interface
 
+	bool ShouldUseVelocityForMotionBlur() const;
+
 	inline int32 GetNumFrames() const
 	{
 		return SubImages_Vertical * SubImages_Horizontal;
@@ -461,7 +479,7 @@ class UParticleModuleRequired : public UParticleModule
 		return BoundingMode == BVC_FourVertices ? 2 : 6;
 	}
 
-	inline const FVector2D* GetFrameData(int32 FrameIndex) const
+	inline const FVector2f* GetFrameData(int32 FrameIndex) const
 	{
 		return &DerivedData.BoundingGeometry[FrameIndex * GetNumBoundingVertices()];
 	}
@@ -470,6 +488,7 @@ class UParticleModuleRequired : public UParticleModule
 	{
 		FParticleRequiredModule *FReqMod = new FParticleRequiredModule();
 		FReqMod->bCutoutTexureIsValid = IsBoundingGeometryValid();
+		FReqMod->bUseVelocityForMotionBlur = ShouldUseVelocityForMotionBlur();
 		FReqMod->NumFrames = GetNumFrames();
 		FReqMod->FrameData = DerivedData.BoundingGeometry;
 		FReqMod->NumBoundingVertices = GetNumBoundingVertices();

@@ -1,27 +1,41 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "EditorUtilityWidgetBlueprintFactory.h"
-#include "Misc/MessageDialog.h"
-#include "Modules/ModuleManager.h"
-#include "Widgets/SWindow.h"
-#include "Settings/EditorExperimentalSettings.h"
-#include "Engine/BlueprintGeneratedClass.h"
-#include "EditorUtilityBlueprint.h"
-#include "GlobalEditorUtilityBase.h"
-#include "PlacedEditorUtilityBase.h"
-#include "ClassViewerModule.h"
+
+#include "Blueprint/WidgetBlueprintGeneratedClass.h"
+#include "Blueprint/WidgetTree.h"
 #include "ClassViewerFilter.h"
-#include "Kismet2/KismetEditorUtilities.h"
-#include "Kismet2/SClassPickerDialog.h"
+#include "ClassViewerModule.h"
+#include "Components/CanvasPanel.h"
+#include "Components/GridPanel.h"
+#include "Components/HorizontalBox.h"
+#include "Components/PanelWidget.h"
+#include "Components/VerticalBox.h"
+#include "Components/Widget.h"
+#include "Containers/Array.h"
+#include "Containers/Set.h"
+#include "Containers/UnrealString.h"
 #include "EditorUtilityWidget.h"
 #include "EditorUtilityWidgetBlueprint.h"
-#include "Components/CanvasPanel.h"
-#include "BaseWidgetBlueprint.h"
-#include "Blueprint/WidgetTree.h"
-#include "Components/HorizontalBox.h"
-#include "Components/VerticalBox.h"
-#include "Components/GridPanel.h"
-#include "UMGEditorProjectSettings.h"
+#include "HAL/Platform.h"
+#include "HAL/PlatformCrt.h"
+#include "HAL/PlatformMisc.h"
+#include "Internationalization/Internationalization.h"
+#include "Internationalization/Text.h"
+#include "Kismet2/KismetEditorUtilities.h"
+#include "Kismet2/SClassPickerDialog.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/MessageDialog.h"
+#include "Modules/ModuleManager.h"
+#include "Templates/Casts.h"
+#include "Templates/SharedPointer.h"
+#include "UObject/Class.h"
+#include "UObject/Object.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/UnrealNames.h"
+#include "EditorUtilityWidgetProjectSettings.h"
+
+class FFeedbackContext;
 
 #define LOCTEXT_NAMESPACE "UEditorUtilityWidgetBlueprintFactory"
 
@@ -61,7 +75,7 @@ UEditorUtilityWidgetBlueprintFactory::UEditorUtilityWidgetBlueprintFactory(const
 
 bool UEditorUtilityWidgetBlueprintFactory::ConfigureProperties()
 {
-	if (GetDefault<UUMGEditorProjectSettings>()->bUseWidgetTemplateSelector)
+	if (GetDefault<UEditorUtilityWidgetProjectSettings>()->bUseWidgetTemplateSelector)
 	{
 		// Load the classviewer module to display a class picker
 		FClassViewerModule& ClassViewerModule = FModuleManager::LoadModuleChecked<FClassViewerModule>("ClassViewer");
@@ -71,19 +85,32 @@ bool UEditorUtilityWidgetBlueprintFactory::ConfigureProperties()
 		Options.Mode = EClassViewerMode::ClassPicker;
 		Options.bShowNoneOption = true;
 
-		Options.ExtraPickerCommonClasses.Add(UHorizontalBox::StaticClass());
-		Options.ExtraPickerCommonClasses.Add(UVerticalBox::StaticClass());
-		Options.ExtraPickerCommonClasses.Add(UGridPanel::StaticClass());
-		Options.ExtraPickerCommonClasses.Add(UCanvasPanel::StaticClass());
+		TArray<TSoftClassPtr<UPanelWidget>> CommonRootWidgetClasses = GetDefault<UEditorUtilityWidgetProjectSettings>()->CommonRootWidgetClasses;
+		for (int32 Index = 0; Index < CommonRootWidgetClasses.Num(); ++Index)
+		{
+			UClass* PanelWidgetClass = CommonRootWidgetClasses[Index].LoadSynchronous();
+			if (PanelWidgetClass && PanelWidgetClass->IsChildOf(UPanelWidget::StaticClass()))
+			{
+				if (!Options.ExtraPickerCommonClasses.Contains(PanelWidgetClass))
+				{
+					Options.ExtraPickerCommonClasses.Add(PanelWidgetClass);
+				}
+			}
+		}
+
+		if (Options.ExtraPickerCommonClasses.Num() == 0)
+		{
+			Options.ExtraPickerCommonClasses.Add(UCanvasPanel::StaticClass());
+		}
 
 		TSharedPtr<FEditorUtilityWidgetBlueprintFactoryFilter> Filter = MakeShareable(new FEditorUtilityWidgetBlueprintFactoryFilter);
-		Options.ClassFilter = Filter;
+		Options.ClassFilters.Add(Filter.ToSharedRef());
 
 		Filter->DisallowedClassFlags = CLASS_Abstract | CLASS_Deprecated | CLASS_NewerVersionExists;
 		Filter->AllowedChildrenOfClasses.Add(UPanelWidget::StaticClass());
 
-		const FText TitleText = LOCTEXT("CreateWidgetBlueprint", "Pick Root Widget for New Editor Utility Widget");
-		return SClassPickerDialog::PickClass(TitleText, Options, RootWidgetClass, UPanelWidget::StaticClass());
+		const FText TitleText = LOCTEXT("CreateRootWidgetBlueprint", "Pick Root Widget for New Editor Utility Widget");
+		return SClassPickerDialog::PickClass(TitleText, Options, static_cast<UClass*&>(RootWidgetClass), UPanelWidget::StaticClass());
 
 	}
 	return true;
@@ -100,13 +127,13 @@ UObject* UEditorUtilityWidgetBlueprintFactory::FactoryCreateNew(UClass* Class, U
 	{
 		FFormatNamedArguments Args;
 		Args.Add(TEXT("ClassName"), (ParentClass != nullptr) ? FText::FromString(ParentClass->GetName()) : NSLOCTEXT("UnrealEd", "Null", "(null)"));
-		FMessageDialog::Open(EAppMsgType::Ok, FText::Format(NSLOCTEXT("UnrealEd", "CannotCreateBlueprintFromClass", "Cannot create a blueprint based on the class '{0}'."), Args));
+		FMessageDialog::Open(EAppMsgType::Ok, FText::Format(NSLOCTEXT("UnrealEd", "CannotCreateBlueprintFromClass", "Cannot create a blueprint based on the class '{ClassName}'."), Args));
 		return nullptr;
 	}
 	else
 	{
 		// If the root widget selection dialog is not enabled, use a canvas panel as the root by default
-		if (!GetDefault<UUMGEditorProjectSettings>()->bUseWidgetTemplateSelector)
+		if (!GetDefault<UEditorUtilityWidgetProjectSettings>()->bUseWidgetTemplateSelector)
 		{
 			RootWidgetClass = UCanvasPanel::StaticClass();
 		}

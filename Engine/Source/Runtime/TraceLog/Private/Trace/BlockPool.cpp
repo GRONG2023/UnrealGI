@@ -8,6 +8,7 @@
 #include "Trace/Detail/Atomic.h"
 #include "Trace/Detail/Writer.inl"
 
+namespace UE {
 namespace Trace {
 namespace Private {
 
@@ -45,7 +46,7 @@ static uint32							GPoolUsage;			// = 0;
 #undef T_ALIGN
 
 ////////////////////////////////////////////////////////////////////////////////
-static FPoolBlockList Writer_AddPageToPool(uint32 PageSize)
+static FPoolBlockList Writer_AllocateBlockList(uint32 PageSize)
 {
 	// The free list is empty so we have to populate it with some new blocks.
 	uint8* PageBase = (uint8*)Writer_MemoryAllocate(PageSize, PLATFORM_CACHE_LINE_SIZE);
@@ -61,13 +62,13 @@ static FPoolBlockList Writer_AddPageToPool(uint32 PageSize)
 	for (int i = 1, n = PageSize / GPoolBlockSize; ; ++i)
 	{
 		auto* Buffer = (FWriteBuffer*)Block;
-		Buffer->Size = BufferSize;
+		Buffer->Size = uint16(BufferSize);
 		if (i >= n)
 		{
 			break;
 		}
 
-		Buffer->NextBuffer = (FWriteBuffer*)(Block + GPoolBlockSize);
+		AtomicStoreRelaxed(&(Buffer->NextBuffer), (FWriteBuffer*)(Block + GPoolBlockSize));
 		Block += GPoolBlockSize;
 	}
 
@@ -93,7 +94,9 @@ FWriteBuffer* Writer_AllocateBlockFromPool()
 		FWriteBuffer* Owned = AtomicLoadRelaxed(&GPoolFreeList);
 		if (Owned != nullptr)
 		{
-			if (!AtomicCompareExchangeRelaxed(&GPoolFreeList, Owned->NextBuffer, Owned))
+			FWriteBuffer* OwnedNext = AtomicLoadRelaxed(&(Owned->NextBuffer));
+
+			if (!AtomicCompareExchangeAcquire(&GPoolFreeList, OwnedNext, Owned))
 			{
 				PlatformYield();
 				continue;
@@ -117,14 +120,16 @@ FWriteBuffer* Writer_AllocateBlockFromPool()
 			continue;
 		}
 
-		FPoolBlockList BlockList = Writer_AddPageToPool(GPoolPageSize);
+		FPoolBlockList BlockList = Writer_AllocateBlockList(GPoolPageSize);
 		Ret = BlockList.Head;
 
 		// And insert the block list into the freelist. 'Block' is now the last block
 		for (auto* ListNode = BlockList.Tail;; PlatformYield())
 		{
-			ListNode->NextBuffer = AtomicLoadRelaxed(&GPoolFreeList);
-			if (AtomicCompareExchangeRelease(&GPoolFreeList, Ret->NextBuffer, ListNode->NextBuffer))
+			FWriteBuffer* FreeListValue = AtomicLoadRelaxed(&GPoolFreeList);
+			AtomicStoreRelaxed(&(ListNode->NextBuffer), FreeListValue);
+
+			if (AtomicCompareExchangeRelease(&GPoolFreeList, Ret->NextBuffer, FreeListValue))
 			{
 				break;
 			}
@@ -150,8 +155,10 @@ void Writer_FreeBlockListToPool(FWriteBuffer* Head, FWriteBuffer* Tail)
 {
 	for (FWriteBuffer* ListNode = Tail;; PlatformYield())
 	{
-		ListNode->NextBuffer = AtomicLoadRelaxed(&GPoolFreeList);
-		if (AtomicCompareExchangeRelease(&GPoolFreeList, Head, ListNode->NextBuffer))
+		FWriteBuffer* FreeListValue = AtomicLoadRelaxed(&GPoolFreeList);
+		AtomicStoreRelaxed(&(ListNode->NextBuffer), FreeListValue);
+
+		if (AtomicCompareExchangeRelease(&GPoolFreeList, Head, FreeListValue))
 		{
 			break;
 		}
@@ -161,7 +168,6 @@ void Writer_FreeBlockListToPool(FWriteBuffer* Head, FWriteBuffer* Tail)
 ////////////////////////////////////////////////////////////////////////////////
 void Writer_InitializePool()
 {
-	Writer_AddPageToPool(GPoolBlockSize);
 	static_assert(GPoolPageSize >= 0x10000, "Page growth must be >= 64KB");
 	static_assert(GPoolInitPageSize >= 0x10000, "Initial page size must be >= 64KB");
 }
@@ -182,5 +188,6 @@ void Writer_ShutdownPool()
 
 } // namespace Private
 } // namespace Trace
+} // namespace UE
 
 #endif // UE_TRACE_ENABLED

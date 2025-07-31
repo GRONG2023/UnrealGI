@@ -2,12 +2,18 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
 #include "BehaviorTreeGraphNode_Task.h"
+#include "Containers/UnrealString.h"
+#include "CoreMinimal.h"
+#include "HAL/Platform.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/UObjectGlobals.h"
+
 #include "BehaviorTreeGraphNode_SubtreeTask.generated.h"
 
-UCLASS()
+class UObject;
+
+UCLASS(MinimalAPI)
 class UBehaviorTreeGraphNode_SubtreeTask : public UBehaviorTreeGraphNode_Task
 {
 	GENERATED_UCLASS_BODY()
@@ -20,4 +26,6 @@ class UBehaviorTreeGraphNode_SubtreeTask : public UBehaviorTreeGraphNode_Task
 
 	/** updates nodes injected from subtree's root */
 	bool UpdateInjectedNodes();
+
+	virtual FLinearColor GetBackgroundColor(bool bIsActiveForDebugger) const override;
 };

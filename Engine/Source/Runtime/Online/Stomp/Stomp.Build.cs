@@ -8,8 +8,7 @@ public class Stomp : ModuleRules
 	{
 		get
 		{
-			return Target.Platform == UnrealTargetPlatform.Win32 ||
-				Target.Platform == UnrealTargetPlatform.Win64 ||
+			return Target.Platform == UnrealTargetPlatform.Win64 ||
 				Target.Platform == UnrealTargetPlatform.Mac ||
 				Target.IsInPlatformGroup(UnrealPlatformGroup.Unix);
 		}
@@ -27,13 +26,6 @@ public class Stomp : ModuleRules
 		if (bShouldUseModule)
 		{
 			PublicDefinitions.Add("WITH_STOMP=1");
-
-			PrivateIncludePaths.AddRange(
-				new string[]
-				{
-					"Runtime/Online/Stomp/Private",
-				}
-			);
 
 			PrivateDependencyModuleNames.AddRange(
 				new string[] {

@@ -1,57 +1,43 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 #pragma once
 
-#include "CoreMinimal.h"
-
-#include "Blueprint/UserWidget.h"
+#include "Containers/Array.h"
+#include "Containers/UnrealString.h"
 #include "EditorUndoClient.h"
-#include "Engine/DeveloperSettings.h"
-#include "Framework/Docking/TabManager.h"
-#include "Kismet/BlueprintFunctionLibrary.h"
+#include "HAL/Platform.h"
+#include "Internationalization/Text.h"
 #include "Math/Color.h"
 #include "Misc/NotifyHook.h"
-#include "Sound/SoundEffectPreset.h"
+#include "Templates/SharedPointer.h"
 #include "Toolkits/AssetEditorToolkit.h"
-#include "Toolkits/IToolkitHost.h"
-#include "UObject/GCObject.h"
-#include "UObject/ObjectMacros.h"
-#include "Widgets/SWidget.h"
+#include "Toolkits/IToolkit.h"
+#include "Types/SlateEnums.h"
+#include "UObject/NameTypes.h"
+#include "UObject/StrongObjectPtr.h"
 
-#include "SoundEffectPresetEditor.generated.h"
-
-// Forward Declarations
-class FCurveEditor;
+class FEditPropertyChain;
+class FProperty;
+class FSpawnTabArgs;
+class FTabManager;
+class IDetailsView;
 class IToolkitHost;
-class SCurveEditorPanel;
-class SSoundEffectEditorPreviewViewport;
-class UClass;
-class UCurveBase;
-class UWidgetBlueprint;
+class SDockTab;
 class USoundEffectPreset;
+class UUserWidget;
+struct FPropertyChangedEvent;
 
 
-UCLASS(Blueprintable)
-class USoundEffectPresetUserWidget : public UUserWidget
-{
-	GENERATED_BODY()
-
-public:
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "General")
-	USoundEffectPreset* Preset;
-
-	UFUNCTION(BlueprintImplementableEvent)
-	void OnPresetChanged(FName PropertyName);
-};
-
-class FSoundEffectPresetEditor : public FAssetEditorToolkit, public FNotifyHook, public FEditorUndoClient, public FGCObject
+class FSoundEffectPresetEditor : public FAssetEditorToolkit, public FNotifyHook, public FEditorUndoClient
 {
 public:
 	FSoundEffectPresetEditor();
 	virtual ~FSoundEffectPresetEditor() = default;
 
-	void Init(const EToolkitMode::Type Mode, const TSharedPtr<IToolkitHost>& InitToolkitHost, USoundEffectPreset* PresetToEdit);
+	void Init(const EToolkitMode::Type Mode, const TSharedPtr<IToolkitHost>& InitToolkitHost, USoundEffectPreset* PresetToEdit, const TArray<UUserWidget*>& InWidgetBlueprints);
 
 	/** FAssetEditorToolkit interface */
+	virtual bool CloseWindow(EAssetEditorCloseReason InCloseReason) override;
+	virtual FName GetEditorName() const override;
 	virtual FName GetToolkitFName() const override;
 	virtual FText GetBaseToolkitName() const override;
 	virtual FString GetWorldCentricTabPrefix() const override;
@@ -61,21 +47,17 @@ public:
 
 	/** FNotifyHook interface */
 	virtual void NotifyPostChange(const FPropertyChangedEvent& PropertyChangedEvent, FProperty* PropertyThatChanged) override;
-
-	/** FGCObject interface */
-	virtual void AddReferencedObjects(FReferenceCollector& Collector) override;
-	virtual FString GetReferencerName() const override;
-
+	virtual void NotifyPostChange(const FPropertyChangedEvent& PropertyChangedEvent, FEditPropertyChain* PropertyThatChanged) override;
 protected:
 	virtual void PostUndo(bool bSuccess) override;
 	virtual void PostRedo(bool bSuccess) override;
 
 private:
-	/** Finds and returns the UserWidget of the preset if one is provided by the use in the AudioEditor developer settings. */
-	void InitPresetWidget();
+	/** Initializes all preset user widgets. */
+	void InitPresetWidgets(const TArray<UUserWidget*>& InWidgets);
 
 	/**	Spawns the tab allowing for editing/viewing the blueprint widget for the associated SoundEffectPreset */
-	TSharedRef<SDockTab> SpawnTab_UserWidgetEditor(const FSpawnTabArgs& Args);
+	TSharedRef<SDockTab> SpawnTab_UserWidgetEditor(const FSpawnTabArgs& Args, int32 WidgetIndex);
 
 	/**	Spawns the tab allowing for editing/viewing details panel */
 	TSharedRef<SDockTab> SpawnTab_Properties(const FSpawnTabArgs& Args);
@@ -89,8 +71,8 @@ private:
 	/** Settings Editor App Identifier */
 	static const FName AppIdentifier;
 
-	USoundEffectPreset* SoundEffectPreset;
-	USoundEffectPresetUserWidget* UserWidget;
+	TStrongObjectPtr<USoundEffectPreset> SoundEffectPreset;
+	TArray<TStrongObjectPtr<UUserWidget>> UserWidgets;
 
 	/** Tab Ids */
 	static const FName PropertiesTabId;

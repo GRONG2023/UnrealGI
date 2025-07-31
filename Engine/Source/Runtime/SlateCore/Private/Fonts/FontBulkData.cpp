@@ -5,6 +5,10 @@
 #include "Misc/ScopeLock.h"
 #include "SlateGlobals.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(FontBulkData)
+
+#include <limits>
+
 // The total amount of memory we are using to store raw font bytes in bulk data
 DECLARE_MEMORY_STAT(TEXT("Font BulkData Memory"), STAT_SlateBulkFontDataMemory, STATGROUP_SlateMemory);
 
@@ -21,7 +25,7 @@ void UFontBulkData::Initialize(const FString& InFontFilename)
 	TUniquePtr<FArchive> Reader(IFileManager::Get().CreateFileReader(*InFontFilename, 0));
 	if(Reader)
 	{
-		const int32 FontDataSizeBytes = Reader->TotalSize();
+		const int64 FontDataSizeBytes = Reader->TotalSize();
 
 		BulkData.Lock(LOCK_READ_WRITE);
 		void* const LockedFontData = BulkData.Realloc(FontDataSizeBytes);
@@ -35,7 +39,7 @@ void UFontBulkData::Initialize(const FString& InFontFilename)
 	}
 }
 
-void UFontBulkData::Initialize(const void* const InFontData, const int32 InFontDataSizeBytes)
+void UFontBulkData::Initialize(const void* const InFontData, const int64 InFontDataSizeBytes)
 {
 	// The bulk data cannot be removed if we are loading a memory location since we 
 	// have no knowledge of this memory later
@@ -49,7 +53,7 @@ void UFontBulkData::Initialize(const void* const InFontData, const int32 InFontD
 	INC_DWORD_STAT_BY( STAT_SlateBulkFontDataMemory, BulkData.GetBulkDataSize() );
 }
 
-const void* UFontBulkData::Lock(int32& OutFontDataSizeBytes) const
+const void* UFontBulkData::Lock(int64& OutFontDataSizeBytes) const
 {
 	CriticalSection.Lock();
 
@@ -69,13 +73,12 @@ const void* UFontBulkData::Lock(int32& OutFontDataSizeBytes) const
 #endif
 
 	return Data;
-
 }
 
 void UFontBulkData::Unlock()
 {
 	bool bWasLoaded = BulkData.IsBulkDataLoaded();
-	int32 BulkDataSize = BulkData.GetBulkDataSize(); 
+	int64 BulkDataSize = BulkData.GetBulkDataSize(); 
 	BulkData.Unlock();
 
 #if STATS
@@ -87,18 +90,9 @@ void UFontBulkData::Unlock()
 	CriticalSection.Unlock();
 }
 
-int32 UFontBulkData::GetBulkDataSize() const
+int64 UFontBulkData::GetBulkDataSize() const
 {
 	return BulkData.GetBulkDataSize();
-}
-
-int32 UFontBulkData::GetBulkDataSizeOnDisk() const
-{
-#if !USE_NEW_BULKDATA
-	return BulkData.GetBulkDataSizeOnDisk();
-#else
-	return 0;
-#endif
 }
 
 void UFontBulkData::Serialize(FArchive& Ar)
@@ -107,7 +101,7 @@ void UFontBulkData::Serialize(FArchive& Ar)
 
 	if (Ar.IsSaving())
 	{
-		BulkData.SetBulkDataFlags(BULKDATA_SerializeCompressed | BULKDATA_SerializeCompressedBitWindow);
+		BulkData.SetBulkDataFlags(BULKDATA_SerializeCompressed);
 	}
 	
 	BulkData.Serialize(Ar, this, INDEX_NONE, false);
@@ -124,3 +118,4 @@ void UFontBulkData::Serialize(FArchive& Ar)
 	}
 #endif
 }
+

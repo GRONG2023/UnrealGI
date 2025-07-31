@@ -1,78 +1,134 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "BehaviorTreeEditor.h"
-#include "Widgets/Text/STextBlock.h"
-#include "Framework/MultiBox/MultiBoxBuilder.h"
-#include "Engine/Blueprint.h"
-#include "Widgets/Layout/SBorder.h"
-#include "UObject/Package.h"
-#include "BehaviorTree/BTDecorator.h"
-#include "BehaviorTree/BTCompositeNode.h"
-#include "Modules/ModuleManager.h"
-#include "EditorStyleSet.h"
-#include "Editor/UnrealEdEngine.h"
-#include "BlackboardDataFactory.h"
-#include "Engine/BlueprintGeneratedClass.h"
-#include "UnrealEdGlobals.h"
-#include "Kismet2/KismetEditorUtilities.h"
-#include "WorkflowOrientedApp/WorkflowTabFactory.h"
-#include "WorkflowOrientedApp/WorkflowTabManager.h"
-#include "WorkflowOrientedApp/WorkflowUObjectDocuments.h"
-#include "ClassViewerModule.h"
-#include "Kismet2/BlueprintEditorUtils.h"
-#include "BehaviorTreeEditorTypes.h"
-#include "BehaviorTreeDecoratorGraphNode_Logic.h"
-#include "BehaviorTreeGraph.h"
-#include "BehaviorTreeGraphNode_Decorator.h"
-#include "BehaviorTreeGraphNode_Root.h"
-#include "EdGraphSchema_BehaviorTree.h"
-#include "AssetToolsModule.h"
-#include "PropertyEditorModule.h"
-#include "BehaviorTreeEditorModule.h"
-#include "BehaviorTreeDebugger.h"
-#include "FindInBT.h"
-#include "IDetailsView.h"
-#include "GraphEditorActions.h"
-#include "ScopedTransaction.h"
-#include "BehaviorTreeColors.h"
 
+#include "AIGraphNode.h"
+#include "AIGraphTypes.h"
+#include "AssetRegistry/AssetRegistryModule.h"
+#include "AssetToolsModule.h"
 #include "BehaviorTree/BTCompositeNode.h"
-#include "BehaviorTree/BlackboardData.h"
+#include "BehaviorTree/BTDecorator.h"
 #include "BehaviorTree/BehaviorTree.h"
-#include "BehaviorTree/Tasks/BTTask_RunBehavior.h"
-#include "BehaviorTree/Tasks/BTTask_BlueprintBase.h"
+#include "BehaviorTree/BehaviorTreeComponent.h"
+#include "BehaviorTree/BehaviorTreeTypes.h"
+#include "BehaviorTree/BlackboardData.h"
 #include "BehaviorTree/Decorators/BTDecorator_BlueprintBase.h"
 #include "BehaviorTree/Services/BTService_BlueprintBase.h"
-
-
-#include "BehaviorTreeEditorModes.h"
-#include "BehaviorTreeEditorToolbar.h"
-#include "BehaviorTreeEditorTabFactories.h"
+#include "BehaviorTree/Tasks/BTTask_BlueprintBase.h"
+#include "BehaviorTree/Tasks/BTTask_RunBehavior.h"
+#include "BehaviorTree/Tasks/BTTask_RunBehaviorDynamic.h"
+#include "BehaviorTreeColors.h"
+#include "BehaviorTreeDebugger.h"
+#include "BehaviorTreeDecoratorGraphNode_Logic.h"
 #include "BehaviorTreeEditorCommands.h"
+#include "BehaviorTreeEditorModes.h"
+#include "BehaviorTreeEditorModule.h"
+#include "BehaviorTreeEditorTabFactories.h"
 #include "BehaviorTreeEditorTabs.h"
+#include "BehaviorTreeEditorToolbar.h"
+#include "BehaviorTreeEditorTypes.h"
 #include "BehaviorTreeEditorUtils.h"
+#include "BehaviorTreeGraph.h"
+#include "BehaviorTreeGraphNode.h"
+#include "BehaviorTreeGraphNode_CompositeDecorator.h"
+#include "BehaviorTreeGraphNode_Decorator.h"
+#include "BehaviorTreeGraphNode_Root.h"
 #include "BehaviorTreeGraphNode_SubtreeTask.h"
-#include "DetailCustomizations/BlackboardDataDetails.h"
-#include "SBehaviorTreeBlackboardView.h"
-#include "SBehaviorTreeBlackboardEditor.h"
+#include "BlackboardDataFactory.h"
+#include "BlueprintUtilities.h"
 #include "ClassViewerFilter.h"
-#include "AssetRegistryModule.h"
-#include "IContentBrowserSingleton.h"
+#include "ClassViewerModule.h"
+#include "Containers/Array.h"
+#include "Containers/Map.h"
 #include "ContentBrowserModule.h"
-#include "Widgets/Docking/SDockTab.h"
+#include "Delegates/Delegate.h"
+#include "DetailCustomizations/BlackboardDataDetails.h"
+#include "DetailsViewArgs.h"
+#include "EdGraph/EdGraph.h"
+#include "EdGraph/EdGraphNode.h"
+#include "EdGraph/EdGraphPin.h"
+#include "EdGraph/EdGraphSchema.h"
+#include "EdGraphSchema_BehaviorTree.h"
+#include "Editor.h"
+#include "Editor/EditorEngine.h"
+#include "Editor/UnrealEdEngine.h"
+#include "Engine/Blueprint.h"
+#include "Engine/BlueprintGeneratedClass.h"
+#include "Engine/World.h"
+#include "FindInBT.h"
+#include "Framework/Application/SlateApplication.h"
+#include "Framework/Commands/UIAction.h"
+#include "Framework/Commands/UICommandList.h"
+#include "Framework/Docking/TabManager.h"
+#include "Framework/MultiBox/MultiBoxBuilder.h"
+#include "Framework/MultiBox/MultiBoxExtender.h"
+#include "GraphEditorActions.h"
+#include "HAL/PlatformCrt.h"
+#include "IAssetTools.h"
+#include "IContentBrowserSingleton.h"
+#include "IDetailsView.h"
+#include "Internationalization/Internationalization.h"
+#include "Kismet2/BlueprintEditorUtils.h"
+#include "Kismet2/KismetEditorUtilities.h"
+#include "Layout/Margin.h"
+#include "Logging/LogCategory.h"
+#include "Logging/LogMacros.h"
+#include "Math/NumericLimits.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/Attribute.h"
+#include "Misc/PackageName.h"
+#include "Misc/Paths.h"
+#include "Modules/ModuleManager.h"
+#include "PropertyEditorDelegates.h"
+#include "PropertyEditorModule.h"
+#include "SBehaviorTreeBlackboardEditor.h"
+#include "SBehaviorTreeBlackboardView.h"
+#include "ScopedTransaction.h"
+#include "SlotBase.h"
+#include "Styling/AppStyle.h"
+#include "Styling/SlateColor.h"
 #include "Subsystems/AssetEditorSubsystem.h"
+#include "Templates/Casts.h"
+#include "Textures/SlateIcon.h"
+#include "Toolkits/AssetEditorToolkit.h"
+#include "Trace/Detail/Channel.h"
+#include "UObject/Class.h"
+#include "UObject/Object.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/ObjectSaveContext.h"
+#include "UObject/Package.h"
+#include "UObject/UObjectBaseUtility.h"
+#include "UObject/UObjectGlobals.h"
+#include "UObject/UnrealNames.h"
+#include "UObject/UnrealType.h"
+#include "UObject/WeakObjectPtr.h"
+#include "UnrealEdGlobals.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
+#include "Widgets/Docking/SDockTab.h"
+#include "Widgets/Layout/SBorder.h"
+#include "Widgets/SBoxPanel.h"
+#include "Widgets/Text/STextBlock.h"
+#include "WorkflowOrientedApp/WorkflowCentricApplication.h"
+#include "WorkflowOrientedApp/WorkflowTabManager.h"
+#include "WorkflowOrientedApp/WorkflowUObjectDocuments.h"
+
+class SWidget;
 
 #define LOCTEXT_NAMESPACE "BehaviorTreeEditor"
 
 const FName FBehaviorTreeEditor::BehaviorTreeMode(TEXT("BehaviorTree"));
 const FName FBehaviorTreeEditor::BlackboardMode(TEXT("Blackboard"));
 
+FText FBehaviorTreeEditor::BehaviorTreeModeText(LOCTEXT("BehaviorTreeMode", "Behavior Tree"));
+FText FBehaviorTreeEditor::BlackboardModeText(LOCTEXT("BlackboardMode", "Blackboard"));
+
 //////////////////////////////////////////////////////////////////////////
 FBehaviorTreeEditor::FBehaviorTreeEditor() 
 	: IBehaviorTreeEditor()
 {
 	// listen for package change events to update injected nodes
-	OnPackageSavedDelegateHandle     = UPackage::PackageSavedEvent.AddRaw(this, &FBehaviorTreeEditor::OnPackageSaved);
+	OnPackageSavedDelegateHandle     = UPackage::PackageSavedWithContextEvent.AddRaw(this, &FBehaviorTreeEditor::OnPackageSaved);
 
 	bShowDecoratorRangeLower = false;
 	bShowDecoratorRangeSelf = false;
@@ -87,11 +143,17 @@ FBehaviorTreeEditor::FBehaviorTreeEditor()
 	BlackboardData = nullptr;
 
 	bCheckDirtyOnAssetSave = true;
+
+	GraphClass = UBehaviorTreeGraph::StaticClass();
+	GraphName = "Behavior Tree";
+	CornerText = LOCTEXT("AppearanceCornerText", "BEHAVIOR TREE");
+	TitleText = LOCTEXT("BehaviorTreeGraphLabel", "Behavior Tree");
+	RootNodeNoteText = LOCTEXT("RootLevelNode", "Root-level decorators are only valid and will be executed if this BT is be used\nas static a sub-tree (via \"Run Behavior\"). These decorators will be ignored if\ndynamically injected with \"Run Dynamic Behavior\".");
 }
 
 FBehaviorTreeEditor::~FBehaviorTreeEditor()
 {
-	UPackage::PackageSavedEvent.Remove(OnPackageSavedDelegateHandle);
+	UPackage::PackageSavedWithContextEvent.Remove(OnPackageSavedDelegateHandle);
 
 	Debugger.Reset();
 }
@@ -225,11 +287,11 @@ void FBehaviorTreeEditor::InitBehaviorTreeEditor( const EToolkitMode::Type Mode,
 
 		Debugger = MakeShareable(new FBehaviorTreeDebugger);
 		Debugger->Setup(BehaviorTree, SharedThis(this));
-		Debugger->OnDebuggedBlackboardChanged().AddSP(this, &FBehaviorTreeEditor::HandleDebuggedBlackboardChanged);
 		BindDebuggerToolbarCommands();
 
 		FBehaviorTreeEditorModule& BehaviorTreeEditorModule = FModuleManager::LoadModuleChecked<FBehaviorTreeEditorModule>( "BehaviorTreeEditor" );
 		AddMenuExtender(BehaviorTreeEditorModule.GetMenuExtensibilityManager()->GetAllExtenders(GetToolkitCommands(), GetEditingObjects()));
+		AddToolbarExtender(BehaviorTreeEditorModule.GetToolBarExtensibilityManager()->GetAllExtenders(GetToolkitCommands(), GetEditingObjects()));
 
 		AddApplicationMode(BehaviorTreeMode, MakeShareable(new FBehaviorTreeEditorApplicationMode(SharedThis(this))));
 		AddApplicationMode(BlackboardMode, MakeShareable(new FBlackboardEditorApplicationMode(SharedThis(this))));
@@ -248,7 +310,6 @@ void FBehaviorTreeEditor::InitBehaviorTreeEditor( const EToolkitMode::Type Mode,
 				.OnIsDebuggerPaused(this, &FBehaviorTreeEditor::IsDebuggerPaused)
 				.OnGetDebugTimeStamp(this, &FBehaviorTreeEditor::HandleGetDebugTimeStamp)
 				.OnGetDisplayCurrentState(this, &FBehaviorTreeEditor::HandleGetDisplayCurrentState)
-				.OnBlackboardKeyChanged(this, &FBehaviorTreeEditor::HandleBlackboardKeyChanged)
 				.OnIsBlackboardModeActive(this, &FBehaviorTreeEditor::HandleIsBlackboardModeActive);
 	}
 	else
@@ -285,7 +346,9 @@ void FBehaviorTreeEditor::RestoreBehaviorTree()
 	const bool bNewGraph = MyGraph == NULL;
 	if (MyGraph == NULL)
 	{
-		BehaviorTree->BTGraph = FBlueprintEditorUtils::CreateNewGraph(BehaviorTree, TEXT("Behavior Tree"), UBehaviorTreeGraph::StaticClass(), UEdGraphSchema_BehaviorTree::StaticClass());
+		const TSubclassOf<UEdGraphSchema> SchemaClass = GetDefault<UBehaviorTreeGraph>(GraphClass)->Schema;
+		check(SchemaClass);
+		BehaviorTree->BTGraph = FBlueprintEditorUtils::CreateNewGraph(BehaviorTree, GraphName, GraphClass, SchemaClass);
 		MyGraph = Cast<UBehaviorTreeGraph>(BehaviorTree->BTGraph);
 
 		// Initialize the behavior tree graph
@@ -371,7 +434,7 @@ FText FBehaviorTreeEditor::HandleGetDebugKeyValue(const FName& InKeyName, bool b
 	return FText();
 }
 
-float FBehaviorTreeEditor::HandleGetDebugTimeStamp(bool bUseCurrentState) const
+double FBehaviorTreeEditor::HandleGetDebugTimeStamp(bool bUseCurrentState) const
 {
 	if(IsDebuggerReady())
 	{
@@ -394,15 +457,6 @@ bool FBehaviorTreeEditor::HandleGetDisplayCurrentState() const
 	}
 
 	return false;
-}
-
-void FBehaviorTreeEditor::HandleBlackboardKeyChanged(UBlackboardData* InBlackboardData, FBlackboardEntry* const InKey)
-{
-	if(BlackboardView.IsValid())
-	{
-		// re-set object in blackboard view to keep it up to date
-		BlackboardView->SetObject(InBlackboardData);
-	}
 }
 
 bool FBehaviorTreeEditor::HandleIsBlackboardModeActive() const
@@ -464,7 +518,7 @@ EVisibility FBehaviorTreeEditor::GetRootLevelNodeVisibility() const
 FGraphAppearanceInfo FBehaviorTreeEditor::GetGraphAppearance() const
 {
 	FGraphAppearanceInfo AppearanceInfo;
-	AppearanceInfo.CornerText = LOCTEXT("AppearanceCornerText", "BEHAVIOR TREE");
+	AppearanceInfo.CornerText = CornerText;
 
 	const int32 StepIdx = Debugger.IsValid() ? Debugger->GetShownStateIndex() : 0;
 	if (Debugger.IsValid() && !Debugger->IsDebuggerRunning())
@@ -478,6 +532,11 @@ FGraphAppearanceInfo FBehaviorTreeEditor::GetGraphAppearance() const
 	else if (FBehaviorTreeDebugger::IsPlaySessionPaused())
 	{
 		AppearanceInfo.PIENotifyText = LOCTEXT("PausedLabel", "PAUSED");
+	}
+
+	if (Debugger.IsValid() && Debugger->IsBehaviorExecutionPaused())
+	{
+		AppearanceInfo.WarningText = LOCTEXT("BehaviorExecutionPausedLabel", "BEHAVIOR EXECUTION PAUSED");
 	}
 	
 	return AppearanceInfo;
@@ -569,7 +628,7 @@ TSharedRef<SGraphEditor> FBehaviorTreeEditor::CreateGraphEditorWidget(UEdGraph* 
 	// Make title bar
 	TSharedRef<SWidget> TitleBarWidget = 
 		SNew(SBorder)
-		.BorderImage( FEditorStyle::GetBrush( TEXT("Graph.TitleBackground") ) )
+		.BorderImage( FAppStyle::GetBrush( TEXT("Graph.TitleBackground") ) )
 		.HAlign(HAlign_Fill)
 		[
 			SNew(SHorizontalBox)
@@ -578,8 +637,8 @@ TSharedRef<SGraphEditor> FBehaviorTreeEditor::CreateGraphEditorWidget(UEdGraph* 
 			.FillWidth(1.f)
 			[
 				SNew(STextBlock)
-				.Text(LOCTEXT("BehaviorTreeGraphLabel", "Behavior Tree"))
-				.TextStyle( FEditorStyle::Get(), TEXT("GraphBreadcrumbButtonText") )
+				.Text(TitleText)
+				.TextStyle( FAppStyle::Get(), TEXT("GraphBreadcrumbButtonText") )
 			]
 		];
 
@@ -591,7 +650,8 @@ TSharedRef<SGraphEditor> FBehaviorTreeEditor::CreateGraphEditorWidget(UEdGraph* 
 		.Appearance(this, &FBehaviorTreeEditor::GetGraphAppearance)
 		.TitleBar(TitleBarWidget)
 		.GraphToEdit(InGraph)
-		.GraphEvents(InEvents);
+		.GraphEvents(InEvents)
+		.AutoExpandActionMenu(true);
 }
 
 bool FBehaviorTreeEditor::InEditingMode(bool bGraphIsEditable) const
@@ -627,7 +687,7 @@ TSharedRef<SWidget> FBehaviorTreeEditor::SpawnProperties()
 			[
 				SNew(SBorder)
 				.BorderBackgroundColor(BehaviorTreeColors::NodeBody::InjectedSubNode)
-				.BorderImage(FEditorStyle::GetBrush("Graph.StateNode.Body"))
+				.BorderImage(FAppStyle::GetBrush("Graph.StateNode.Body"))
 				.Visibility(this, &FBehaviorTreeEditor::GetInjectedNodeVisibility)
 				.Padding(FMargin(5.0f))
 				[
@@ -641,12 +701,12 @@ TSharedRef<SWidget> FBehaviorTreeEditor::SpawnProperties()
 			[
 				SNew(SBorder)
 				.BorderBackgroundColor(BehaviorTreeColors::NodeBody::InjectedSubNode)
-				.BorderImage(FEditorStyle::GetBrush("Graph.StateNode.Body"))
+				.BorderImage(FAppStyle::GetBrush("Graph.StateNode.Body"))
 				.Visibility(this, &FBehaviorTreeEditor::GetRootLevelNodeVisibility)
 				.Padding(FMargin(5.0f))
 				[
 					SNew(STextBlock)
-					.Text(LOCTEXT("RootLevelNode", "Root-level decorators are only valid and will be executed if this BT is be used\nas static a sub-tree (via \"Run Behavior\"). These decorators will be ignored if\ndynamically injected with \"Run Dynamic Behavior\"."))
+					.Text(RootNodeNoteText)
 				]
 			]
 			+SVerticalBox::Slot()
@@ -655,7 +715,7 @@ TSharedRef<SWidget> FBehaviorTreeEditor::SpawnProperties()
 			[
 				SNew(SBorder)
 				.BorderBackgroundColor(BehaviorTreeColors::NodeBorder::HighlightAbortRange0)
-				.BorderImage( FEditorStyle::GetBrush( "Graph.StateNode.Body" ) )
+				.BorderImage( FAppStyle::GetBrush( "Graph.StateNode.Body" ) )
 				.Visibility(this, &FBehaviorTreeEditor::GetRangeLowerVisibility)
 				.Padding(FMargin(5.0f))
 				[
@@ -669,7 +729,7 @@ TSharedRef<SWidget> FBehaviorTreeEditor::SpawnProperties()
 			[
 				SNew(SBorder)
 				.BorderBackgroundColor(BehaviorTreeColors::NodeBorder::HighlightAbortRange1)
-				.BorderImage( FEditorStyle::GetBrush( "Graph.StateNode.Body" ) )
+				.BorderImage( FAppStyle::GetBrush( "Graph.StateNode.Body" ) )
 				.Visibility(this, &FBehaviorTreeEditor::GetRangeSelfVisibility)
 				.Padding(FMargin(5.0f))
 				[
@@ -692,14 +752,10 @@ TSharedRef<SWidget> FBehaviorTreeEditor::SpawnBlackboardEditor()
 
 TSharedRef<SWidget> FBehaviorTreeEditor::SpawnBlackboardDetails()
 {
-	const bool bIsUpdatable = false;
-	const bool bAllowFavorites = true;
-	const bool bIsLockable = false;
-	const bool bAllowSearch = true;
-	const bool bObjectsUseNameArea = false;
-	const bool bHideSelectionTip = true;
 	FPropertyEditorModule& PropertyEditorModule = FModuleManager::GetModuleChecked<FPropertyEditorModule>( "PropertyEditor" );
-	FDetailsViewArgs DetailsViewArgs( bIsUpdatable, bIsLockable, bAllowSearch, FDetailsViewArgs::HideNameArea, bHideSelectionTip );
+	FDetailsViewArgs DetailsViewArgs;
+	DetailsViewArgs.NameAreaSettings = FDetailsViewArgs::HideNameArea;
+	DetailsViewArgs.bHideSelectionTip = true;
 	DetailsViewArgs.NotifyHook = this;
 	BlackboardDetailsView = PropertyEditorModule.CreateDetailView( DetailsViewArgs );
 
@@ -892,7 +948,8 @@ void FBehaviorTreeEditor::GetAbortModePreview(const class UBTDecorator* Decorato
 void FBehaviorTreeEditor::CreateInternalWidgets()
 {
 	FPropertyEditorModule& PropertyEditorModule = FModuleManager::GetModuleChecked<FPropertyEditorModule>( "PropertyEditor" );
-	FDetailsViewArgs DetailsViewArgs( false, false, true, FDetailsViewArgs::HideNameArea, false );
+	FDetailsViewArgs DetailsViewArgs; 
+	DetailsViewArgs.NameAreaSettings = FDetailsViewArgs::HideNameArea;
 	DetailsViewArgs.NotifyHook = this;
 	DetailsViewArgs.DefaultsOnlyVisibility = EEditDefaultsOnlyNodeVisibility::Hide;
 	DetailsView = PropertyEditorModule.CreateDetailView( DetailsViewArgs );
@@ -1107,10 +1164,15 @@ void FBehaviorTreeEditor::OnFinishedChangingProperties(const FPropertyChangedEve
 		MyGraph->UpdateInjectedNodes();
 		MyGraph->UpdateAsset(UBehaviorTreeGraph::ClearDebuggerFlags);
 	}
-	BehaviorTree->BTGraph->GetSchema()->ForceVisualizationCacheClear();
+
+	const TSharedPtr<SGraphEditor> FocusedGraphEd = UpdateGraphEdPtr.Pin();
+	if (FocusedGraphEd.IsValid() && FocusedGraphEd->GetCurrentGraph())
+	{
+		FocusedGraphEd->GetCurrentGraph()->GetSchema()->ForceVisualizationCacheClear();
+	}
 }
 
-void FBehaviorTreeEditor::OnPackageSaved(const FString& PackageFileName, UObject* Outer)
+void FBehaviorTreeEditor::OnPackageSaved(const FString& PackageFileName, UPackage* Package, FObjectPostSaveContext ObjectSaveContext)
 {
 	UBehaviorTreeGraph* MyGraph = BehaviorTree ? Cast<UBehaviorTreeGraph>(BehaviorTree->BTGraph) : NULL;
 	if (MyGraph)
@@ -1193,19 +1255,34 @@ void FBehaviorTreeEditor::OnNodeDoubleClicked(class UEdGraphNode* Node)
 			}
 		}
 	}
-	else if (UBehaviorTreeGraphNode_SubtreeTask* Task = Cast<UBehaviorTreeGraphNode_SubtreeTask>(Node))
+	else if (UBehaviorTreeGraphNode_Task* Task = Cast<UBehaviorTreeGraphNode_Task>(Node))
 	{
-		if (UBTTask_RunBehavior* RunTask = Cast<UBTTask_RunBehavior>(Task->NodeInstance))
+		UBehaviorTree* SubTreeToOpen = nullptr;
+		if (UBTTask_RunBehavior* SubtreeTask = Cast<UBTTask_RunBehavior>(Task->NodeInstance))
 		{
-			if (RunTask->GetSubtreeAsset())
+			SubTreeToOpen = SubtreeTask->GetSubtreeAsset();
+		}
+		else if (UBTTask_RunBehaviorDynamic* DynamicSubTreeTask = Cast<UBTTask_RunBehaviorDynamic>(Task->NodeInstance))
+		{
+			if (Debugger)
 			{
-				GEditor->GetEditorSubsystem<UAssetEditorSubsystem>()->OpenEditorForAsset(RunTask->GetSubtreeAsset());
+				SubTreeToOpen = Debugger->GetDynamicSubtreeTaskBehaviorTree(DynamicSubTreeTask);
+			}
+			
+			if (!SubTreeToOpen)
+			{
+				SubTreeToOpen = DynamicSubTreeTask->GetDefaultBehaviorAsset();
+			}
+		}
 
-				IBehaviorTreeEditor* ChildNodeEditor = static_cast<IBehaviorTreeEditor*>(GEditor->GetEditorSubsystem<UAssetEditorSubsystem>()->FindEditorForAsset(RunTask->GetSubtreeAsset(), true));
-				if (ChildNodeEditor)
-				{
-					ChildNodeEditor->InitializeDebuggerState(Debugger.Get());
-				}
+		if (SubTreeToOpen)
+		{
+			GEditor->GetEditorSubsystem<UAssetEditorSubsystem>()->OpenEditorForAsset(SubTreeToOpen);
+
+			IBehaviorTreeEditor* ChildNodeEditor = static_cast<IBehaviorTreeEditor*>(GEditor->GetEditorSubsystem<UAssetEditorSubsystem>()->FindEditorForAsset(SubTreeToOpen, true));
+			if (ChildNodeEditor)
+			{
+				ChildNodeEditor->InitializeDebuggerState(Debugger.Get());
 			}
 		}
 	}
@@ -1339,6 +1416,11 @@ void FBehaviorTreeEditor::SaveAsset_Execute()
 	}
 	// save it
 	IBehaviorTreeEditor::SaveAsset_Execute();
+}
+
+void FBehaviorTreeEditor::SetToolbarCreateActionsEnabled(const bool bActionsEnabled)
+{
+	ToolbarBuilder->SetCreateActionsEnabled(bActionsEnabled);
 }
 
 void FBehaviorTreeEditor::OnEnableBreakpoint()
@@ -1532,8 +1614,8 @@ FText FBehaviorTreeEditor::GetLocalizedMode(FName InMode)
 
 	if (LocModes.Num() == 0)
 	{
-		LocModes.Add( BehaviorTreeMode, LOCTEXT("BehaviorTreeMode", "Behavior Tree") );
-		LocModes.Add( BlackboardMode, LOCTEXT("BlackboardMode", "Blackboard") );
+		LocModes.Add( BehaviorTreeMode, BehaviorTreeModeText );
+		LocModes.Add( BlackboardMode, BlackboardModeText );
 	}
 
 	check( InMode != NAME_None );
@@ -1548,7 +1630,13 @@ UEdGraphNode* FBehaviorTreeEditor::FindInjectedNode(int32 Index) const
 	return BTGraph ? BTGraph->FindInjectedNode(Index) : NULL;
 }
 
-void FBehaviorTreeEditor::DoubleClickNode(class UEdGraphNode* Node)
+void FBehaviorTreeEditor::DoubleClickNode(UEdGraphNode* Node)
+{
+	FocusAttentionOnNode(Node);
+	OnNodeDoubleClicked(Node);
+}
+
+void FBehaviorTreeEditor::FocusAttentionOnNode(UEdGraphNode* Node)
 {
 	TSharedPtr<SGraphEditor> CurrentGraphEditor = UpdateGraphEdPtr.Pin();
 	if (CurrentGraphEditor.IsValid())
@@ -1556,9 +1644,7 @@ void FBehaviorTreeEditor::DoubleClickNode(class UEdGraphNode* Node)
 		CurrentGraphEditor->ClearSelectionSet();
 		CurrentGraphEditor->SetNodeSelection(Node, true);
 	}
-
 	JumpToNode(Node);
-	OnNodeDoubleClicked(Node);
 }
 
 void FBehaviorTreeEditor::FocusWindow(UObject* ObjectToFocusOn)
@@ -1573,6 +1659,12 @@ void FBehaviorTreeEditor::FocusWindow(UObject* ObjectToFocusOn)
 	}
 
 	FWorkflowCentricApplication::FocusWindow(ObjectToFocusOn);
+}
+
+bool FBehaviorTreeEditor::IncludeAssetInRestoreOpenAssetsPrompt(UObject* Asset) const
+{
+	// If we're in a BT editor which has a valid BehaviorTree, then don't reopen the BB during restore, only the BT
+	return Asset && (!Asset->IsA(UBlackboardData::StaticClass()) || !BehaviorTree);
 }
 
 void FBehaviorTreeEditor::OnNodeTitleCommitted(const FText& NewText, ETextCommit::Type CommitInfo, UEdGraphNode* NodeBeingChanged)
@@ -1646,7 +1738,7 @@ UBehaviorTree* FBehaviorTreeEditor::GetBehaviorTree() const
 
 UBlackboardData* FBehaviorTreeEditor::GetBlackboardData() const 
 {
-	return BehaviorTree == nullptr ? BlackboardData : BehaviorTree->BlackboardAsset; 
+	return BehaviorTree == nullptr ? BlackboardData : ToRawPtr(BehaviorTree->BlackboardAsset);
 }
 
 void FBehaviorTreeEditor::RefreshDebugger()
@@ -1695,7 +1787,7 @@ TSharedRef<SWidget> FBehaviorTreeEditor::HandleCreateNewTaskMenu() const
 {
 	FClassViewerInitializationOptions Options;
 	Options.bShowUnloadedBlueprints = true;
-	Options.ClassFilter = MakeShareable( new FBehaviorTreeEditorUtils::FNewNodeClassFilter<UBTTask_BlueprintBase> );
+	Options.ClassFilters.Add(MakeShareable( new FBehaviorTreeEditorUtils::FNewNodeClassFilter<UBTTask_BlueprintBase> ));
 
 	FOnClassPicked OnPicked( FOnClassPicked::CreateSP( this, &FBehaviorTreeEditor::HandleNewNodeClassPicked ) );
 
@@ -1706,7 +1798,7 @@ TSharedRef<SWidget> FBehaviorTreeEditor::HandleCreateNewDecoratorMenu() const
 {
 	FClassViewerInitializationOptions Options;
 	Options.bShowUnloadedBlueprints = true;
-	Options.ClassFilter = MakeShareable( new FBehaviorTreeEditorUtils::FNewNodeClassFilter<UBTDecorator_BlueprintBase> );
+	Options.ClassFilters.Add(MakeShareable( new FBehaviorTreeEditorUtils::FNewNodeClassFilter<UBTDecorator_BlueprintBase> ));
 
 	FOnClassPicked OnPicked( FOnClassPicked::CreateSP( this, &FBehaviorTreeEditor::HandleNewNodeClassPicked ) );
 
@@ -1717,13 +1809,12 @@ TSharedRef<SWidget> FBehaviorTreeEditor::HandleCreateNewServiceMenu() const
 {
 	FClassViewerInitializationOptions Options;
 	Options.bShowUnloadedBlueprints = true;
-	Options.ClassFilter = MakeShareable( new FBehaviorTreeEditorUtils::FNewNodeClassFilter<UBTService_BlueprintBase> );
+	Options.ClassFilters.Add(MakeShareable( new FBehaviorTreeEditorUtils::FNewNodeClassFilter<UBTService_BlueprintBase> ));
 
 	FOnClassPicked OnPicked( FOnClassPicked::CreateSP( this, &FBehaviorTreeEditor::HandleNewNodeClassPicked ) );
 
 	return FModuleManager::LoadModuleChecked<FClassViewerModule>("ClassViewer").CreateClassViewer(Options, OnPicked);
 }
-
 void FBehaviorTreeEditor::HandleNewNodeClassPicked(UClass* InClass) const
 {
 	UE_CLOG(InClass == nullptr, LogBehaviorTreeEditor, Error, TEXT("Trying to handle new node of NULL class for Behavior Treee %s ")
@@ -1731,30 +1822,41 @@ void FBehaviorTreeEditor::HandleNewNodeClassPicked(UClass* InClass) const
 
 	if(BehaviorTree != nullptr && InClass != nullptr && BehaviorTree->GetOutermost())
 	{
-		FString ClassName = FBlueprintEditorUtils::GetClassNameWithoutSuffix(InClass);
+		const FString ClassName = FBlueprintEditorUtils::GetClassNameWithoutSuffix(InClass);
 
 		FString PathName = BehaviorTree->GetOutermost()->GetPathName();
 		PathName = FPaths::GetPath(PathName);
-		PathName /= ClassName;
+		
+		// Now that we've generated some reasonable default locations/names for the package, allow the user to have the final say
+		// before we create the package and initialize the blueprint inside of it.
+		FSaveAssetDialogConfig SaveAssetDialogConfig;
+		SaveAssetDialogConfig.DialogTitleOverride = LOCTEXT("SaveAssetDialogTitle", "Save Asset As");
+		SaveAssetDialogConfig.DefaultPath = PathName;
+		SaveAssetDialogConfig.DefaultAssetName = ClassName + TEXT("_New");
+		SaveAssetDialogConfig.ExistingAssetPolicy = ESaveAssetDialogExistingAssetPolicy::Disallow;
 
-		FString Name;
-		FString PackageName;
-		FAssetToolsModule& AssetToolsModule = FModuleManager::GetModuleChecked<FAssetToolsModule>("AssetTools");
-		AssetToolsModule.Get().CreateUniqueAssetName(PathName, TEXT("_New"), PackageName, Name);
-
-		UPackage* Package = CreatePackage( *PackageName);
-		if (ensure(Package))
+		const FContentBrowserModule& ContentBrowserModule = FModuleManager::LoadModuleChecked<FContentBrowserModule>("ContentBrowser");
+		const FString SaveObjectPath = ContentBrowserModule.Get().CreateModalSaveAssetDialog(SaveAssetDialogConfig);
+		if (!SaveObjectPath.IsEmpty())
 		{
-			// Create and init a new Blueprint
-			if (UBlueprint* NewBP = FKismetEditorUtilities::CreateBlueprint(InClass, Package, FName(*Name), BPTYPE_Normal, UBlueprint::StaticClass(), UBlueprintGeneratedClass::StaticClass()))
+			const FString SavePackageName = FPackageName::ObjectPathToPackageName(SaveObjectPath);
+			const FString SavePackagePath = FPaths::GetPath(SavePackageName);
+			const FString SaveAssetName = FPaths::GetBaseFilename(SavePackageName);
+
+			UPackage* Package = CreatePackage(*SavePackageName);
+			if (ensure(Package))
 			{
-				GEditor->GetEditorSubsystem<UAssetEditorSubsystem>()->OpenEditorForAsset(NewBP);
+				// Create and init a new Blueprint
+				if (UBlueprint* NewBP = FKismetEditorUtilities::CreateBlueprint(InClass, Package, FName(*SaveAssetName), BPTYPE_Normal, UBlueprint::StaticClass(), UBlueprintGeneratedClass::StaticClass()))
+				{
+					GEditor->GetEditorSubsystem<UAssetEditorSubsystem>()->OpenEditorForAsset(NewBP);
 
-				// Notify the asset registry
-				FAssetRegistryModule::AssetCreated(NewBP);
+					// Notify the asset registry
+					FAssetRegistryModule::AssetCreated(NewBP);
 
-				// Mark the package dirty...
-				Package->MarkPackageDirty();
+					// Mark the package dirty...
+					Package->MarkPackageDirty();
+				}
 			}
 		}
 	}

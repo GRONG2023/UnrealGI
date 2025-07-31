@@ -2,30 +2,58 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "SlateFwd.h"
-#include "Widgets/DeclarativeSyntaxSupport.h"
-#include "Input/Reply.h"
-#include "Widgets/SCompoundWidget.h"
-#include "AssetData.h"
-#include "Widgets/Views/STableViewBase.h"
-#include "Widgets/Views/STableRow.h"
-#include "Widgets/Views/STreeView.h"
-#include "Misc/TextFilter.h"
 #include "AssetViewUtils.h"
-#include "IContentBrowserSingleton.h"
+#include "Containers/Array.h"
+#include "Containers/ArrayView.h"
+#include "Containers/BitArray.h"
+#include "Containers/Map.h"
+#include "Containers/Set.h"
+#include "Containers/SparseArray.h"
+#include "Containers/StringFwd.h"
+#include "Containers/UnrealString.h"
 #include "ContentBrowserDataFilter.h"
 #include "ContentBrowserDelegates.h"
-#include "Delegates/DelegateCombinations.h"
-#include "SFilterList.h"
-#include "ContentBrowserPluginFilters.h"
+#include "ContentBrowserItem.h"
+#include "Delegates/Delegate.h"
+#include "Framework/Views/ITypedTableView.h"
+#include "HAL/Platform.h"
+#include "HAL/PlatformCrt.h"
+#include "IContentBrowserSingleton.h"
+#include "Input/Reply.h"
+#include "Internationalization/Text.h"
+#include "Layout/Visibility.h"
+#include "Math/Vector2D.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/Attribute.h"
+#include "Misc/Optional.h"
+#include "Misc/TextFilter.h"
+#include "PathViewTypes.h"
+#include "Templates/SharedPointer.h"
+#include "Templates/TypeHash.h"
+#include "Templates/UnrealTemplate.h"
+#include "Types/SlateConstants.h"
+#include "Types/SlateEnums.h"
+#include "Types/SlateVector2.h"
+#include "UObject/NameTypes.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
+#include "Widgets/SCompoundWidget.h"
+#include "Widgets/Views/STableViewBase.h"
+#include "Widgets/Views/STreeView.h"
 
+class FContentBrowserItemData;
+class FContentBrowserItemDataUpdate;
+class FContentBrowserPluginFilter;
+class FPathPermissionList;
 class FSourcesSearch;
-struct FHistoryData;
-class FTreeItem;
-class FContentBrowserSingleton;
-class FBlacklistPaths;
+class ITableRow;
+class SWidget;
 class UToolMenu;
+struct FAssetData;
+struct FGeometry;
+struct FHistoryData;
+struct FPathViewConfig;
+struct FPointerEvent;
+struct FContentBrowserInstanceConfig;
 
 typedef TTextFilter< const FString& > FolderTextFilter;
 
@@ -47,6 +75,7 @@ public:
 		, _AllowContextMenu(true)
 		, _AllowClassesFolder(false)
 		, _AllowReadOnlyFolders(true)
+		, _ShowFavorites(false)
 		, _SelectionMode( ESelectionMode::Multi )
 		{}
 
@@ -83,14 +112,23 @@ public:
 		/** If true, read only folders will be displayed */
 		SLATE_ARGUMENT( bool, AllowReadOnlyFolders )
 
+		/** If true, the favorites expander will be displayed */
+		SLATE_ARGUMENT(bool, ShowFavorites);
+
 		/** The selection mode for the tree view */
 		SLATE_ARGUMENT( ESelectionMode::Type, SelectionMode )
 
 		/** Optional external search. Will hide and replace our internal search UI */
 		SLATE_ARGUMENT( TSharedPtr<FSourcesSearch>, ExternalSearch )
 
+		/** Optional Custom Folder permission list to be used to filter folders. */
+		SLATE_ARGUMENT( TSharedPtr<FPathPermissionList>, CustomFolderPermissionList)
+
 		/** The plugin filter collection */
 		SLATE_ARGUMENT( TSharedPtr<FPluginFilterCollectionType>, PluginPathFilters)
+
+		/** The instance name of the owning content browser. */
+		SLATE_ARGUMENT( FName, OwningContentBrowserName )
 
 	SLATE_END_ARGS()
 
@@ -99,6 +137,9 @@ public:
 
 	/** Constructs this widget with InArgs */
 	virtual void Construct( const FArguments& InArgs );
+
+	/** Selects the closest matches to the supplied paths in the tree. "/" delimited */
+	void SetSelectedPaths(const TArray<FName>& Paths);
 
 	/** Selects the closest matches to the supplied paths in the tree. "/" delimited */
 	void SetSelectedPaths(const TArray<FString>& Paths);
@@ -119,7 +160,7 @@ public:
 	void NewFolderItemRequested(const FContentBrowserItemTemporaryContext& NewItemContext);
 
 	/** Adds nodes to the tree in order to construct the specified item. If bUserNamed is true, the user will name the folder and the item includes the default name. */
-	virtual TSharedPtr<FTreeItem> AddFolderItem(FContentBrowserItemData&& InItem, const bool bUserNamed = false);
+	virtual TSharedPtr<FTreeItem> AddFolderItem(FContentBrowserItemData&& InItem, const bool bUserNamed = false, TArray<TSharedPtr<FTreeItem>>* OutItemsCreated = nullptr);
 
 	/** Attempts to remove the item from the tree. Returns true when successful. */
 	bool RemoveFolderItem(const FContentBrowserItemData& InItem);
@@ -159,16 +200,24 @@ public:
 	void SyncToLegacy( TArrayView<const FAssetData> AssetDataList, TArrayView<const FString> FolderList, const bool bAllowImplicitSync = false );
 
 	/** Finds the item that represents the specified path, if it exists. */
-	TSharedPtr<FTreeItem> FindItemRecursive(const FName Path) const;
+	TSharedPtr<FTreeItem> FindTreeItem(FName InPath) const;
 
 	/** Sets the state of the path view to the one described by the history data */
 	void ApplyHistoryData( const FHistoryData& History );
 
 	/** Saves any settings to config that should be persistent between editor sessions */
-	virtual void SaveSettings(const FString& IniFilename, const FString& IniSection, const FString& SettingsString) const;
+	virtual void SaveSettings(const FString& IniFilename, const FString& IniSection, const FString& InstanceName) const;
 
 	/** Loads any settings to config that should be persistent between editor sessions */
-	virtual void LoadSettings(const FString& IniFilename, const FString& IniSection, const FString& SettingsString);
+	virtual void LoadSettings(const FString& IniFilename, const FString& IniSection, const FString& InstanceName);
+
+	/**
+	 * Return true if passes path block lists
+	 * 
+	 *	@param InInternalPath			- Internal Path (e.g. /Game)
+	 *	@param InAlreadyCheckedDepth	- Folder depth that has already been checked, 0 if no parts of path already checked
+	*/
+	bool InternalPathPassesBlockLists(const FStringView InInternalPath, const int32 InAlreadyCheckedDepth = 0) const;
 
 	/** Populates the tree with all folders that are not filtered out */
 	virtual void Populate(const bool bIsRefreshingFilter = false);
@@ -185,6 +234,18 @@ public:
 	}
 
 	void PopulatePathViewFiltersMenu(UToolMenu* Menu);
+
+	/** Get paths to select by default */
+	TArray<FName> GetDefaultPathsToSelect() const;
+
+	/** Get list of root path item names */
+	TArray<FName> GetRootPathItemNames() const;	
+
+	/** Get current item category filter enum */
+	EContentBrowserItemCategoryFilter GetContentBrowserItemCategoryFilter() const;
+
+	/** Get current item attribute filter enum */
+	EContentBrowserItemAttributeFilter GetContentBrowserItemAttributeFilter() const;
 
 protected:
 	/** Expands all parents of the specified item */
@@ -221,7 +282,7 @@ protected:
 	void GetChildrenForTree(TSharedPtr< FTreeItem > TreeItem, TArray< TSharedPtr<FTreeItem> >& OutChildren);
 
 	/** Handler for when a name was given to a new folder */
-	void FolderNameChanged(const TSharedPtr< FTreeItem >& TreeItem, const FString& ProposedName, const FVector2D& MessageLocation, const ETextCommit::Type CommitType);
+	void FolderNameChanged(const TSharedPtr< FTreeItem >& TreeItem, const FString& ProposedName, const UE::Slate::FDeprecateVector2DParameter& MessageLocation, const ETextCommit::Type CommitType);
 
 	/** Handler used to verify the name of a new folder */
 	bool VerifyFolderNameChanged(const TSharedPtr< FTreeItem >& TreeItem, const FString& ProposedName, FText& OutErrorMessage) const;
@@ -239,6 +300,15 @@ protected:
 	FReply OnFolderDragDetected(const FGeometry& Geometry, const FPointerEvent& MouseEvent);
 
 	FContentBrowserDataCompiledFilter CreateCompiledFolderFilter() const;
+
+	/** Clear all root items and clear selection */
+	void ClearTreeItems();
+
+	/** Get this path view's editor config if OwningContentBrowserName is set. */
+	FPathViewConfig* GetPathViewConfig() const;
+
+	/** Get this path view's content browser instance config if OwningContentBrowserName is set. */
+	FContentBrowserInstanceConfig* GetContentBrowserConfig() const;
 
 private:
 	/** Selects the given path only if it exists. Returns true if selected. */
@@ -288,6 +358,20 @@ private:
 
 	/** Returns true if filter is being used. */
 	bool IsPluginPathFilterInUse(TSharedRef<FContentBrowserPluginFilter> Filter) const;
+
+	/** Sorts tree items */
+	void DefaultSort(const FTreeItem* InTreeItem, TArray<TSharedPtr<FTreeItem>>& InChildren);
+
+	TArray<FName> GetDefaultPathsToExpand() const;
+
+	/** Tell the tree that the LastExpandedPath set should be refreshed */
+	void DirtyLastExpandedPaths();
+
+	/** Update the LastExpandedPath if required */
+	void UpdateLastExpandedPathsIfDirty();
+
+	/** Create a favorites view. */
+	TSharedRef<SWidget> CreateFavoritesView();
 
 protected:
 	/** A helper class to manage PreventTreeItemChangedDelegateCount by incrementing it when constructed (on the stack) and decrementing when destroyed */
@@ -343,18 +427,28 @@ protected:
 	/** If not empty, this is the path of the folders to sync once they are available while assets are still being discovered */
 	TArray<FName> PendingInitialPaths;
 
+	/** Delay clear until first pending path is found */
+	bool bPendingInitialPathsNeedsSelectionClear = false;
+
 	/** Context information for the folder item that is currently being created, if any */
 	FContentBrowserItemTemporaryContext PendingNewFolderContext;
 
 	TSharedPtr<SWidget> PathViewWidget;
 
-	/** Blacklist filter to hide folders */
-	TSharedPtr<FBlacklistPaths> FolderBlacklist;
+	/** Permission filter to hide folders */
+	TSharedPtr<FPathPermissionList> FolderPermissionList;
 
 	/** Writable folder filter */
-	TSharedPtr<FBlacklistPaths> WritableFolderBlacklist;
+	TSharedPtr<FPathPermissionList> WritableFolderPermissionList;
+
+	TMap<FName, TWeakPtr<FTreeItem>> TreeItemLookup;
+
+	/** Custom Folder permissions */
+	TSharedPtr<FPathPermissionList> CustomFolderPermissionList;
 
 private:
+	/** Used to track if the list of last expanded path should be updated */
+	bool bLastExpandedPathsDirty = false;
 
 	/** The paths that were last reported by OnPathExpanded event. Used in preserving expansion when filtering folders */
 	TSet<FName> LastExpandedPaths;
@@ -388,6 +482,15 @@ private:
 
 	/** Plugins filters that are currently active */
 	TArray< TSharedRef<FContentBrowserPluginFilter> > AllPluginPathFilters;
+
+	/** Delegate to sort with */
+	FSortTreeItemChildrenDelegate SortOverride;
+
+	/** The favorites path view if one is set. */
+	TSharedPtr<SExpandableArea> FavoritesArea;
+
+	/** The config instance to use. */
+	FName OwningContentBrowserName;
 };
 
 
@@ -398,6 +501,9 @@ private:
 class SFavoritePathView : public SPathView
 {
 public:
+
+	virtual ~SFavoritePathView();
+
 	/** Constructs this widget with InArgs */
 	virtual void Construct(const FArguments& InArgs) override;
 
@@ -410,7 +516,7 @@ public:
 	virtual void LoadSettings(const FString& IniFilename, const FString& IniSection, const FString& SettingsString) override;
 
 	/** Adds nodes to the tree in order to construct the specified item. If bUserNamed is true, the user will name the folder and the item includes the default name. */
-	virtual TSharedPtr<FTreeItem> AddFolderItem(FContentBrowserItemData&& InItem, const bool bUserNamed = false) override;
+	virtual TSharedPtr<FTreeItem> AddFolderItem(FContentBrowserItemData&& InItem, const bool bUserNamed = false, TArray<TSharedPtr<FTreeItem>>* OutItemsCreated=nullptr) override;
 
 	/** Updates favorites based on an external change. */
 	void FixupFavoritesFromExternalChange(TArrayView<const AssetViewUtils::FMovedContentFolder> MovedFolders);
@@ -426,4 +532,5 @@ private:
 
 private:
 	TArray<FString> RemovedByFolderMove;
+	FDelegateHandle OnFavoritesChangedHandle;
 };

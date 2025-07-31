@@ -2,50 +2,47 @@
 
 #include "SClothPaintTab.h"
 
-#include "AssetRegistryModule.h"
-#include "ClassViewerModule.h"
-#include "ClassViewerFilter.h"
-#include "PropertyEditorModule.h"
-#include "IDetailsView.h"
-#include "Dialogs/Dialogs.h"
-#include "Widgets/Input/SCheckBox.h"
-#include "Widgets/Layout/SBox.h"
-#include "Widgets/Images/SImage.h"
-#include "Widgets/Text/STextBlock.h"
-
-
-#include "ClothPaintingModule.h"
 #include "ClothPainter.h"
-#include "ClothingPaintEditMode.h"
-
-#include "IPersonaPreviewScene.h"
-#include "Animation/DebugSkelMeshComponent.h"
-
-#include "AssetEditorModeManager.h"
-
-#include "ISkeletalMeshEditor.h"
-#include "SClothPaintWidget.h"
-#include "IPersonaToolkit.h"
-#include "SClothAssetSelector.h"
+#include "ClothPaintingModule.h"
 #include "ClothingAsset.h"
+#include "ClothingPaintEditMode.h"
+#include "Containers/Array.h"
+#include "Delegates/Delegate.h"
+#include "DetailsViewArgs.h"
+#include "EditorModeManager.h"
+#include "HAL/PlatformCrt.h"
+#include "IDetailsView.h"
+#include "IPersonaToolkit.h"
+#include "ISkeletalMeshEditor.h"
+#include "Layout/Children.h"
+#include "Misc/AssertionMacros.h"
+#include "Modules/ModuleManager.h"
+#include "PropertyEditorDelegates.h"
+#include "PropertyEditorModule.h"
+#include "SClothAssetSelector.h"
+#include "SClothPaintWidget.h"
+#include "SlotBase.h"
+#include "Styling/AppStyle.h"
+#include "Textures/SlateIcon.h"
+#include "UObject/Class.h"
+#include "UObject/NameTypes.h"
+#include "UObject/WeakObjectPtr.h"
 #include "Widgets/Layout/SScrollBox.h"
-#include "ComponentReregisterContext.h"
+
+class UObject;
+struct FGeometry;
 
 #define LOCTEXT_NAMESPACE "SClothPaintTab"
 
-SClothPaintTab::SClothPaintTab() 
-	: bModeApplied(false), bPaintModeEnabled(false)
+SClothPaintTab::SClothPaintTab() : bModeApplied(false)
 {	
 }
 
 SClothPaintTab::~SClothPaintTab()
 {
-	if(ISkeletalMeshEditor* SkeletalMeshEditor = static_cast<ISkeletalMeshEditor*>(HostingApp.Pin().Get()))
+	if(const ISkeletalMeshEditor* Editor = static_cast<ISkeletalMeshEditor*>(HostingApp.Pin().Get()))
 	{
-		if(FAssetEditorModeManager* ModeManager = SkeletalMeshEditor->GetAssetEditorModeManager())
-		{
-			ModeManager->ActivateDefaultMode();
-		}
+		Editor->GetEditorModeManager().ActivateDefaultMode();
 	}
 }
 
@@ -54,15 +51,10 @@ void SClothPaintTab::Construct(const FArguments& InArgs)
 	// Detail view for UClothingAssetCommon
 	FPropertyEditorModule& EditModule = FModuleManager::Get().GetModuleChecked<FPropertyEditorModule>("PropertyEditor");
 
-	FDetailsViewArgs DetailsViewArgs(
-		/*bUpdateFromSelection=*/ false,
-		/*bLockable=*/ false,
-		/*bAllowSearch=*/ false,
-		FDetailsViewArgs::HideNameArea,
-		/*bHideSelectionTip=*/ true,
-		/*InNotifyHook=*/ nullptr,
-		/*InSearchInitialKeyFocus=*/ false,
-		/*InViewIdentifier=*/ NAME_None);
+	FDetailsViewArgs DetailsViewArgs;
+	DetailsViewArgs.bAllowSearch = false;
+	DetailsViewArgs.NameAreaSettings = FDetailsViewArgs::HideNameArea;
+	DetailsViewArgs.bHideSelectionTip = true;
 	DetailsViewArgs.DefaultsOnlyVisibility = EEditDefaultsOnlyNodeVisibility::Automatic;
 	DetailsViewArgs.bShowOptions = false;
 	DetailsViewArgs.bAllowMultipleTopLevelObjects = true;
@@ -82,35 +74,26 @@ void SClothPaintTab::Construct(const FArguments& InArgs)
 
 	ModeWidget = nullptr;
 	
-	FSlateIcon TexturePaintIcon(FEditorStyle::GetStyleSetName(), "LevelEditor.MeshPaintMode.TexturePaint");
+	FSlateIcon TexturePaintIcon(FAppStyle::GetAppStyleSetName(), "LevelEditor.MeshPaintMode.TexturePaint");
 
 	this->ChildSlot
+	.Padding(4.f)
 	[
-		SNew(SScrollBox)
-		+ SScrollBox::Slot()
-		[
-			SAssignNew(ContentBox, SVerticalBox)
-			+SVerticalBox::Slot()
-			.AutoHeight()
-			.VAlign(VAlign_Center)
-		]
+		SAssignNew(ContentBox, SScrollBox)
 	];
 
-	ISkeletalMeshEditor* SkeletalMeshEditor = static_cast<ISkeletalMeshEditor*>(HostingApp.Pin().Get());
-
-	if(SkeletalMeshEditor)
+	
+	if(ISkeletalMeshEditor* SkeletalMeshEditor = GetSkeletalMeshEditor())
 	{
 		IPersonaToolkit& Persona = SkeletalMeshEditor->GetPersonaToolkit().Get();
 
 		ContentBox->AddSlot()
-		.AutoHeight()
 		[
 			SAssignNew(SelectorWidget, SClothAssetSelector, Persona.GetMesh())
 				.OnSelectionChanged(this, &SClothPaintTab::OnAssetSelectionChanged)
 		];
 
 		ContentBox->AddSlot()
-		.AutoHeight()
 		[
 			DetailsView->AsShared()
 		];
@@ -122,82 +105,61 @@ void SClothPaintTab::Tick(const FGeometry& AllottedGeometry, const double InCurr
 	SCompoundWidget::Tick(AllottedGeometry, InCurrentTime, InDeltaTime);
 }
 
-void SClothPaintTab::TogglePaintMode()
+void SClothPaintTab::EnterPaintMode()
 {
-	bPaintModeEnabled = !bPaintModeEnabled;
-	UpdatePaintTools();
-}
-
-bool SClothPaintTab::IsPaintModeActive() const
-{
-	return bPaintModeEnabled;
-}
-
-void SClothPaintTab::UpdatePaintTools()
-{
-	if(!HostingApp.IsValid())
+	const ISkeletalMeshEditor* SkeletalMeshEditor = GetSkeletalMeshEditor();
+	if (!SkeletalMeshEditor)
 	{
-		// If we have no valid host, we can't do anything with our editor below, so don't perform a
-		// state update on the tool mode.
 		return;
 	}
-
-	if (bPaintModeEnabled)
+	FClothingPaintEditMode* PaintMode = (FClothingPaintEditMode*)SkeletalMeshEditor->GetEditorModeManager().GetActiveMode(PaintModeID);
+	if (!PaintMode)
 	{
-		ISkeletalMeshEditor* SkeletalMeshEditor = static_cast<ISkeletalMeshEditor*>(HostingApp.Pin().Get());
-		SkeletalMeshEditor->GetAssetEditorModeManager()->ActivateMode(PaintModeID, true);
+		return;
+	}
+	
+	FClothPainter* ClothPainter = static_cast<FClothPainter*>(PaintMode->GetMeshPainter());
+	check(ClothPainter);
 
-		FClothingPaintEditMode* PaintMode = (FClothingPaintEditMode*)SkeletalMeshEditor->GetAssetEditorModeManager()->GetActiveMode(PaintModeID);
-		if (PaintMode)
+	ClothPainter->Reset();
+	ModeWidget = StaticCastSharedPtr<SClothPaintWidget>(ClothPainter->GetWidget());
+	
+	ContentBox->AddSlot()
+	[
+		ModeWidget->AsShared()
+	];
+
+	if(SelectorWidget.IsValid())
+	{
+		TWeakObjectPtr<UClothingAssetCommon> WeakAsset = SelectorWidget->GetSelectedAsset();
+
+		if(WeakAsset.Get())
 		{
-			FClothPainter* ClothPainter = static_cast<FClothPainter*>(PaintMode->GetMeshPainter());
-			check(ClothPainter);
-
-			ClothPainter->Reset();
-			ModeWidget = StaticCastSharedPtr<SClothPaintWidget>(ClothPainter->GetWidget());
-			PaintMode->SetPersonaToolKit(SkeletalMeshEditor->GetPersonaToolkit());
-
-			ContentBox->AddSlot()
-			.AutoHeight()
-			[
-				ModeWidget->AsShared()
-			];
-
-			if(SelectorWidget.IsValid())
-			{
-				TWeakObjectPtr<UClothingAssetCommon> WeakAsset = SelectorWidget->GetSelectedAsset();
-
-				if(WeakAsset.Get())
-				{
-					ClothPainter->OnAssetSelectionChanged(WeakAsset.Get(), SelectorWidget->GetSelectedLod(), SelectorWidget->GetSelectedMask());
-				}
-			}
+			ClothPainter->OnAssetSelectionChanged(WeakAsset.Get(), SelectorWidget->GetSelectedLod(), SelectorWidget->GetSelectedMask());
 		}
 	}
-	else
-	{
-		ContentBox->RemoveSlot(ModeWidget->AsShared());
-		ISkeletalMeshEditor* SkeletalMeshEditor = static_cast<ISkeletalMeshEditor*>(HostingApp.Pin().Get());
-		SkeletalMeshEditor->GetAssetEditorModeManager()->ActivateDefaultMode();
-		ModeWidget = nullptr;
-	}
+}
+
+void SClothPaintTab::ExitPaintMode()
+{
+	ContentBox->RemoveSlot(ModeWidget->AsShared());
+	ModeWidget = nullptr;
 }
 
 void SClothPaintTab::OnAssetSelectionChanged(TWeakObjectPtr<UClothingAssetCommon> InAssetPtr, int32 InLodIndex, int32 InMaskIndex)
 {
-	if(bPaintModeEnabled)
+	const ISkeletalMeshEditor* SkeletalMeshEditor = GetSkeletalMeshEditor();
+	if (!SkeletalMeshEditor)
 	{
-		ISkeletalMeshEditor* SkeletalMeshEditor = static_cast<ISkeletalMeshEditor*>(HostingApp.Pin().Get());
+		return;
+	}
 
-		FClothingPaintEditMode* PaintMode = (FClothingPaintEditMode*)SkeletalMeshEditor->GetAssetEditorModeManager()->GetActiveMode(PaintModeID);
-		if(PaintMode)
+	FClothingPaintEditMode* PaintMode = (FClothingPaintEditMode*)SkeletalMeshEditor->GetEditorModeManager().GetActiveMode(PaintModeID);
+	if(PaintMode)
+	{
+		if(FClothPainter* ClothPainter = static_cast<FClothPainter*>(PaintMode->GetMeshPainter()))
 		{
-			FClothPainter* ClothPainter = static_cast<FClothPainter*>(PaintMode->GetMeshPainter());
-
-			if(ClothPainter)
-			{
-				ClothPainter->OnAssetSelectionChanged(InAssetPtr.Get(), InLodIndex, InMaskIndex);
-			}
+			ClothPainter->OnAssetSelectionChanged(InAssetPtr.Get(), InLodIndex, InMaskIndex);
 		}
 	}
 

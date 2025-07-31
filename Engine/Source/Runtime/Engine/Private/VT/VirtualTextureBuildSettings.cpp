@@ -4,17 +4,7 @@
 
 #include "HAL/IConsoleManager.h"
 
-static TAutoConsoleVariable<int32> CVarVTCompressCrunch(
-	TEXT("r.VT.EnableCompressCrunch"),
-	0,
-	TEXT("Enable Crunch compression for virtual textures, for supported formats")
-);
-
-static TAutoConsoleVariable<int32> CVarVTCompressZlib(
-	TEXT("r.VT.EnableCompressZlib"),
-	1,
-	TEXT("Enables Zlib compression for virtual textures, if no compression is enabled/supported")
-);
+#include UE_INLINE_GENERATED_CPP_BY_NAME(VirtualTextureBuildSettings)
 
 static TAutoConsoleVariable<int32> CVarVTTileSize(
 	TEXT("r.VT.TileSize"),
@@ -32,6 +22,5 @@ void FVirtualTextureBuildSettings::Init()
 {
 	TileSize = CVarVTTileSize.GetValueOnAnyThread();
 	TileBorderSize = CVarVTTileBorderSize.GetValueOnAnyThread();
-	bEnableCompressCrunch = CVarVTCompressCrunch.GetValueOnAnyThread() != 0;
-	bEnableCompressZlib = CVarVTCompressZlib.GetValueOnAnyThread() != 0;
 }
+

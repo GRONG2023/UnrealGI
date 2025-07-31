@@ -3,12 +3,40 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "RHI.h"
-#include "RenderResource.h"
-#include "Shader.h"
 #include "GlobalShader.h"
-#include "PipelineStateCache.h"
+#include "ShaderParameterStruct.h"
 
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_2
+#include "Math/Color.h"
+#include "Math/Matrix.h"
+#include "Math/UnrealMathSSE.h"
+#include "Math/Vector.h"
+#include "Math/Vector2D.h"
+#include "Math/Vector4.h"
+#include "PipelineStateCache.h"
+#include "RHI.h"
+#include "RHICommandList.h"
+#include "RHIDefinitions.h"
+#include "RenderGraphDefinitions.h"
+#include "RenderResource.h"
+#include "Serialization/MemoryLayout.h"
+#include "Shader.h"
+#include "ShaderParameterMacros.h"
+#include "ShaderPermutation.h"
+#include "ShaderPermutation.h"
+#include "Templates/RefCounting.h"
+#include "Templates/UnrealTemplate.h"
+#endif
+
+class FPointerTableBase;
+class FRDGBuilder;
+class FRDGTexture;
+
+namespace UE {
+	namespace Color {
+		enum class EEncoding : uint8;
+	}
+}
 
 /** MAX number of conversion operations. Reflects MAX in EMediaCaptureConversionOperation */
 #define NUM_MEDIA_SHADERS_CONVERSION_OP 5
@@ -16,32 +44,56 @@
 
 namespace MediaShaders
 {
-	/** Color transform from YUV to sRGB (using values from MSDN). */
-	RENDERCORE_API extern const FMatrix YuvToSrgbDefault;
+	/** Color transform from YUV to Rec601 without range scaling. */
+	RENDERCORE_API extern const FMatrix YuvToRgbRec601Unscaled;
 
-	/** Color transform from YUV to sRGB (in JPEG color space). */
-	RENDERCORE_API extern const FMatrix YuvToSrgbJpeg;
+	/** Color transform from YUV Video Range to Rec601 Full Range. */
+	RENDERCORE_API extern const FMatrix YuvToRgbRec601Scaled;
 
-	/** Color transform from YUV to sRGB (using values from PS4 AvPlayer codec). */
+	/** Color transform from YUV to Rec709 without range scaling. */
+	RENDERCORE_API extern const FMatrix YuvToRgbRec709Unscaled;
+
+	/** Color transform from YUV Video Range to Rec709 Full Range. */
+	RENDERCORE_API extern const FMatrix YuvToRgbRec709Scaled;
+
+	/** Color transform from YUV to Rec2020 without range scaling. */
+	RENDERCORE_API extern const FMatrix YuvToRgbRec2020Unscaled;
+
+	/** Color transform from YUV Video Range to Rec2020 Full Range. */
+	RENDERCORE_API extern const FMatrix YuvToRgbRec2020Scaled;
+
+	/** Color transform from YUV to sRGB (using rounded values from PS4 AvPlayer codec). */
 	RENDERCORE_API extern const FMatrix YuvToSrgbPs4;
 
-	/** Color transform from YUV to sRGB (in Rec. 601 color space). */
-	RENDERCORE_API extern const FMatrix YuvToSrgbRec601;
+	/** Color transform from RGB to YUV (in Rec. 709 color space, including inversion of range scaling) */
+	RENDERCORE_API extern const FMatrix RgbToYuvRec709Scaled;
 
-	/** Color transform from YUV to sRGB (in Rec. 709 color space). */
-	RENDERCORE_API extern const FMatrix YuvToRgbRec709;
-
-	/** Color transform from YUV to RGB (in Rec. 709 color space, RGB full range) */
-	RENDERCORE_API extern const FMatrix YuvToRgbRec709Full;
-
-	/** Color transform from RGB to YUV (in Rec. 709 color space, RGB full range) */
-	RENDERCORE_API extern const FMatrix RgbToYuvRec709Full;
+	/** Color transform from RGB to YUV (in Rec. 2020 color space, including inversion of range scaling) */
+	RENDERCORE_API extern const FMatrix RgbToYuvRec2020Scaled;
 
 	/** YUV Offset for 8 bit conversion (Computed as 16/255, 128/255, 128/255) */
 	RENDERCORE_API extern const FVector YUVOffset8bits;
 
+	/** YUV Offset for 8 bit conversion (Computed as 0/255, 128/255, 128/255) */
+	RENDERCORE_API extern const FVector YUVOffsetNoScale8bits;
+
 	/** YUV Offset for 10 bit conversion (Computed as 64/1023, 512/1023, 512/1023) */
 	RENDERCORE_API extern const FVector YUVOffset10bits;
+
+	/** YUV Offset for 10 bit conversion (Computed as 0/1023, 512/1023, 512/1023) */
+	RENDERCORE_API extern const FVector YUVOffsetNoScale10bits;
+
+	/** YUV Offset for 16 bit conversion (Computed as 4096/65535, 32768/65535, 32768/65535) */
+	RENDERCORE_API extern const FVector YUVOffset16bits;
+
+	/** YUV Offset for 16 bit conversion (Computed as 0/65535, 32768/65535, 32768/65535) */
+	RENDERCORE_API extern const FVector YUVOffsetNoScale16bits;
+
+	/** YUV Offset for float conversion (Computed as 1/16, 1/2, 1/2) */
+	RENDERCORE_API extern const FVector YUVOffsetFloat;
+
+	/** YUV Offset for float conversion (Computed as 0, 1/2, 1/2) */
+	RENDERCORE_API extern const FVector YUVOffsetNoScaleFloat;
 
 	/** Combine color transform matrix with yuv offset in a single matrix */
 	RENDERCORE_API FMatrix CombineColorTransformAndOffset(const FMatrix& InMatrix, const FVector& InYUVOffset);
@@ -53,22 +105,24 @@ namespace MediaShaders
  */
 struct FMediaElementVertex
 {
-	FVector4 Position;
-	FVector2D TextureCoordinate;
+	FVector4f Position;
+	FVector2f TextureCoordinate;
 
 	FMediaElementVertex() { }
 
-	FMediaElementVertex(const FVector4& InPosition, const FVector2D& InTextureCoordinate)
+	FMediaElementVertex(const FVector4f& InPosition, const FVector2f& InTextureCoordinate)
 		: Position(InPosition)
 		, TextureCoordinate(InTextureCoordinate)
 	{ }
 };
 
-inline FVertexBufferRHIRef CreateTempMediaVertexBuffer(float ULeft = 0.0f, float URight = 1.0f, float VTop = 0.0f, float VBottom = 1.0f)
+inline FBufferRHIRef CreateTempMediaVertexBuffer(float ULeft = 0.0f, float URight = 1.0f, float VTop = 0.0f, float VBottom = 1.0f)
 {
-	FRHIResourceCreateInfo CreateInfo;
-	FVertexBufferRHIRef VertexBufferRHI = RHICreateVertexBuffer(sizeof(FMediaElementVertex) * 4, BUF_Volatile, CreateInfo);
-	void* VoidPtr = RHILockVertexBuffer(VertexBufferRHI, 0, sizeof(FMediaElementVertex) * 4, RLM_WriteOnly);
+	FRHICommandListBase& RHICmdList = FRHICommandListImmediate::Get();
+
+	FRHIResourceCreateInfo CreateInfo(TEXT("TempMediaVertexBuffer"));
+	FBufferRHIRef VertexBufferRHI = RHICmdList.CreateVertexBuffer(sizeof(FMediaElementVertex) * 4, BUF_Volatile, CreateInfo);
+	void* VoidPtr = RHICmdList.LockBuffer(VertexBufferRHI, 0, sizeof(FMediaElementVertex) * 4, RLM_WriteOnly);
 
 	FMediaElementVertex* Vertices = (FMediaElementVertex*)VoidPtr;
 	Vertices[0].Position.Set(-1.0f, 1.0f, 1.0f, 1.0f); // Top Left
@@ -80,7 +134,7 @@ inline FVertexBufferRHIRef CreateTempMediaVertexBuffer(float ULeft = 0.0f, float
 	Vertices[1].TextureCoordinate.Set(URight, VTop);
 	Vertices[2].TextureCoordinate.Set(ULeft, VBottom);
 	Vertices[3].TextureCoordinate.Set(URight, VBottom);
-	RHIUnlockVertexBuffer(VertexBufferRHI);
+	RHICmdList.UnlockBuffer(VertexBufferRHI);
 
 	return VertexBufferRHI;
 }
@@ -88,30 +142,17 @@ inline FVertexBufferRHIRef CreateTempMediaVertexBuffer(float ULeft = 0.0f, float
 /**
  * The simple element vertex declaration resource type.
  */
-class FMediaVertexDeclaration
-	: public FRenderResource
+class FMediaVertexDeclaration : public FRenderResource
 {
 public:
+	RENDERCORE_API FMediaVertexDeclaration();
+	RENDERCORE_API virtual ~FMediaVertexDeclaration();
+
+	RENDERCORE_API virtual void InitRHI(FRHICommandListBase& RHICmdList) override;
+	RENDERCORE_API virtual void ReleaseRHI() override;
 
 	FVertexDeclarationRHIRef VertexDeclarationRHI;
-
-	virtual ~FMediaVertexDeclaration() { }
-
-	virtual void InitRHI() override
-	{
-		FVertexDeclarationElementList Elements;
-		uint16 Stride = sizeof(FMediaElementVertex);
-		Elements.Add(FVertexElement(0, STRUCT_OFFSET(FMediaElementVertex, Position), VET_Float4, 0, Stride));
-		Elements.Add(FVertexElement(0, STRUCT_OFFSET(FMediaElementVertex, TextureCoordinate), VET_Float2, 1, Stride));
-		VertexDeclarationRHI = PipelineStateCache::GetOrCreateVertexDeclaration(Elements);
-	}
-
-	virtual void ReleaseRHI() override
-	{
-		VertexDeclarationRHI.SafeRelease();
-	}
 };
-
 
 RENDERCORE_API extern TGlobalResource<FMediaVertexDeclaration> GMediaVertexDeclaration;
 
@@ -125,12 +166,6 @@ class FMediaShadersVS
 	DECLARE_EXPORTED_SHADER_TYPE(FMediaShadersVS, Global, RENDERCORE_API);
 
 public:
-
-	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
-	{
-		return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::ES3_1);
-	}
-
 	/** Default constructor. */
 	FMediaShadersVS() { }
 
@@ -154,19 +189,13 @@ class FAYUVConvertPS
 	DECLARE_EXPORTED_SHADER_TYPE(FAYUVConvertPS, Global, RENDERCORE_API);
 
 public:
-
-	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
-	{
-		return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::ES3_1);
-	}
-
 	FAYUVConvertPS() { }
 
 	FAYUVConvertPS(const ShaderMetaType::CompiledShaderInitializerType& Initializer)
 		: FGlobalShader(Initializer)
 	{ }
 
-	RENDERCORE_API void SetParameters(FRHICommandList& RHICmdList, TRefCountPtr<FRHITexture2D> AYUVTexture, const FMatrix& ColorTransform, const FVector& YUVOffset, bool SrgbToLinear);
+	RENDERCORE_API void SetParameters(FRHIBatchedShaderParameters& BatchedParameters, TRefCountPtr<FRHITexture2D> AYUVTexture, const FMatrix& ColorTransform, const FVector& YUVOffset, bool SrgbToLinear);
 };
 
 
@@ -181,19 +210,13 @@ class FBMPConvertPS
 	DECLARE_EXPORTED_SHADER_TYPE(FBMPConvertPS, Global, RENDERCORE_API);
 
 public:
-
-	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
-	{
-		return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::ES3_1);
-	}
-
 	FBMPConvertPS() { }
 
 	FBMPConvertPS(const ShaderMetaType::CompiledShaderInitializerType& Initializer)
 		: FGlobalShader(Initializer)
 	{ }
 
-	RENDERCORE_API void SetParameters(FRHICommandList& RHICmdList, TRefCountPtr<FRHITexture2D> BMPTexture, const FIntPoint& OutputDimensions, bool SrgbToLinear);
+	RENDERCORE_API void SetParameters(FRHIBatchedShaderParameters& BatchedParameters, TRefCountPtr<FRHITexture2D> BMPTexture, const FIntPoint& OutputDimensions, bool SrgbToLinear);
 };
 
 
@@ -210,19 +233,13 @@ class FNV12ConvertPS
 	DECLARE_EXPORTED_SHADER_TYPE(FNV12ConvertPS, Global, RENDERCORE_API);
 
 public:
-
-	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
-	{
-		return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::ES3_1);
-	}
-
 	FNV12ConvertPS() { }
 
 	FNV12ConvertPS(const ShaderMetaType::CompiledShaderInitializerType& Initializer)
 		: FGlobalShader(Initializer)
 	{ }
 
-	RENDERCORE_API void SetParameters(FRHICommandList& RHICmdList, const FIntPoint & TexDim, FShaderResourceViewRHIRef SRV_Y, FShaderResourceViewRHIRef SRV_UV, const FIntPoint& OutputDimensions, const FMatrix& ColorTransform, const FVector& YUVOffset, bool SrgbToLinear);
+	RENDERCORE_API void SetParameters(FRHIBatchedShaderParameters& BatchedParameters, const FIntPoint & TexDim, FShaderResourceViewRHIRef SRV_Y, FShaderResourceViewRHIRef SRV_UV, const FIntPoint& OutputDimensions, const FMatrix44f& ColorTransform, UE::Color::EEncoding Encoding, const FMatrix44f& CSTransform, bool bSwapChroma);
 };
 
 
@@ -240,18 +257,13 @@ class FNV12ConvertAsBytesPS
 
 public:
 
-	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
-	{
-		return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::ES3_1);
-	}
-
 	FNV12ConvertAsBytesPS() { }
 
 	FNV12ConvertAsBytesPS(const ShaderMetaType::CompiledShaderInitializerType& Initializer)
 		: FGlobalShader(Initializer)
 	{ }
 
-	RENDERCORE_API void SetParameters(FRHICommandList& RHICmdList, TRefCountPtr<FRHITexture2D> NV12Texture, const FIntPoint& OutputDimensions, const FMatrix& ColorTransform, const FVector& YUVOffset, bool SrgbToLinear);
+	RENDERCORE_API void SetParameters(FRHIBatchedShaderParameters& BatchedParameters, TRefCountPtr<FRHITexture2D> NV12Texture, const FIntPoint& OutputDimensions, const FMatrix44f& ColorTransform, UE::Color::EEncoding Encoding, const FMatrix44f& CSTransform, bool bSwapChroma);
 };
 
 
@@ -268,27 +280,77 @@ class FNV21ConvertPS
 	DECLARE_EXPORTED_SHADER_TYPE(FNV21ConvertPS, Global, RENDERCORE_API);
 
 public:
-
-	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
-	{
-		return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::ES3_1);
-	}
-
 	FNV21ConvertPS() { }
 
 	FNV21ConvertPS(const ShaderMetaType::CompiledShaderInitializerType& Initializer)
 		: FGlobalShader(Initializer)
 	{ }
 
-	RENDERCORE_API void SetParameters(FRHICommandList& RHICmdList, TRefCountPtr<FRHITexture2D> NV21Texture, const FIntPoint& OutputDimensions, const FMatrix& ColorTransform, const FVector& YUVOffset, bool SrgbToLinear);
+	RENDERCORE_API void SetParameters(FRHIBatchedShaderParameters& BatchedParameters, TRefCountPtr<FRHITexture2D> NV21Texture, const FIntPoint& OutputDimensions, const FMatrix& ColorTransform, const FVector& YUVOffset, bool SrgbToLinear);
 };
 
+/**
+ * Pixel shader to convert a P010 frame to RGBA.
+ */
+class FP010ConvertPS
+	: public FGlobalShader
+{
+	DECLARE_EXPORTED_SHADER_TYPE(FP010ConvertPS, Global, RENDERCORE_API);
+
+public:
+
+	FP010ConvertPS() { }
+
+	FP010ConvertPS(const ShaderMetaType::CompiledShaderInitializerType& Initializer)
+		: FGlobalShader(Initializer)
+	{ }
+
+	RENDERCORE_API void SetParameters(FRHIBatchedShaderParameters& BatchedParameters, const FIntPoint& TexDim, FShaderResourceViewRHIRef SRV_Y, FShaderResourceViewRHIRef SRV_UV, const FIntPoint& OutputDimensions, const FMatrix44f& ColorTransform, const FMatrix44f& CSTransform, UE::Color::EEncoding Encoding);
+};
 
 /**
- * Pixel shader to resize an RGB texture.
+ * Pixel shader to convert a P010 frame inside a G16 texture to RGBA.
+ */
+class FP010ConvertAsUINT16sPS
+	: public FGlobalShader
+{
+	DECLARE_EXPORTED_SHADER_TYPE(FP010ConvertAsUINT16sPS, Global, RENDERCORE_API);
+
+public:
+
+	FP010ConvertAsUINT16sPS() { }
+
+	FP010ConvertAsUINT16sPS(const ShaderMetaType::CompiledShaderInitializerType& Initializer)
+		: FGlobalShader(Initializer)
+	{ }
+
+	RENDERCORE_API void SetParameters(FRHIBatchedShaderParameters& BatchedParameters, const FIntPoint& TexDim, TRefCountPtr<FRHITexture2D> NV12Texture, const FIntPoint& OutputDimensions, const FMatrix44f& ColorTransform, const FMatrix44f& CSTransform, UE::Color::EEncoding Encoding);
+};
+
+/**
+ * Pixel shader to convert a P010 frame stored as 3 plane RGB2101010 to RGBA.
+ */
+class FP010_2101010ConvertPS
+	: public FGlobalShader
+{
+	DECLARE_EXPORTED_SHADER_TYPE(FP010_2101010ConvertPS, Global, RENDERCORE_API);
+
+public:
+
+	FP010_2101010ConvertPS() { }
+
+	FP010_2101010ConvertPS(const ShaderMetaType::CompiledShaderInitializerType& Initializer)
+		: FGlobalShader(Initializer)
+	{ }
+
+	RENDERCORE_API void SetParameters(FRHIBatchedShaderParameters& BatchedParameters, const FIntPoint& TexDim, FShaderResourceViewRHIRef SRV_Y, FShaderResourceViewRHIRef SRV_U, FShaderResourceViewRHIRef SRV_V, const FIntPoint& OutputDimensions, const FMatrix44f& ColorTransform, const FMatrix44f& CSTransform, UE::Color::EEncoding Encoding);
+};
+
+/**
+ * Pixel shader to convert an RGB texture.
  *
  * This shader expects an RGB or RGBA frame packed into a single texture
- * in PF_B8G8R8A8 or PF_FloatRGB format.
+ * in PF_B8G8R8A8, PF_A2B10G10R10 or PF_FloatRGB format.
  */
 class FRGBConvertPS
 	: public FGlobalShader
@@ -296,12 +358,6 @@ class FRGBConvertPS
 	DECLARE_EXPORTED_SHADER_TYPE(FRGBConvertPS, Global, RENDERCORE_API);
 
 public:
-
-	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
-	{
-		return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::ES3_1);
-	}
-
 	FRGBConvertPS() { }
 
 	FRGBConvertPS(const ShaderMetaType::CompiledShaderInitializerType& Initializer)
@@ -309,7 +365,29 @@ public:
 	{ }
 
 
-	RENDERCORE_API void SetParameters(FRHICommandList& RHICmdList, TRefCountPtr<FRHITexture2D> RGBTexture, const FIntPoint& OutputDimensions, bool SrgbToLinear);
+	RENDERCORE_API void SetParameters(FRHIBatchedShaderParameters& BatchedParameters, TRefCountPtr<FRHITexture2D> RGBTexture, const FIntPoint& OutputDimensions, UE::Color::EEncoding Encoding, const FMatrix44f& CSTransform);
+};
+
+/**
+ * Pixel convert to resize an YCoCg texture.
+ *
+ * This shader expects an YCoCg frame packed into a single texture
+ * in PF_DXT5 format.
+ */
+class FYCoCgConvertPS
+	: public FGlobalShader
+{
+	DECLARE_EXPORTED_SHADER_TYPE(FYCoCgConvertPS, Global, RENDERCORE_API);
+
+public:
+	FYCoCgConvertPS() { }
+
+	FYCoCgConvertPS(const ShaderMetaType::CompiledShaderInitializerType& Initializer)
+		: FGlobalShader(Initializer)
+	{ }
+
+
+	RENDERCORE_API void SetParameters(FRHIBatchedShaderParameters& BatchedParameters, TRefCountPtr<FRHITexture2D> YCoCgTexture, const FIntPoint& OutputDimensions, UE::Color::EEncoding Encoding, const FMatrix44f& CSTransform);
 };
 
 
@@ -328,19 +406,13 @@ class FYCbCrConvertPS
 	DECLARE_EXPORTED_SHADER_TYPE(FYCbCrConvertPS, Global, RENDERCORE_API);
 
 public:
-
-	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
-	{
-		return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::ES3_1);
-	}
-
 	FYCbCrConvertPS() { }
 
 	FYCbCrConvertPS(const ShaderMetaType::CompiledShaderInitializerType& Initializer)
 		: FGlobalShader(Initializer)
 	{ }
 
-	RENDERCORE_API void SetParameters(FRHICommandList& RHICmdList, TRefCountPtr<FRHITexture2D> LumaTexture, TRefCountPtr<FRHITexture2D> CbCrTexture, const FMatrix& ColorTransform, const FVector& YUVOffset, bool SrgbToLinear);
+	RENDERCORE_API void SetParameters(FRHIBatchedShaderParameters& BatchedParameters, TRefCountPtr<FRHITexture2D> LumaTexture, TRefCountPtr<FRHITexture2D> CbCrTexture, const FMatrix& ColorTransform, const FVector& YUVOffset, bool SrgbToLinear);
 };
 
 class FYCbCrConvertPS_4x4Matrix : public FYCbCrConvertPS
@@ -348,12 +420,6 @@ class FYCbCrConvertPS_4x4Matrix : public FYCbCrConvertPS
     DECLARE_EXPORTED_SHADER_TYPE(FYCbCrConvertPS_4x4Matrix, Global, RENDERCORE_API);
     
 public:
-    
-    static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
-    {
-        return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::ES3_1);
-    }
-    
     FYCbCrConvertPS_4x4Matrix() { }
     
     FYCbCrConvertPS_4x4Matrix(const ShaderMetaType::CompiledShaderInitializerType& Initializer)
@@ -376,19 +442,13 @@ class FUYVYConvertPS
 	DECLARE_EXPORTED_SHADER_TYPE(FUYVYConvertPS, Global, RENDERCORE_API);
 
 public:
-
-	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
-	{
-		return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::ES3_1);
-	}
-
 	FUYVYConvertPS() { }
 
 	FUYVYConvertPS(const ShaderMetaType::CompiledShaderInitializerType& Initializer)
 		: FGlobalShader(Initializer)
 	{ }
 
-	RENDERCORE_API void SetParameters(FRHICommandList& RHICmdList, TRefCountPtr<FRHITexture2D> UYVYTexture, const FMatrix& ColorTransform, const FVector& YUVOffset, bool SrgbToLinear);
+	RENDERCORE_API void SetParameters(FRHIBatchedShaderParameters& BatchedParameters, TRefCountPtr<FRHITexture2D> UYVYTexture, const FMatrix& ColorTransform, const FVector& YUVOffset, bool SrgbToLinear);
 };
 
 
@@ -404,12 +464,6 @@ class FYUVConvertPS
 	DECLARE_EXPORTED_SHADER_TYPE(FYUVConvertPS, Global, RENDERCORE_API);
 
 public:
-
-	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
-	{
-		return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::ES3_1);
-	}
-
 	FYUVConvertPS() { }
 
 	FYUVConvertPS(const ShaderMetaType::CompiledShaderInitializerType& Initializer)
@@ -417,7 +471,28 @@ public:
 	{ }
 
 
-	RENDERCORE_API void SetParameters(FRHICommandList& RHICmdList, TRefCountPtr<FRHITexture2D> YTexture, TRefCountPtr<FRHITexture2D> UTexture, TRefCountPtr<FRHITexture2D> VTexture, const FIntPoint& OutputDimensions, const FMatrix& ColorTransform, const FVector& YUVOffset, bool SrgbToLinear);
+	RENDERCORE_API void SetParameters(FRHIBatchedShaderParameters& BatchedParameters, TRefCountPtr<FRHITexture2D> YTexture, TRefCountPtr<FRHITexture2D> UTexture, TRefCountPtr<FRHITexture2D> VTexture, const FIntPoint& OutputDimensions, const FMatrix& ColorTransform, const FVector& YUVOffset, bool SrgbToLinear);
+};
+
+
+/**
+ * Pixel shader to convert YUV v216/2vuy/yuv2 to RGB
+ *
+ * This shader expects a single texture in PF_R16G16B16A16 or PF_R8G8B8A8 format.
+ */
+class FYUVv216ConvertPS
+	: public FGlobalShader
+{
+	DECLARE_EXPORTED_SHADER_TYPE(FYUVv216ConvertPS, Global, RENDERCORE_API);
+
+public:
+	FYUVv216ConvertPS() { }
+
+	FYUVv216ConvertPS(const ShaderMetaType::CompiledShaderInitializerType& Initializer)
+		: FGlobalShader(Initializer)
+	{ }
+
+	RENDERCORE_API void SetParameters(FRHIBatchedShaderParameters& BatchedParameters, TRefCountPtr<FRHITexture2D> YUVTexture, const FIntPoint& OutputDimensions, const FMatrix44f& ColorTransform, UE::Color::EEncoding Encoding, const FMatrix44f& CSTransform, bool bIsCbY0CrY1, bool bIsARGBFmt, bool bSwapChroma);
 };
 
 
@@ -425,6 +500,7 @@ public:
  * Pixel shader to convert YUV v210 to RGB
  *
  * This shader expects a single texture in PF_R32G32B32A32_UINT format.
+ * (from which it decodes a R10G10B10A2 encoded data stream, in which RGB components represent the v210 data)
  */
 class FYUVv210ConvertPS
 	: public FGlobalShader
@@ -432,22 +508,35 @@ class FYUVv210ConvertPS
 	DECLARE_EXPORTED_SHADER_TYPE(FYUVv210ConvertPS, Global, RENDERCORE_API);
 
 public:
-
-	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
-	{
-		return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::ES3_1);
-	}
-
 	FYUVv210ConvertPS() { }
 
 	FYUVv210ConvertPS(const ShaderMetaType::CompiledShaderInitializerType& Initializer)
 		: FGlobalShader(Initializer)
 	{ }
 
-	RENDERCORE_API void SetParameters(FRHICommandList& RHICmdList, TRefCountPtr<FRHITexture2D> YUVTexture, const FIntPoint& OutputDimensions, const FMatrix& ColorTransform, const FVector& YUVOffset, bool SrgbToLinear);
+	RENDERCORE_API void SetParameters(FRHIBatchedShaderParameters& BatchedParameters, TRefCountPtr<FRHITexture2D> YUVTexture, const FIntPoint& OutputDimensions, const FMatrix44f& ColorTransform, UE::Color::EEncoding Encoding, const FMatrix44f& CSTransform, bool bIsCbY0CrY1);
 };
 
 
+/**
+ * Pixel shader to convert YUV Y416 to RGB
+ *
+ * This shader expects a single texture in PF_A16B16G16R16 format.
+ */
+class FYUVY416ConvertPS
+	: public FGlobalShader
+{
+	DECLARE_EXPORTED_SHADER_TYPE(FYUVY416ConvertPS, Global, RENDERCORE_API);
+
+public:
+	FYUVY416ConvertPS() { }
+
+	FYUVY416ConvertPS(const ShaderMetaType::CompiledShaderInitializerType& Initializer)
+		: FGlobalShader(Initializer)
+	{ }
+
+	RENDERCORE_API void SetParameters(FRHIBatchedShaderParameters& BatchedParameters, FShaderResourceViewRHIRef SRV_Y, const FMatrix44f& ColorTransform, UE::Color::EEncoding Encoding, const FMatrix44f& CSTransform, bool bIsARGBFmt);
+};
 
 /**
  * Pixel shader to convert a YUY2 frame to RGBA.
@@ -463,19 +552,33 @@ class FYUY2ConvertPS
 	DECLARE_EXPORTED_SHADER_TYPE(FYUY2ConvertPS, Global, RENDERCORE_API);
 
 public:
-
-	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
-	{
-		return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::ES3_1);
-	}
-
 	FYUY2ConvertPS() { }
 
 	FYUY2ConvertPS(const ShaderMetaType::CompiledShaderInitializerType& Initializer)
 		: FGlobalShader(Initializer)
 	{ }
 
-	RENDERCORE_API void SetParameters(FRHICommandList& RHICmdList, TRefCountPtr<FRHITexture2D> YUY2Texture, const FIntPoint& OutputDimensions, const FMatrix& ColorTransform, const FVector& YUVOffset, bool SrgbToLinear);
+	RENDERCORE_API void SetParameters(FRHIBatchedShaderParameters& BatchedParameters, TRefCountPtr<FRHITexture2D> YUY2Texture, const FIntPoint& OutputDimensions, const FMatrix& ColorTransform, const FVector& YUVOffset, bool SrgbToLinear);
+};
+
+/**
+ * Pixel shader to convert ARGB16, big endian to RGB
+ *
+ * This shader expects a single texture in PF_R16G16B16A16_UINT format.
+ */
+class FARGB16BigConvertPS
+	: public FGlobalShader
+{
+	DECLARE_EXPORTED_SHADER_TYPE(FARGB16BigConvertPS, Global, RENDERCORE_API);
+
+public:
+	FARGB16BigConvertPS() { }
+
+	FARGB16BigConvertPS(const ShaderMetaType::CompiledShaderInitializerType& Initializer)
+		: FGlobalShader(Initializer)
+	{ }
+
+	RENDERCORE_API void SetParameters(FRHIBatchedShaderParameters& BatchedParameters, FShaderResourceViewRHIRef SRV, const FIntPoint& OutputDimensions, UE::Color::EEncoding Encoding, const FMatrix44f& CSTransform);
 };
 
 
@@ -493,73 +596,13 @@ class FYVYUConvertPS
 	DECLARE_EXPORTED_SHADER_TYPE(FYVYUConvertPS, Global, RENDERCORE_API);
 
 public:
-
-	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
-	{
-		return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::ES3_1);
-	}
-
 	FYVYUConvertPS() { }
 
 	FYVYUConvertPS(const ShaderMetaType::CompiledShaderInitializerType& Initializer)
 		: FGlobalShader(Initializer)
 	{ }
 
-	RENDERCORE_API void SetParameters(FRHICommandList& RHICmdList, TRefCountPtr<FRHITexture2D> YVYUTexture, const FMatrix& ColorTransform, const FVector& YUVOffset, bool SrgbToLinear);
-};
-
-
-/**
- * Pixel shader to convert RGB 8 bits to UYVY 8 bits
- *
- * This shader expects a single texture in PF_B8G8R8A8 format.
- */
-class FRGB8toUYVY8ConvertPS
-	: public FGlobalShader
-{
-	DECLARE_EXPORTED_SHADER_TYPE(FRGB8toUYVY8ConvertPS, Global, RENDERCORE_API);
-
-public:
-
-	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
-	{
-		return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::ES3_1);
-	}
-
-	FRGB8toUYVY8ConvertPS() { }
-
-	FRGB8toUYVY8ConvertPS(const ShaderMetaType::CompiledShaderInitializerType& Initializer)
-		: FGlobalShader(Initializer)
-	{ }
-
-	RENDERCORE_API void SetParameters(FRHICommandList& RHICmdList, TRefCountPtr<FRHITexture2D> RGBATexture, const FMatrix& ColorTransform, const FVector& YUVOffset, bool LinearToSrgb);
-};
-
-
-/**
- * Pixel shader to convert RGB 10 bits to YUV v210
- *
- * This shader expects a single texture in PF_A2B10G10R10 format.
- */
-class FRGB10toYUVv210ConvertPS
-	: public FGlobalShader
-{
-	DECLARE_EXPORTED_SHADER_TYPE(FRGB10toYUVv210ConvertPS, Global, RENDERCORE_API);
-
-public:
-
-	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
-	{
-		return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::ES3_1);
-	}
-
-	FRGB10toYUVv210ConvertPS() { }
-
-	FRGB10toYUVv210ConvertPS(const ShaderMetaType::CompiledShaderInitializerType& Initializer)
-		: FGlobalShader(Initializer)
-	{ }
-
-	RENDERCORE_API void SetParameters(FRHICommandList& RHICmdList, TRefCountPtr<FRHITexture2D> RGBATexture, const FMatrix& ColorTransform, const FVector& YUVOffset, bool LinearToSrgb);
+	RENDERCORE_API void SetParameters(FRHIBatchedShaderParameters& BatchedParameters, TRefCountPtr<FRHITexture2D> YVYUTexture, const FMatrix& ColorTransform, const FVector& YUVOffset, bool SrgbToLinear);
 };
 
 
@@ -574,19 +617,13 @@ class FRGB8toY8ConvertPS
 	DECLARE_EXPORTED_SHADER_TYPE(FRGB8toY8ConvertPS, Global, RENDERCORE_API);
 
 public:
-
-	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
-	{
-		return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::ES3_1);
-	}
-
 	FRGB8toY8ConvertPS() { }
 
 	FRGB8toY8ConvertPS(const ShaderMetaType::CompiledShaderInitializerType& Initializer)
 		: FGlobalShader(Initializer)
 	{ }
 
-	RENDERCORE_API void SetParameters(FRHICommandList& RHICmdList, TRefCountPtr<FRHITexture2D> RGBATexture, const FVector4& ColorTransform, bool LinearToSrgb);
+	RENDERCORE_API void SetParameters(FRHIBatchedShaderParameters& BatchedParameters, TRefCountPtr<FRHITexture2D> RGBATexture, const FVector4f& ColorTransform, bool LinearToSrgb);
 };
 
 
@@ -599,53 +636,92 @@ class FReadTextureExternalPS
 	DECLARE_EXPORTED_SHADER_TYPE(FReadTextureExternalPS, Global, RENDERCORE_API);
 
 public:
-
-	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
-	{
-		return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::ES3_1);
-	}
-
 	FReadTextureExternalPS() { }
 
 	FReadTextureExternalPS(const ShaderMetaType::CompiledShaderInitializerType& Initializer)
 		: FGlobalShader(Initializer)
 	{ }
 
-	RENDERCORE_API void SetParameters(FRHICommandList& RHICmdList, FTextureRHIRef TextureExt, FSamplerStateRHIRef SamplerState, const FLinearColor & ScaleRotation, const FLinearColor & Offset);
+	RENDERCORE_API void SetParameters(FRHIBatchedShaderParameters& BatchedParameters, FTextureRHIRef TextureExt, FSamplerStateRHIRef SamplerState, const FLinearColor & ScaleRotation, const FLinearColor & Offset);
 };
 
+
+/** Struct of common parameters used in media capture shaders to do RGB to YUV conversions */
+BEGIN_SHADER_PARAMETER_STRUCT(FRGBToYUVConversion, RENDERCORE_API)
+	SHADER_PARAMETER_RDG_TEXTURE(Texture2D, InputTexture) 
+	SHADER_PARAMETER_SAMPLER(SamplerState, InputSampler)
+	SHADER_PARAMETER(FMatrix44f, ColorTransform)
+	SHADER_PARAMETER(uint32, DoLinearToSrgb)
+	SHADER_PARAMETER(float, OnePixelDeltaX)
+END_SHADER_PARAMETER_STRUCT()
+
+/**
+ * Pixel shader to convert RGB 8 bits to UYVY 8 bits
+ */
+class FRGB8toUYVY8ConvertPS : public FGlobalShader
+{
+public:
+	DECLARE_EXPORTED_GLOBAL_SHADER(FRGB8toUYVY8ConvertPS, RENDERCORE_API);
+
+	SHADER_USE_PARAMETER_STRUCT(FRGB8toUYVY8ConvertPS, FGlobalShader);
+
+	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+		SHADER_PARAMETER_STRUCT_INCLUDE(FRGBToYUVConversion, RGBToYUVConversion)
+		RENDER_TARGET_BINDING_SLOTS()
+	END_SHADER_PARAMETER_STRUCT()
+
+public:
+	/** Allocates and setup shader parameter in the incoming graph builder */
+	RENDERCORE_API FRGB8toUYVY8ConvertPS::FParameters* AllocateAndSetParameters(FRDGBuilder& GraphBuilder, FRDGTextureRef RGBATexture, const FMatrix& ColorTransform, const FVector& YUVOffset, bool bDoLinearToSrgb, FRDGTextureRef OutputTexture);
+};
+
+
+/**
+ * Pixel shader to convert RGB 10 bits to YUV v210
+ */
+class FRGB10toYUVv210ConvertPS : public FGlobalShader
+{
+public:
+	DECLARE_EXPORTED_GLOBAL_SHADER(FRGB10toYUVv210ConvertPS, RENDERCORE_API);
+
+	SHADER_USE_PARAMETER_STRUCT(FRGB10toYUVv210ConvertPS, FGlobalShader);
+
+	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+		SHADER_PARAMETER_STRUCT_INCLUDE(FRGBToYUVConversion, RGBToYUVConversion)
+		SHADER_PARAMETER(float, PaddingScale)
+		RENDER_TARGET_BINDING_SLOTS()
+	END_SHADER_PARAMETER_STRUCT()
+
+public:
+	/** Allocates and setup shader parameter in the incoming graph builder */
+	RENDERCORE_API FRGB10toYUVv210ConvertPS::FParameters* AllocateAndSetParameters(FRDGBuilder& GraphBuilder, FRDGTextureRef RGBATexture, const FMatrix& ColorTransform, const FVector& YUVOffset, bool bDoLinearToSrgb, FRDGTextureRef OutputTexture);
+};
 
 /**
  * Pixel shader to swizzle R G B A components, set alpha to 1 or inverts alpha
  *
  * General conversion shader that is only used to swizzle shaders that do not require any color conversion. RGB to BGR, RGB10A2 to RGBA8 etc
  */
-class FModifyAlphaSwizzleRgbaPS
-	: public FGlobalShader
+class FModifyAlphaSwizzleRgbaPS	: public FGlobalShader
 {
 public:
-	DECLARE_EXPORTED_SHADER_TYPE(FModifyAlphaSwizzleRgbaPS, Global, RENDERCORE_API);
+	DECLARE_EXPORTED_GLOBAL_SHADER(FModifyAlphaSwizzleRgbaPS, RENDERCORE_API);
+
+	SHADER_USE_PARAMETER_STRUCT(FModifyAlphaSwizzleRgbaPS, FGlobalShader);
 
 	class FConversionOp : SHADER_PERMUTATION_INT("CONVERSION_OP", NUM_MEDIA_SHADERS_CONVERSION_OP);
 	using FPermutationDomain = TShaderPermutationDomain<FConversionOp>;
 
-	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
-	{
-		FPermutationDomain PermutationVector(Parameters.PermutationId);
-		return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::ES3_1);
-	}
+	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+		SHADER_PARAMETER_RDG_TEXTURE(Texture2D, InputTexture) 
+		SHADER_PARAMETER_SAMPLER(SamplerState, InputSampler)
+		RENDER_TARGET_BINDING_SLOTS()
+	END_SHADER_PARAMETER_STRUCT()
 
-	static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment)
-	{
-		FGlobalShader::ModifyCompilationEnvironment(Parameters, OutEnvironment);
-	}
-
-	FModifyAlphaSwizzleRgbaPS() = default;
-
-	FModifyAlphaSwizzleRgbaPS(const ShaderMetaType::CompiledShaderInitializerType& Initializer)
-		: FGlobalShader(Initializer)
-	{ }
-
-	RENDERCORE_API void SetParameters(FRHICommandList& RHICmdList, TRefCountPtr<FRHITexture2D> RGBATexture);
+public:
+	/** Allocates and setup shader parameter in the incoming graph builder */
+	RENDERCORE_API FModifyAlphaSwizzleRgbaPS::FParameters* AllocateAndSetParameters(FRDGBuilder& GraphBuilder, FRDGTextureRef RGBATexture, FRDGTextureRef OutputTexture);
 };
+
+
 

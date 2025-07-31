@@ -5,7 +5,7 @@
 template <typename FunctionType>
 void FRDGParameterStruct::Enumerate(FunctionType Function) const
 {
-	EnumerateUniformBuffers([&](FRDGUniformBuffer* UniformBuffer)
+	EnumerateUniformBuffers([&](FRDGUniformBufferBinding UniformBuffer)
 	{
 		UniformBuffer->GetParameters().Enumerate(Function);
 	});
@@ -19,7 +19,7 @@ void FRDGParameterStruct::Enumerate(FunctionType Function) const
 template <typename FunctionType>
 void FRDGParameterStruct::EnumerateTextures(FunctionType Function) const
 {
-	EnumerateUniformBuffers([&](FRDGUniformBuffer* UniformBuffer)
+	EnumerateUniformBuffers([&](FRDGUniformBufferBinding UniformBuffer)
 	{
 		UniformBuffer->GetParameters().EnumerateTextures(Function);
 	});
@@ -33,7 +33,7 @@ void FRDGParameterStruct::EnumerateTextures(FunctionType Function) const
 template <typename FunctionType>
 void FRDGParameterStruct::EnumerateBuffers(FunctionType Function) const
 {
-	EnumerateUniformBuffers([&](FRDGUniformBuffer* UniformBuffer)
+	EnumerateUniformBuffers([&](FRDGUniformBufferBinding UniformBuffer)
 	{
 		UniformBuffer->GetParameters().EnumerateBuffers(Function);
 	});
@@ -51,9 +51,24 @@ void FRDGParameterStruct::EnumerateUniformBuffers(FunctionType Function) const
 	{
 		const FRDGParameter Parameter = GetParameterInternal(Layout->GraphUniformBuffers, Index);
 
-		if (FRDGUniformBufferRef UniformBuffer = Parameter.GetAsUniformBuffer())
+		if (FRDGUniformBufferBinding UniformBuffer = Parameter.GetAsUniformBuffer())
 		{
 			Function(UniformBuffer);
+		}
+	}
+}
+
+inline void FRDGParameterStruct::ClearUniformBuffers(void* Contents, const FRHIUniformBufferLayout* Layout)
+{
+	FRDGParameterStruct Parameters(Contents, Layout);
+
+	for (uint32 Index = 0, Count = Layout->UniformBuffers.Num(); Index < Count; ++Index)
+	{
+		const FRDGParameter Parameter = Parameters.GetParameterInternal(Layout->UniformBuffers, Index);
+
+		if (FUniformBufferBinding* UniformBuffer = Parameter.GetAs<FUniformBufferBinding>())
+		{
+			*UniformBuffer = {};
 		}
 	}
 }

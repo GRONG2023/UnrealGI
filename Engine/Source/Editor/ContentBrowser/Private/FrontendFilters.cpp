@@ -1,28 +1,68 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "FrontendFilters.h"
-#include "Framework/Commands/UIAction.h"
-#include "Textures/SlateIcon.h"
-#include "Misc/ConfigCacheIni.h"
-#include "Framework/MultiBox/MultiBoxBuilder.h"
-#include "Widgets/Input/SEditableTextBox.h"
-#include "ISourceControlModule.h"
-#include "SourceControlHelpers.h"
-#include "SourceControlOperations.h"
-#include "SourceControlWindows.h"
-#include "Editor.h"
+
+#include "AssetCompilingManager.h"
+#include "AssetRegistry/ARFilter.h"
+#include "AssetRegistry/AssetData.h"
+#include "AssetRegistry/AssetRegistryModule.h"
+#include "AssetRegistry/IAssetRegistry.h"
 #include "AssetToolsModule.h"
-#include "ICollectionManager.h"
+#include "Blueprint/BlueprintSupport.h"
 #include "CollectionManagerModule.h"
-#include "ObjectTools.h"
-#include "AssetRegistryModule.h"
-#include "SAssetView.h"
-#include "Modules/ModuleManager.h"
-#include "ContentBrowserModule.h"
+#include "CollectionManagerTypes.h"
 #include "ContentBrowserDataFilter.h"
-#include "MRUFavoritesList.h"
-#include "Settings/ContentBrowserSettings.h"
+#include "ContentBrowserDataSource.h"
+#include "ContentBrowserDataSubsystem.h"
+#include "ContentBrowserItem.h"
+#include "ContentBrowserItemData.h"
+#include "ContentBrowserModule.h"
+#include "CoreGlobals.h"
+#include "Delegates/Delegate.h"
+#include "Editor.h"
+#include "Engine/World.h"
+#include "Framework/Commands/UIAction.h"
+#include "Framework/Commands/UICommandInfo.h"
+#include "Framework/MultiBox/MultiBoxBuilder.h"
+#include "GameFramework/Actor.h"
 #include "HAL/FileManager.h"
+#include "HAL/PlatformCrt.h"
+#include "HAL/PlatformMath.h"
+#include "IAssetTools.h"
+#include "ICollectionManager.h"
+#include "IContentBrowserDataModule.h"
+#include "ISourceControlModule.h"
+#include "ISourceControlState.h"
+#include "MRUFavoritesList.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/Attribute.h"
+#include "Misc/ConfigCacheIni.h"
+#include "Misc/Paths.h"
+#include "Modules/ModuleManager.h"
+#include "ObjectTools.h"
+#include "ProfilingDebugging/CpuProfilerTrace.h"
+#include "Settings/ContentBrowserSettings.h"
+#include "SourceControlOperations.h"
+#include "SourceControlHelpers.h"
+#include "Templates/RemoveReference.h"
+#include "Templates/UnrealTemplate.h"
+#include "TextFilterKeyValueHandlers.h"
+#include "TextFilterValueHandlers.h"
+#include "Textures/SlateIcon.h"
+#include "UObject/Class.h"
+#include "UObject/Object.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/ObjectRedirector.h"
+#include "UObject/Package.h"
+#include "UObject/TopLevelAssetPath.h"
+#include "UObject/UObjectMarks.h"
+#include "UObject/UnrealNames.h"
+#include "UObject/WeakObjectPtr.h"
+#include "UObject/WeakObjectPtrTemplates.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
+#include "Widgets/Input/SEditableTextBox.h"
+
+class SWidget;
 
 /** Helper functions for frontend filters */
 namespace FrontendFilterHelper
@@ -49,7 +89,7 @@ namespace FrontendFilterHelper
 		TArray<FAssetIdentifier> AssetDependencies;
 		while (PackageNamesToProcess.Num() > 0)
 		{
-			const FName PackageName = PackageNamesToProcess.Pop(false);
+			const FName PackageName = PackageNamesToProcess.Pop(EAllowShrinking::No);
 			AssetDependencies.Reset();
 			AssetRegistry.GetDependencies(FAssetIdentifier(PackageName), AssetDependencies);
 			for (const FAssetIdentifier& Dependency : AssetDependencies)
@@ -233,6 +273,9 @@ public:
 	{
 		AssetPtr = InAsset;
 
+		AssetDisplayName = AssetPtr->GetDisplayName().ToString();
+		AssetDisplayName.ToUpperInline();
+
 		if (bIncludeAssetPath)
 		{
 			// Get the full asset path, and also split it so we can compare each part in the filter
@@ -242,7 +285,7 @@ public:
 				int32 LastDotIndex = INDEX_NONE;
 				if (AssetFullPath.FindLastChar(TEXT('/'), LastSlashIndex) && AssetFullPath.FindLastChar(TEXT('.'), LastDotIndex) && LastDotIndex > LastSlashIndex)
 				{
-					AssetFullPath.LeftInline(LastDotIndex, /*bAllowShrinking*/false);
+					AssetFullPath.LeftInline(LastDotIndex, EAllowShrinking::No);
 				}
 			}
 			AssetFullPath.ParseIntoArray(AssetSplitPath, TEXT("/"));
@@ -263,7 +306,7 @@ public:
 
 		if (CollectionManager)
 		{
-			FName ItemCollectionId;
+			FSoftObjectPath ItemCollectionId;
 			if (AssetPtr->TryGetCollectionId(ItemCollectionId))
 			{
 				CollectionManager->GetCollectionsContainingObject(ItemCollectionId, ECollectionShareType::CST_All, AssetCollectionNames, ECollectionRecursionFlags::SelfAndChildren);
@@ -290,6 +333,7 @@ public:
 		AssetExportTextName.Reset();
 		AssetSplitPath.Reset();
 		AssetCollectionNames.Reset();
+		AssetDisplayName.Reset();
 	}
 
 	void SetIncludeClassName(const bool InIncludeClassName)
@@ -324,7 +368,18 @@ public:
 
 	virtual bool TestBasicStringExpression(const FTextFilterString& InValue, const ETextFilterTextComparisonMode InTextComparisonMode) const override
 	{
+		bool bIsHandlerMatch = false;
+		if (UTextFilterValueHandlers::HandleTextFilterValue(*AssetPtr, InValue, InTextComparisonMode, bIsHandlerMatch))
+		{
+			return bIsHandlerMatch;
+		}
+
 		if (InValue.CompareName(AssetPtr->GetItemName(), InTextComparisonMode))
+		{
+			return true;
+		}
+
+		if (InValue.CompareFString(AssetDisplayName, InTextComparisonMode))
 		{
 			return true;
 		}
@@ -379,6 +434,12 @@ public:
 
 	virtual bool TestComplexExpression(const FName& InKey, const FTextFilterString& InValue, const ETextFilterComparisonOperation InComparisonOperation, const ETextFilterTextComparisonMode InTextComparisonMode) const override
 	{
+		bool bIsHandlerMatch = false;
+		if (UTextFilterKeyValueHandlers::HandleTextFilterKeyValue(*AssetPtr, InKey, InValue, InComparisonOperation, InTextComparisonMode, bIsHandlerMatch))
+		{
+			return bIsHandlerMatch;
+		}
+
 		// Special case for the asset name, as this isn't contained within the asset registry meta-data
 		if (InKey == NameKeyName)
 		{
@@ -475,6 +536,9 @@ private:
 
 	/** The export text name of the current asset */
 	FString AssetExportTextName;
+
+	/** Display name of the current asset */
+	FString AssetDisplayName;
 
 	/** Split path of the current asset */
 	TArray<FString> AssetSplitPath;
@@ -651,7 +715,7 @@ void FFrontendFilter_Text::RebuildReferencedDynamicCollections()
 /////////////////////////////////////////
 
 FFrontendFilter_CheckedOut::FFrontendFilter_CheckedOut(TSharedPtr<FFrontendFilterCategory> InCategory) 
-	: FFrontendFilter(InCategory),
+	: FFrontendFilter(MoveTemp(InCategory)),
 	bSourceControlEnabled(false)
 {
 	
@@ -710,7 +774,7 @@ void FFrontendFilter_CheckedOut::SourceControlOperationComplete(const FSourceCon
 /////////////////////////////////////////
 
 FFrontendFilter_NotSourceControlled::FFrontendFilter_NotSourceControlled(TSharedPtr<FFrontendFilterCategory> InCategory) 
-	: FFrontendFilter(InCategory),
+	: FFrontendFilter(MoveTemp(InCategory)),
 	bSourceControlEnabled(false),
 	bIsRequestStatusRunning(false),
 	bInitialRequestCompleted(false)
@@ -785,7 +849,8 @@ void FFrontendFilter_NotSourceControlled::RequestStatus()
 		// Request the state of files at filter construction time to make sure files have the correct state for the filter
 		TSharedRef<FUpdateStatus, ESPMode::ThreadSafe> UpdateStatusOperation = ISourceControlOperation::Create<FUpdateStatus>();
 
-		TArray<FString> Filenames = FSourceControlWindows::GetSourceControlLocations(/*bContentOnly*/true);
+		TArray<FString> Filenames = SourceControlHelpers::GetSourceControlLocations(/*bContentOnly*/true);
+
 		UpdateStatusOperation->SetCheckingAllFiles(false);
 		SourceControlProvider.Execute(UpdateStatusOperation, Filenames, EConcurrency::Asynchronous, FSourceControlOperationComplete::CreateSP(this, &FFrontendFilter_NotSourceControlled::SourceControlOperationComplete));
 	}
@@ -804,7 +869,7 @@ void FFrontendFilter_NotSourceControlled::SourceControlOperationComplete(const F
 /////////////////////////////////////////
 
 FFrontendFilter_Modified::FFrontendFilter_Modified(TSharedPtr<FFrontendFilterCategory> InCategory)
-	: FFrontendFilter(InCategory)
+	: FFrontendFilter(MoveTemp(InCategory))
 	, bIsCurrentlyActive(false)
 {
 	UPackage::PackageDirtyStateChangedEvent.AddRaw(this, &FFrontendFilter_Modified::OnPackageDirtyStateUpdated);
@@ -855,7 +920,7 @@ bool FFrontendFilter_ReplicatedBlueprint::PassesFilter(FAssetFilterType InItem) 
 #define LOCTEXT_NAMESPACE "ContentBrowser"
 
 FFrontendFilter_ArbitraryComparisonOperation::FFrontendFilter_ArbitraryComparisonOperation(TSharedPtr<FFrontendFilterCategory> InCategory)
-	: FFrontendFilter(InCategory)
+	: FFrontendFilter(MoveTemp(InCategory))
 	, TagName(TEXT("TagName"))
 	, TargetTagValue(TEXT("Value"))
 	, ComparisonOp(ETextFilterComparisonOperation::NotEqual)
@@ -1022,7 +1087,7 @@ FString FFrontendFilter_ArbitraryComparisonOperation::ConvertOperationToString(E
 /////////////////////////////////////////
 
 FFrontendFilter_ShowOtherDevelopers::FFrontendFilter_ShowOtherDevelopers(TSharedPtr<FFrontendFilterCategory> InCategory)
-	: FFrontendFilter(InCategory)
+	: FFrontendFilter(MoveTemp(InCategory))
 	, BaseDeveloperPath(TEXT("/Game/Developers/"))
 	, BaseDeveloperPathAnsi()
 	, UserDeveloperPath(BaseDeveloperPath + FPaths::GameUserDeveloperFolderName() + TEXT("/"))
@@ -1036,8 +1101,10 @@ void FFrontendFilter_ShowOtherDevelopers::SetCurrentFilter(TArrayView<const FNam
 {
 	if ( InSourcePaths.Num() == 1 )
 	{
-		const FString PackagePath = InSourcePaths[0].ToString() + TEXT("/");
-		
+		FString PackagePath;
+		IContentBrowserDataModule::Get().GetSubsystem()->TryConvertVirtualPath(InSourcePaths[0].ToString(), PackagePath);
+		PackagePath += TEXT("/");
+
 		// If the path starts with the base developer path, and is not the path itself then only one developer path is selected
 		bIsOnlyOneDeveloperPathSelected = PackagePath.StartsWith(BaseDeveloperPath) && PackagePath.Len() != BaseDeveloperPath.Len();
 	}
@@ -1058,12 +1125,12 @@ bool FFrontendFilter_ShowOtherDevelopers::PassesFilter(FAssetFilterType InItem) 
 		{
 			// TODO: Have attribute flags for this so you can tell from the item whether it's a developer folder, and also whether it's yours
 			// If selecting multiple folders, the Developers folder/parent folder, or "All Assets", hide assets which are found in the development folder unless they are in the current user's folder
-			bool bPackageInDeveloperFolder = !TextFilterUtils::NameStrincmp(InItem.GetVirtualPath(), BaseDeveloperPath, BaseDeveloperPathAnsi, BaseDeveloperPath.Len());
+			bool bPackageInDeveloperFolder = !TextFilterUtils::NameStrincmp(InItem.GetInternalPath(), BaseDeveloperPath, BaseDeveloperPathAnsi, BaseDeveloperPath.Len());
 			if ( bPackageInDeveloperFolder )
 			{
 				// Test again using only the path part to avoid filtering files directly in the Developers folder
 				// This happens after the above check to avoid string manipulation when not required
-				FString PackagePath = FPaths::GetPath(InItem.GetVirtualPath().ToString());
+				FString PackagePath = FPaths::GetPath(InItem.GetInternalPath().ToString());
 				bPackageInDeveloperFolder = PackagePath.StartsWith(BaseDeveloperPath);
 				if ( bPackageInDeveloperFolder )
 				{
@@ -1101,10 +1168,10 @@ bool FFrontendFilter_ShowOtherDevelopers::GetShowOtherDeveloperAssets() const
 /////////////////////////////////////////
 
 FFrontendFilter_ShowRedirectors::FFrontendFilter_ShowRedirectors(TSharedPtr<FFrontendFilterCategory> InCategory)
-	: FFrontendFilter(InCategory)
+	: FFrontendFilter(MoveTemp(InCategory))
 {
 	bAreRedirectorsInBaseFilter = false;
-	RedirectorClassName = UObjectRedirector::StaticClass()->GetFName();
+	RedirectorClassName = UObjectRedirector::StaticClass()->GetPathName();
 }
 
 void FFrontendFilter_ShowRedirectors::SetCurrentFilter(TArrayView<const FName> InSourcePaths, const FContentBrowserDataFilter& InBaseFilter)
@@ -1119,7 +1186,7 @@ bool FFrontendFilter_ShowRedirectors::PassesFilter(FAssetFilterType InItem) cons
 	if ( !bAreRedirectorsInBaseFilter )
 	{
 		const FContentBrowserItemDataAttributeValue ClassValue = InItem.GetItemAttribute(NAME_Class);
-		return !ClassValue.IsValid() || ClassValue.GetValue<FName>() != RedirectorClassName;
+		return !ClassValue.IsValid() || ClassValue.GetValue<FString>() != RedirectorClassName;
 	}
 
 	return true;
@@ -1130,13 +1197,14 @@ bool FFrontendFilter_ShowRedirectors::PassesFilter(FAssetFilterType InItem) cons
 /////////////////////////////////////////
 
 FFrontendFilter_InUseByLoadedLevels::FFrontendFilter_InUseByLoadedLevels(TSharedPtr<FFrontendFilterCategory> InCategory) 
-	: FFrontendFilter(InCategory)
-	, bIsCurrentlyActive(false)
+	: FFrontendFilter(MoveTemp(InCategory))
 {
 	FEditorDelegates::MapChange.AddRaw(this, &FFrontendFilter_InUseByLoadedLevels::OnEditorMapChange);
 
 	IAssetTools& AssetTools = FAssetToolsModule::GetModule().Get();
 	AssetTools.OnAssetPostRename().AddRaw(this, &FFrontendFilter_InUseByLoadedLevels::OnAssetPostRename);
+
+	FAssetCompilingManager::Get().OnAssetPostCompileEvent().AddRaw(this, &FFrontendFilter_InUseByLoadedLevels::OnAssetPostCompile);
 }
 
 FFrontendFilter_InUseByLoadedLevels::~FFrontendFilter_InUseByLoadedLevels()
@@ -1148,6 +1216,10 @@ FFrontendFilter_InUseByLoadedLevels::~FFrontendFilter_InUseByLoadedLevels()
 		IAssetTools& AssetTools = FAssetToolsModule::GetModule().Get();
 		AssetTools.OnAssetPostRename().RemoveAll(this);
 	}
+
+	FAssetCompilingManager::Get().OnAssetPostCompileEvent().RemoveAll(this);
+
+	UnregisterDelayedRefresh();
 }
 
 void FFrontendFilter_InUseByLoadedLevels::ActiveStateChanged( bool bActive )
@@ -1156,14 +1228,91 @@ void FFrontendFilter_InUseByLoadedLevels::ActiveStateChanged( bool bActive )
 
 	if ( bActive )
 	{
-		ObjectTools::TagInUseObjects(ObjectTools::SO_LoadedLevels);
+		ObjectTools::TagInUseObjects(ObjectTools::SO_LoadedLevels, ObjectTools::EInUseSearchFlags::SkipCompilingAssets);
+		bIsDirty = false;
+	}
+}
+
+void FFrontendFilter_InUseByLoadedLevels::RegisterDelayedRefresh(float DelayInSeconds)
+{
+	UnregisterDelayedRefresh();
+
+	// The Editor might be unresponsive during heavy asset compilation so we 
+	// not only need a delay, but also a minimum amount of frames
+	// to pass until we call the actual refresh.
+	DelayedRefreshHandle = FTSTicker::GetCoreTicker().AddTicker(
+		TEXT("FFrontendFilter_InUseByLoadedLevels"),
+		0.0f,
+		[this, FireInTickCount = 16, DelayInSeconds](float DeltaTime) mutable
+		{
+			DelayInSeconds -= DeltaTime;
+			if (--FireInTickCount == 0 && DelayInSeconds <= 0.0f && FAssetCompilingManager::Get().GetNumRemainingAssets() == 0)
+			{
+				Refresh();
+				return false;
+			}
+
+			return true;
+		}
+	);
+}
+
+void FFrontendFilter_InUseByLoadedLevels::UnregisterDelayedRefresh()
+{
+	if (DelayedRefreshHandle.IsValid())
+	{
+		FTSTicker::GetCoreTicker().RemoveTicker(DelayedRefreshHandle);
+		DelayedRefreshHandle.Reset();
+	}
+}
+
+void FFrontendFilter_InUseByLoadedLevels::Refresh()
+{
+	if (bIsCurrentlyActive)
+	{
+		TRACE_CPUPROFILER_EVENT_SCOPE(FFrontendFilter_InUseByLoadedLevels::Refresh);
+
+		// Update the tags identifying objects currently used by loaded levels
+		ObjectTools::TagInUseObjects(ObjectTools::SO_LoadedLevels, ObjectTools::EInUseSearchFlags::SkipCompilingAssets);
+		bIsDirty = false;
+		BroadcastChangedEvent();
+	}
+}
+
+void FFrontendFilter_InUseByLoadedLevels::OnAssetPostCompile(const TArray<FAssetCompileData>& CompiledAssets)
+{
+	if (bIsCurrentlyActive && !bIsDirty)
+	{
+		for (const FAssetCompileData& CompileData : CompiledAssets)
+		{
+			if (CompileData.Asset.IsValid())
+			{
+				bIsDirty = true;
+				break;
+			}
+		}
+	}
+
+	// TagInUseObjects is really slow, only trigger a filter refresh when all assets are finished compiling.
+	if (bIsDirty && FAssetCompilingManager::Get().GetNumRemainingAssets() == 0)
+	{
+		// Wait until we get some idle time to avoid refreshing too aggressively 
+		RegisterDelayedRefresh(2.0f);
+	}
+	else
+	{
+		// We're not idle anymore, unregister until we get to 0 assets again
+		UnregisterDelayedRefresh();
 	}
 }
 
 void FFrontendFilter_InUseByLoadedLevels::OnAssetPostRename(const TArray<FAssetRenameData>& AssetsAndNames)
 {
-	// Update the tags identifying objects currently used by loaded levels
-	ObjectTools::TagInUseObjects(ObjectTools::SO_LoadedLevels);
+	if (bIsCurrentlyActive)
+	{
+		// Update the tags identifying objects currently used by loaded levels
+		Refresh();
+	}
 }
 
 bool FFrontendFilter_InUseByLoadedLevels::PassesFilter(FAssetFilterType InItem) const
@@ -1180,7 +1329,7 @@ bool FFrontendFilter_InUseByLoadedLevels::PassesFilter(FAssetFilterType InItem) 
 			const bool bRejectObject =
 				Asset->GetOuter() == NULL || // Skip objects with null outers
 				Asset->HasAnyFlags(RF_Transient) || // Skip transient objects (these shouldn't show up in the CB anyway)
-				Asset->IsPendingKill() || // Objects that will be garbage collected 
+				!IsValid(Asset) || // Objects that will be garbage collected 
 				bUnreferenced || // Unreferenced objects 
 				bIndirectlyReferencedObject; // Indirectly referenced objects
 
@@ -1199,8 +1348,7 @@ void FFrontendFilter_InUseByLoadedLevels::OnEditorMapChange( uint32 MapChangeFla
 {
 	if ( MapChangeFlags == MapChangeEventFlags::NewMap && bIsCurrentlyActive )
 	{
-		ObjectTools::TagInUseObjects(ObjectTools::SO_LoadedLevels);
-		BroadcastChangedEvent();
+		Refresh();
 	}
 }
 
@@ -1209,17 +1357,12 @@ void FFrontendFilter_InUseByLoadedLevels::OnEditorMapChange( uint32 MapChangeFla
 /////////////////////////////////////////
 
 FFrontendFilter_UsedInAnyLevel::FFrontendFilter_UsedInAnyLevel(TSharedPtr<FFrontendFilterCategory> InCategory)
-	: FFrontendFilter(InCategory)
+	: FFrontendFilter(MoveTemp(InCategory))
 {
 	// Prepare asset registry.
 	FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
 	AssetRegistry = &AssetRegistryModule.Get();
 	check (AssetRegistry != nullptr);
-}
-
-FFrontendFilter_UsedInAnyLevel::~FFrontendFilter_UsedInAnyLevel()
-{
-	AssetRegistry = nullptr;
 }
 
 void FFrontendFilter_UsedInAnyLevel::ActiveStateChanged(bool bActive)
@@ -1228,9 +1371,11 @@ void FFrontendFilter_UsedInAnyLevel::ActiveStateChanged(bool bActive)
 
 	if (bActive)
 	{
-		// Find all the levels
+		// Find all the levels & external actors
 		FARFilter Filter;
-		Filter.ClassNames.Add(UWorld::StaticClass()->GetFName());
+		Filter.ClassPaths.Add(UWorld::StaticClass()->GetClassPathName());
+		Filter.ClassPaths.Add(AActor::StaticClass()->GetClassPathName());
+		Filter.bRecursiveClasses = true;
 		FrontendFilterHelper::GetDependencies(Filter, *AssetRegistry, LevelsDependencies);
 	}
 }
@@ -1250,18 +1395,12 @@ bool FFrontendFilter_UsedInAnyLevel::PassesFilter(FAssetFilterType InItem) const
 /////////////////////////////////////////
 
 FFrontendFilter_NotUsedInAnyLevel::FFrontendFilter_NotUsedInAnyLevel(TSharedPtr<FFrontendFilterCategory> InCategory)
-	: FFrontendFilter(InCategory)
+	: FFrontendFilter(MoveTemp(InCategory))
 {
 	// Prepare asset registry.
 	FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
 	AssetRegistry = &AssetRegistryModule.Get();
 	check (AssetRegistry != nullptr);
-}
-
-
-FFrontendFilter_NotUsedInAnyLevel::~FFrontendFilter_NotUsedInAnyLevel()
-{
-	AssetRegistry = nullptr;
 }
 
 void FFrontendFilter_NotUsedInAnyLevel::ActiveStateChanged(bool bActive)
@@ -1270,9 +1409,11 @@ void FFrontendFilter_NotUsedInAnyLevel::ActiveStateChanged(bool bActive)
 	
 	if (bActive)
 	{
-		// Find all the levels
+		// Find all the levels & external actors
 		FARFilter Filter;
-		Filter.ClassNames.Add(UWorld::StaticClass()->GetFName());
+		Filter.ClassPaths.Add(UWorld::StaticClass()->GetClassPathName());
+		Filter.ClassPaths.Add(AActor::StaticClass()->GetClassPathName());
+		Filter.bRecursiveClasses = true;
 		FrontendFilterHelper::GetDependencies(Filter, *AssetRegistry, LevelsDependencies);
 	}
 }
@@ -1287,13 +1428,35 @@ bool FFrontendFilter_NotUsedInAnyLevel::PassesFilter(FAssetFilterType InItem) co
 	return false;
 }
 
+/////////////////////////////////////////
+// FFrontendFilter_NotUsedInAnyAsset
+/////////////////////////////////////////
+
+FFrontendFilter_NotUsedInAnyAsset::FFrontendFilter_NotUsedInAnyAsset(TSharedPtr<FFrontendFilterCategory> InCategory)
+	: FFrontendFilter(MoveTemp(InCategory))
+{
+	FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
+	AssetRegistry = &AssetRegistryModule.Get();
+}
+
+bool FFrontendFilter_NotUsedInAnyAsset::PassesFilter(FAssetFilterType InItem) const
+{
+	FAssetData ItemAssetData;
+	if (InItem.Legacy_TryGetAssetData(ItemAssetData))
+	{
+		TArray<FName> OutReferencers;
+		AssetRegistry->GetReferencers(ItemAssetData.PackageName, OutReferencers);
+		return OutReferencers.IsEmpty();
+	}
+	return false;
+}
 
 /////////////////////////////////////////
 // FFrontendFilter_Recent
 /////////////////////////////////////////
 
 FFrontendFilter_Recent::FFrontendFilter_Recent(TSharedPtr<FFrontendFilterCategory> InCategory)
-	: FFrontendFilter(InCategory)
+	: FFrontendFilter(MoveTemp(InCategory))
 	, bIsCurrentlyActive(false)
 {
 	UContentBrowserSettings::OnSettingChanged().AddRaw(this, &FFrontendFilter_Recent::ResetFilter);
@@ -1354,7 +1517,7 @@ void FFrontendFilter_Recent::ResetFilter(FName InName)
 /////////////////////////////////////////
 
 FFrontendFilter_Writable::FFrontendFilter_Writable(TSharedPtr<FFrontendFilterCategory> InCategory)
-	: FFrontendFilter(InCategory)
+	: FFrontendFilter(MoveTemp(InCategory))
 {
 }
 
@@ -1374,4 +1537,36 @@ bool FFrontendFilter_Writable::PassesFilter(FAssetFilterType InItem) const
 	ItemDiskPath = FPaths::ConvertRelativePathToFull(MoveTemp(ItemDiskPath));
 
 	return !IFileManager::Get().IsReadOnly(*ItemDiskPath);
+}
+
+/////////////////////////////////////////
+// FFrontendFilter_VirtualizedData
+/////////////////////////////////////////
+
+FFrontendFilter_VirtualizedData::FFrontendFilter_VirtualizedData(TSharedPtr<FFrontendFilterCategory> InCategory)
+	: FFrontendFilter(MoveTemp(InCategory))
+{
+}
+
+bool FFrontendFilter_VirtualizedData::PassesFilter(FAssetFilterType InItem) const
+{
+	const FContentBrowserItemDataAttributeValue AttributeValue = InItem.GetItemAttribute(ContentBrowserItemAttributes::VirtualizedData);
+	if (AttributeValue.IsValid())
+	{
+		return AttributeValue.GetValue<FString>() == TEXT("True");
+	}
+	else
+	{
+		return false;
+	}
+}
+
+FFrontendFilter_Unsupported::FFrontendFilter_Unsupported(TSharedPtr<FFrontendFilterCategory> InCategory)
+	:FFrontendFilter (InCategory)
+{
+}
+
+bool FFrontendFilter_Unsupported::PassesFilter(FAssetFilterType InItem) const
+{
+	return !InItem.IsSupported();
 }

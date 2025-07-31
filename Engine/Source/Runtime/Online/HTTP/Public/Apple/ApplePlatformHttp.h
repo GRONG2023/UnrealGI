@@ -6,7 +6,7 @@
 /**
  * Platform specific Http implementations
  */
-class FApplePlatformHttp : public FGenericPlatformHttp
+class HTTP_API FApplePlatformHttp : public FGenericPlatformHttp
 {
 public:
 
@@ -20,10 +20,7 @@ public:
 	 *
 	 * @return NULL if default implementation is to be used
 	 */
-	static FHttpManager* CreatePlatformHttpManager()
-	{
-		return nullptr;
-	}
+	static FHttpManager* CreatePlatformHttpManager();
 
 	/**
 	 * Platform shutdown step
@@ -36,6 +33,13 @@ public:
 	 * @return request object
 	 */
 	static IHttpRequest* ConstructRequest();
+
+private:
+    /** Session used to create Apple based requests */
+    static inline NSURLSession* Session = nil;
+
+	static void InitWithNSUrlSession();
+	static void ShutdownWithNSUrlSession();
 };
 
 

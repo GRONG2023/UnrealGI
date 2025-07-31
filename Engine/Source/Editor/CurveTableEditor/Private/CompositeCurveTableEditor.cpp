@@ -1,11 +1,22 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "CompositeCurveTableEditor.h"
-#include "PropertyEditorModule.h"
+
+#include "Delegates/Delegate.h"
+#include "DetailsViewArgs.h"
+#include "IDetailsView.h"
+#include "Internationalization/Internationalization.h"
+#include "Math/Color.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/Attribute.h"
 #include "Modules/ModuleManager.h"
-#include "EditorReimportHandler.h"
-#include "CurveTableEditorModule.h"
+#include "PropertyEditorModule.h"
+#include "Toolkits/AssetEditorToolkit.h"
+#include "Types/SlateEnums.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
 #include "Widgets/Docking/SDockTab.h"
+
+class UCurveTable;
 
 #define LOCTEXT_NAMESPACE "CompositeCurveTableEditor"
 
@@ -36,7 +47,9 @@ void FCompositeCurveTableEditor::UnregisterTabSpawners(const TSharedRef<class FT
 void FCompositeCurveTableEditor::CreateAndRegisterPropertiesTab(const TSharedRef<class FTabManager>& InTabManager)
 {
 	FPropertyEditorModule& PropertyEditorModule = FModuleManager::GetModuleChecked<FPropertyEditorModule>("PropertyEditor");
-	const FDetailsViewArgs DetailsViewArgs(/*bIsUpdatable*/false, /*bIsLockable*/false, true, FDetailsViewArgs::ObjectsUseNameArea, false);
+	FDetailsViewArgs DetailsViewArgs;
+	DetailsViewArgs.NameAreaSettings = FDetailsViewArgs::HideNameArea;
+
 	DetailsView = PropertyEditorModule.CreateDetailView(DetailsViewArgs);
 
 	InTabManager->RegisterTabSpawner(PropertiesTabId, FOnSpawnTab::CreateSP(this, &FCompositeCurveTableEditor::SpawnTab_Properties))
@@ -49,7 +62,6 @@ TSharedRef<SDockTab> FCompositeCurveTableEditor::SpawnTab_Properties(const FSpaw
 	check(Args.GetTabId().TabType == PropertiesTabId);
 
 	return SNew(SDockTab)
-		.Icon(FEditorStyle::GetBrush("CurveTableEditor.Tabs.Properties"))
 		.Label(LOCTEXT("PropertiesTitle", "Properties"))
 		.TabColorScale(GetTabColorScale())
 		[
@@ -70,7 +82,7 @@ void FCompositeCurveTableEditor::InitCurveTableEditor( const EToolkitMode::Type 
 
 TSharedRef< FTabManager::FLayout > FCompositeCurveTableEditor::InitCurveTableLayout()
 {
-	return FTabManager::NewLayout("Standalone_CompositeCurveTableEditor_temp_Layout2")
+	return FTabManager::NewLayout("Standalone_CompositeCurveTableEditor_temp_Layout3")
 	->AddArea
 	(
 		FTabManager::NewPrimaryArea()->SetOrientation(Orient_Horizontal)
@@ -90,13 +102,6 @@ TSharedRef< FTabManager::FLayout > FCompositeCurveTableEditor::InitCurveTableLay
 		(
 			FTabManager::NewSplitter()
 			->SetOrientation(Orient_Vertical)
-			->Split
-			(
-				FTabManager::NewStack()
-				->SetSizeCoefficient(0.1f)
-				->SetHideTabWell(true)
-				->AddTab(GetToolbarTabId(), ETabState::OpenedTab)
-			)
 			->Split
 			(
 				FTabManager::NewStack()

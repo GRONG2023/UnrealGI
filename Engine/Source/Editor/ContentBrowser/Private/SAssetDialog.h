@@ -2,18 +2,33 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "Layout/Visibility.h"
+#include "Containers/Array.h"
+#include "Containers/UnrealString.h"
+#include "ContentBrowserDataSubsystem.h"
+#include "ContentBrowserDelegates.h"
+#include "HAL/Platform.h"
+#include "IAssetTypeActions.h"
+#include "IContentBrowserSingleton.h"
 #include "Input/Reply.h"
+#include "Internationalization/Text.h"
+#include "Layout/Visibility.h"
+#include "Templates/SharedPointer.h"
+#include "Types/SlateEnums.h"
+#include "UObject/NameTypes.h"
 #include "Widgets/DeclarativeSyntaxSupport.h"
 #include "Widgets/SCompoundWidget.h"
-#include "AssetData.h"
-#include "IContentBrowserSingleton.h"
 
-class SEditableTextBox;
-class STextBlock;
-class SPathPicker;
+class FMenuBuilder;
+class FUICommandList;
 class SAssetPicker;
+class SEditableTextBox;
+class SPathPicker;
+class STextBlock;
+class SWidget;
+struct FAssetData;
+struct FGeometry;
+struct FKeyEvent;
+struct FTopLevelAssetPath;
 
 enum class EOpenedContextMenuWidget : uint8
 {
@@ -44,6 +59,9 @@ public:
 
 	/** Sets the delegate handler for when the dialog is closed or cancelled */
 	void SetOnAssetDialogCancelled(const FOnAssetDialogCancelled& InOnAssetDialogCancelled);
+
+	/** Reset selected paths to default choices */
+	void SelectDefaultPaths();
 
 private:
 
@@ -105,7 +123,7 @@ private:
 
 	/** Handler for Delete */
 	void ExecuteDelete();
-	FReply ExecuteDeleteFolderConfirmed();
+	FReply ExecuteDeleteFolderConfirmed(const TArray<FString> SelectedFolderInternalPaths, const bool bResetSelection);
 
 	/** Handler to check to see if a create new folder command is allowed */
 	bool CanExecuteCreateNewFolder() const;
@@ -115,6 +133,8 @@ private:
 
 	/** Handler for show in explorer */
 	void ExecuteExplore();
+	bool CanExecuteExplore();
+	bool ExecuteExploreInternal(bool bTest=false);
 
 	/** Setup function for the context menu creation of folder and assets */
 	void SetupContextMenuContent(FMenuBuilder& MenuBuilder, const TArray<FString>& SelectedPaths);
@@ -124,9 +144,11 @@ private:
 	/** Closes this dialog */
 	void CloseDialog();
 
-	void SetCurrentlySelectedPath(const FString& NewPath);
+	void SetCurrentlySelectedPath(const FString& NewPath, const EContentBrowserPathType InPathType);
 
 	void SetCurrentlyEnteredAssetName(const FString& NewName);
+
+	FName GetCurrentSelectedVirtualPath() const;
 
 	void UpdateInputValidity();
 
@@ -153,7 +175,7 @@ private:
 	FGetCurrentSelectionDelegate GetCurrentSelectionDelegate;
 
 	/** Only assets of these classes will show up */
-	TArray<FName> AssetClassNames;
+	TArray<FTopLevelAssetPath> AssetClassNames;
 
 	/** Fired when assets are chosen for open. Only fired in open dialogs. */
 	FOnAssetsChosenForOpen OnAssetsChosenForOpen;
@@ -175,6 +197,8 @@ private:
 
 	/** The object path of the asset to save. Only used in save dialogs. */
 	FString CurrentlySelectedPath;
+
+	EContentBrowserPathType CurrentlySelectedPathType = EContentBrowserPathType::None;
 
 	/** The object name of the asset to save. Only used in save dialogs. */
 	FString CurrentlyEnteredAssetName;

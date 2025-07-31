@@ -2,11 +2,21 @@
 
 
 #include "ContentBrowserModule.h"
+
+#include "ContentBrowserDataSubsystem.h"
 #include "ContentBrowserLog.h"
 #include "ContentBrowserSingleton.h"
+#include "HAL/PlatformMath.h"
 #include "IContentBrowserDataModule.h"
+#include "IContentBrowserSingleton.h"
+#include "Logging/LogMacros.h"
 #include "MRUFavoritesList.h"
+#include "Misc/AssertionMacros.h"
+#include "Modules/ModuleManager.h"
 #include "Settings/ContentBrowserSettings.h"
+#include "UObject/UObjectGlobals.h"
+#include "Editor.h"
+#include "Subsystems/AssetEditorSubsystem.h"
 
 IMPLEMENT_MODULE( FContentBrowserModule, ContentBrowser );
 DEFINE_LOG_CATEGORY(LogContentBrowser);
@@ -19,10 +29,7 @@ void FContentBrowserModule::StartupModule()
 
 	ContentBrowserSingleton = new FContentBrowserSingleton();
 	
-	RecentlyOpenedAssets = MakeUnique<FMainMRUFavoritesList>(TEXT("ContentBrowserRecent"), GetDefault<UContentBrowserSettings>()->NumObjectsInRecentList);
-	RecentlyOpenedAssets->ReadFromINI();
-
-	UContentBrowserSettings::OnSettingChanged().AddRaw(this, &FContentBrowserModule::ResizeRecentAssetList);
+	UContentBrowserSettings::OnSettingChanged().AddRaw(this, &FContentBrowserModule::ContentBrowserSettingChanged);
 }
 
 void FContentBrowserModule::ShutdownModule()
@@ -33,13 +40,17 @@ void FContentBrowserModule::ShutdownModule()
 		ContentBrowserSingleton = NULL;
 	}
 	UContentBrowserSettings::OnSettingChanged().RemoveAll(this);
-	RecentlyOpenedAssets.Reset();
 }
 
 IContentBrowserSingleton& FContentBrowserModule::Get() const
 {
 	check(ContentBrowserSingleton);
 	return *ContentBrowserSingleton;
+}
+
+FMainMRUFavoritesList* FContentBrowserModule::GetRecentlyOpenedAssets() const
+{
+	return GEditor->GetEditorSubsystem<UAssetEditorSubsystem>()->GetRecentlyOpenedAssets();
 }
 
 FDelegateHandle FContentBrowserModule::AddAssetViewExtraStateGenerator(const FAssetViewExtraStateGenerator& Generator)
@@ -53,12 +64,14 @@ void FContentBrowserModule::RemoveAssetViewExtraStateGenerator(const FDelegateHa
 	AssetViewExtraStateGenerators.RemoveAll([&GeneratorHandle](const FAssetViewExtraStateGenerator& Generator) { return Generator.Handle == GeneratorHandle; });
 }
 
-void FContentBrowserModule::ResizeRecentAssetList(FName InName)
+void FContentBrowserModule::ContentBrowserSettingChanged(FName InName)
 {
-	if (InName == NumberOfRecentAssetsName)
+	if (UContentBrowserDataSubsystem* ContentBrowserData = IContentBrowserDataModule::Get().GetSubsystem())
 	{
-		RecentlyOpenedAssets->WriteToINI();
-		RecentlyOpenedAssets = MakeUnique<FMainMRUFavoritesList>(TEXT("ContentBrowserRecent"), GetDefault<UContentBrowserSettings>()->NumObjectsInRecentList);
-		RecentlyOpenedAssets->ReadFromINI();
+		ContentBrowserData->RefreshVirtualPathTreeIfNeeded();
 	}
+
+	ContentBrowserSingleton->SetPrivateContentPermissionListDirty();
+
+	OnContentBrowserSettingChanged.Broadcast(InName);
 }

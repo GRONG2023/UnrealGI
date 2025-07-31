@@ -84,7 +84,7 @@ void FFindStronglyConnected::FindAllCycles()
 	UE_LOG(LogObj, Log, TEXT("Finding simple cycles"));
 	Stack.Empty();
 	NodeIndex.Empty();
-	MasterIndex = 1;
+	PrimaryIndex = 1;
 
 	for (int32 Index = 0; Index < Components.Num(); Index++)
 	{
@@ -121,7 +121,7 @@ bool FFindStronglyConnected::FindSimpleCycleForComponentInner( TArray<UObject*>&
 		{
 			while (1)
 			{
-				UObject* Out = Stack.Pop(/*bAllowShrinking=*/ false);
+				UObject* Out = Stack.Pop(EAllowShrinking::No);
 				Dest.Add(Out);
 				if (Out == Other)
 				{
@@ -151,10 +151,10 @@ void FFindStronglyConnected::StrongConnect( UObject* Node )
 FFindStronglyConnected::NodeInfo* FFindStronglyConnected::StrongConnectInner( UObject* Node )
 {
 	NodeInfo NewNode;
-	NewNode.IndexValue = MasterIndex;
-	NewNode.LowIndex = MasterIndex;
+	NewNode.IndexValue = PrimaryIndex;
+	NewNode.LowIndex = PrimaryIndex;
 	NewNode.InStack = true;
-	MasterIndex++;
+	PrimaryIndex++;
 	Stack.Push(Node);
 	NodeInfo* CurrentIndex = &NodeIndex.Add(Node, NewNode);
 
@@ -182,7 +182,7 @@ FFindStronglyConnected::NodeInfo* FFindStronglyConnected::StrongConnectInner( UO
 		TArray<UObject*>& Dest = Components[Components.Add(TArray<UObject*>())];
 		while (1)
 		{
-			UObject* Out = Stack.Pop(/*bAllowShrinking=*/ false);
+			UObject* Out = Stack.Pop(EAllowShrinking::No);
 			NodeInfo* OutVal = NodeIndex.Find(Out);
 			OutVal->InStack = false;
 			Dest.Add(Out);

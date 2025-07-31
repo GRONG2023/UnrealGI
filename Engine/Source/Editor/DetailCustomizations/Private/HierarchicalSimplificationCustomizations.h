@@ -2,14 +2,16 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "Layout/Visibility.h"
+#include "GameFramework/WorldSettings.h"
 #include "IPropertyTypeCustomization.h"
-#include "PropertyHandle.h"
+#include "Layout/Visibility.h"
+#include "OverrideResetToDefault.h"
+#include "Templates/SharedPointer.h"
 
 class FDetailWidgetRow;
+class IPropertyHandle;
 
-class FHierarchicalSimplificationCustomizations : public IPropertyTypeCustomization
+class FHierarchicalSimplificationCustomizations : public IPropertyTypeCustomization, public TOverrideResetToDefaultWithStaticUStruct<FHierarchicalSimplification>
 {
 public:
 	static TSharedRef<IPropertyTypeCustomization> MakeInstance();
@@ -19,9 +21,11 @@ public:
 	virtual void CustomizeChildren( TSharedRef<IPropertyHandle> StructPropertyHandle, class IDetailChildrenBuilder& ChildBuilder, IPropertyTypeCustomizationUtils& StructCustomizationUtils ) override;
 
 protected:
-	EVisibility IsSimplifyMeshVisible() const;
+	EHierarchicalSimplificationMethod GetSelectedSimplificationMethod() const;
+
 	EVisibility IsProxyMeshSettingVisible() const;
 	EVisibility IsMergeMeshSettingVisible() const;
+	EVisibility IsApproximateMeshSettingVisible() const;
 
-	TSharedPtr< IPropertyHandle > SimplifyMeshPropertyHandle;
+	TSharedPtr< IPropertyHandle > SimplificationMethodPropertyHandle;
 };

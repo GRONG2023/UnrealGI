@@ -12,12 +12,15 @@ public class CurveTableEditor : ModuleRules
 			new string[] {
 				"Core", 
 				"CoreUObject", 
+                "CurveEditor",
+				"EditorFramework",
 				"Engine", 
 				"InputCore",
 				"Slate",
 				"SlateCore",
-                "EditorStyle",
-				"UnrealEd"
+				"UnrealEd",
+				"EditorWidgets",
+				"ToolWidgets",
 			}
 		);
 

@@ -14,12 +14,14 @@ public class AnimationEditor : ModuleRules
                 "InputCore",
 				"Slate",
 				"SlateCore",
-                "EditorStyle",
+                
+				"EditorFramework",
                 "UnrealEd",
                 "Persona",
                 "SkeletonEditor",
                 "Kismet",
                 "AnimGraph",
+				"ToolMenus"
             }
 		);
 
@@ -30,7 +32,13 @@ public class AnimationEditor : ModuleRules
             }
         );
 
-        DynamicallyLoadedModuleNames.AddRange(
+		PublicIncludePathModuleNames.AddRange(
+			new string[] {
+				"Persona",
+			}
+		);
+
+		DynamicallyLoadedModuleNames.AddRange(
             new string[] {
                 "PropertyEditor",
                 "SequenceRecorder",

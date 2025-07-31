@@ -11,32 +11,34 @@
 
 #include "/Engine/Generated/UniformBuffers/PrecomputedLightingBuffer.ush"
 
-#define USE_HAIR_COMPLEX_TRANSMITTANCE 1 
+#if RAYHITGROUPSHADER
+#include "../RayTracing/RayTracingCommon.ush"
+#include "../RayTracing/RayTracingHitGroupCommon.ush"
+#endif
 
-#if MANUAL_VERTEX_FETCH 
+#define USE_HAIR_COMPLEX_TRANSMITTANCE 1
+
+#if MANUAL_VERTEX_FETCH
 	Buffer<float4> VertexFetch_InstanceOriginBuffer;
 	Buffer<float4> VertexFetch_InstanceTransformBuffer;
 #endif
 
 ////////////////////////////////////////////////////////////////////////////////
 // HAIR_CARD_MESH_FACTORY
-// Define used in certain shader like DeepShadow for running specific code (coverage computation for instance) 
-// when vertices are produced by the strand hair vertex factory 
 // This is set by compilation enviromenent of the vertex factory
 ///////////////////////////////////////////////////////////////////////////////
 
 /**
  * Per-vertex inputs from bound vertex buffers
  */
-#define FPositionOnlyVertexFactoryInput FVertexFactoryInput
-#define FPositionAndNormalOnlyVertexFactoryInput FVertexFactoryInput
 
 struct FVertexFactoryInput
 {
 #if MANUAL_VERTEX_FETCH
 	uint VertexId : SV_VertexID;
 #else
-	float4 Position  : ATTRIBUTE0; 
+	float4 Position      : ATTRIBUTE0; 
+	float4 PrevPosition  : ATTRIBUTE5;
 
 	// TangentZ.w contains sign of tangent basis determinant
   #if METAL_PROFILE
@@ -47,26 +49,26 @@ struct FVertexFactoryInput
 	half4	TangentZ : ATTRIBUTE2;
   #endif
 	float4 UVs		 : ATTRIBUTE3;
+	float4 Materials : ATTRIBUTE4;
 #endif
 
-#if VF_USE_PRIMITIVE_SCENE_DATA
-	uint PrimitiveId : ATTRIBUTE13;
-#endif	
+	VF_GPUSCENE_DECLARE_INPUT_BLOCK(13)
+	VF_INSTANCED_STEREO_DECLARE_INPUT_BLOCK()
 };
 
-#if RAYHITGROUPSHADER 
+#if RAYHITGROUPSHADER
 FVertexFactoryInput LoadVertexFactoryInputForHGS(uint TriangleIndex, int VertexIndex)
 {
-	// #hair_todo
-	FTriangleBaseAttributes Tri = LoadTriangleBaseAttributes(TriangleIndex);
+	FTriangleBaseAttributes TriangleAttributes = LoadTriangleBaseAttributes(TriangleIndex);
 
 	FVertexFactoryInput Input = (FVertexFactoryInput)0;
 #if MANUAL_VERTEX_FETCH
-	Input.VertexId = Tri.Indices[VertexIndex];
+	Input.VertexId = TriangleAttributes.Indices[VertexIndex];
 #endif
-#if VF_USE_PRIMITIVE_SCENE_DATA
-	Input.PrimitiveId = GetInstanceUserData();
-#endif
+
+	// Note: GetInstanceUserData() stores the GPU-Scene primitive ID
+	VF_GPUSCENE_SET_INPUT_FOR_RT(Input, GetInstanceUserData(), 0U);
+
 	return Input;
 }
 #endif
@@ -79,26 +81,27 @@ struct FVertexFactoryIntermediates
 	half3x3 TangentToLocal;
 	half3x3 TangentToWorld;
 	half TangentToWorldSign;
-	uint PrimitiveId;
-	uint HairPrimitiveId;
 	float2 HairPrimitiveUV;
+	float2 HairPrimitiveRootUV;
+	float2 HairPrimitiveLength;
+	float4 HairPrimitiveMaterial;
+	float  HairPrimitiveGroupIndex;
+
+	/** Cached primitive and instance data */
+	FSceneDataIntermediates SceneData;
 };
 
-uint GetPrimitiveId(FVertexFactoryInput Input)
+FPrimitiveSceneData GetPrimitiveData(FVertexFactoryIntermediates Intermediates)
 {
-#if VF_USE_PRIMITIVE_SCENE_DATA
-	return Input.PrimitiveId;
-#else
-	return 0;
-#endif
+	return Intermediates.SceneData.Primitive;
 }
 
-uint GetHairPrimitiveId(FVertexFactoryInput Input)
+uint GetHairVertexFetchId(FVertexFactoryInput Input)
 {
 #if MANUAL_VERTEX_FETCH
-	return Input.VertexId;
+	return min(Input.VertexId, HairCardsVF.MaxVertexCount - 1u);
 #else
-	return 0;
+	return 0u;
 #endif
 }
 
@@ -107,31 +110,43 @@ struct FHairCardsPoint
 	float3 Position;
 	float2 CardsUVs;
 	float2 RootUVs;
+	float  CardLength;
+	float  GroupIndex;
+	float4 Materials;
 };
 
 FHairCardsPoint GetVertexPosition(FVertexFactoryInput Input)
 {
 #if MANUAL_VERTEX_FETCH
-	const float4 Data = HairCardsVF.PositionBuffer[Input.VertexId];
-	const float4 UVs  = HairCardsVF.UVsBuffer[Input.VertexId];
+	const uint VertexFetchId = GetHairVertexFetchId(Input);
+	const float4 Data = HairCardsVF.PositionBuffer[VertexFetchId];
+	const float4 UVs  = HairCardsVF.UVsBuffer[VertexFetchId];
+	const float4 Materials = HairCardsVF.MaterialsBuffer[VertexFetchId];
 #else
 	const float4 Data = Input.Position;
 	const float4 UVs  = Input.UVs;
+	const float4 Materials = Input.Materials;
 #endif
 
+	const uint EncodedW = asuint(Data.w);
+
 	FHairCardsPoint Out;
-	Out.Position = Data.xyz;
-	Out.CardsUVs = UVs.xy;
-	Out.RootUVs  = UVs.zw;
+	Out.Position	= Data.xyz;
+	Out.CardsUVs	= UVs.xy;
+	Out.RootUVs		= UVs.zw;
+	Out.CardLength	= f16tof32(EncodedW & 0xFFFF);
+	Out.GroupIndex	= (EncodedW>>16u);
+	Out.Materials	= float4(Materials.xyz*Materials.xyz, Materials.w); // Decoding (cheap) sRGB -> linear color
 	return Out;
 }
 
 float3 GetVertexPreviousPosition(FVertexFactoryInput Input)
 {
 #if MANUAL_VERTEX_FETCH
-	const float4 Data = HairCardsVF.PreviousPositionBuffer[Input.VertexId];
+	const uint VertexFetchId = GetHairVertexFetchId(Input);
+	const float4 Data = HairCardsVF.PreviousPositionBuffer[VertexFetchId];
 #else
-	const float4 Data = Input.Position;
+	const float4 Data = Input.PrevPosition;
 #endif
 	return Data.xyz;
 }
@@ -165,9 +180,12 @@ FMaterialPixelParameters GetMaterialPixelParameters(FVertexFactoryInterpolantsVS
 #endif
 
 	Result.TwoSidedSign = 1;
-	Result.PrimitiveId = GetPrimitiveId(Interpolants);
-	Result.HairPrimitiveId = Interpolants.HairPrimitiveId;
+	Result.PrimitiveId = ToScalarMemory(GetPrimitiveId(Interpolants));
 	Result.HairPrimitiveUV = float2(Interpolants.HairPrimitiveUV);
+	Result.HairPrimitiveRootUV = float2(Interpolants.HairPrimitiveRootUV);
+	Result.HairPrimitiveLength = Interpolants.HairPrimitiveLength;
+	Result.HairPrimitiveGroupIndex = Interpolants.HairPrimitiveGroupIndex;
+	Result.HairPrimitiveMaterial = Interpolants.HairPrimitiveMaterial;
 #if NUM_TEX_COORD_INTERPOLATORS
 	UNROLL
 	for (int CoordinateIndex = 0; CoordinateIndex < NUM_TEX_COORD_INTERPOLATORS; CoordinateIndex++)
@@ -176,17 +194,13 @@ FMaterialPixelParameters GetMaterialPixelParameters(FVertexFactoryInterpolantsVS
 	}
 #endif
 
-#if COMPILER_SUPPORTS_TO_SCALAR_MEMORY
-	Result.PrimitiveId = ToScalarMemory(Result.PrimitiveId);
-#endif
-
 	return Result;
 }
 
 half3x3 CalcTangentToWorldNoScale(FVertexFactoryIntermediates Intermediates, half3x3 TangentToLocal)
 {
-	half3x3 LocalToWorld = GetLocalToWorld3x3(Intermediates.PrimitiveId);
-	half3 InvScale = GetPrimitiveData(Intermediates.PrimitiveId).InvNonUniformScaleAndDeterminantSign.xyz;
+	half3x3 LocalToWorld = DFToFloat3x3(GetPrimitiveData(Intermediates).LocalToWorld);
+	half3 InvScale = GetPrimitiveData(Intermediates).InvNonUniformScale;
 	LocalToWorld[0] *= InvScale.x;
 	LocalToWorld[1] *= InvScale.y;
 	LocalToWorld[2] *= InvScale.z;
@@ -196,29 +210,33 @@ half3x3 CalcTangentToWorldNoScale(FVertexFactoryIntermediates Intermediates, hal
 /** Converts from vertex factory specific input to a FMaterialVertexParameters, which is used by vertex shader material inputs. */
 FMaterialVertexParameters GetMaterialVertexParameters(FVertexFactoryInput Input, FVertexFactoryIntermediates Intermediates, float3 WorldPosition, half3x3 TangentToLocal)
 {
-	FMaterialVertexParameters Result = (FMaterialVertexParameters)0;
+	FMaterialVertexParameters Result = MakeInitializedMaterialVertexParameters();
+	Result.SceneData = Intermediates.SceneData;
 	Result.WorldPosition = WorldPosition;
 
 	// does not handle instancing!
 	Result.TangentToWorld = Intermediates.TangentToWorld;
 	
-	Result.PrevFrameLocalToWorld = GetPrimitiveData(Intermediates.PrimitiveId).PreviousLocalToWorld;
+	Result.PrevFrameLocalToWorld = GetPrimitiveData(Intermediates).PreviousLocalToWorld;
 	Result.PreSkinnedPosition = GetVertexPreviousPosition(Input);
 	Result.PreSkinnedNormal = TangentToLocal[2];
-	Result.PrimitiveId = Intermediates.PrimitiveId;
+
+	Result.LWCData = MakeMaterialLWCData(Result);
+
 	return Result;
 }
 
-float4 CalcWorldPosition(float3 Position, uint PrimitiveId)
+float4 CalcWorldPosition(float3 Position, FDFMatrix LocalToWorld)
 {
-	return TransformLocalToTranslatedWorld(Position, PrimitiveId);
+	return TransformLocalToTranslatedWorld(Position, LocalToWorld);
 }
 
 half3x3 CalcTangentToLocal(FVertexFactoryInput Input, inout float TangentSign)
 {
 #if MANUAL_VERTEX_FETCH
-	const half3 TangentInputX = HairCardsVF.NormalsBuffer[Input.VertexId * 2 + 0].xyz;
-	const half4 TangentInputZ = HairCardsVF.NormalsBuffer[Input.VertexId * 2 + 1];
+	const uint VertexFetchId = GetHairVertexFetchId(Input);
+	const half3 TangentInputX = HairCardsVF.NormalsBuffer[VertexFetchId * 2 + 0].xyz;
+	const half4 TangentInputZ = HairCardsVF.NormalsBuffer[VertexFetchId * 2 + 1];
 #else
 	const half3 TangentInputX = Input.TangentX.xyz;
 	const half4 TangentInputZ = Input.TangentZ;
@@ -248,39 +266,24 @@ half3x3 CalcTangentToWorld(FVertexFactoryIntermediates Intermediates, half3x3 Ta
 	return TangentToWorld;
 }
 
-float3 GetTangent(FVertexFactoryInput Input)
-{
-	FVertexFactoryIntermediates Intermediates;
-	Intermediates.PrimitiveId = GetPrimitiveId(Input);
-	
-	float TangentSign;
-	Intermediates.TangentToLocal = CalcTangentToLocal(Input, TangentSign);
-	Intermediates.TangentToWorld = CalcTangentToWorld(Intermediates,Intermediates.TangentToLocal);
-	Intermediates.TangentToWorldSign = TangentSign * GetPrimitiveData(Intermediates.PrimitiveId).InvNonUniformScaleAndDeterminantSign.w;
-
-	// Hair shader expec the tangent to be stored in place of the normal. This is what the StrandHairComponent is filling in:
-	// [0]: Real normal		| Should be Tangent
-	// [1]: Bitangent		| Should be BiTangent
-	// [2]: Real Tangent	| Should be Normal
-	return Intermediates.TangentToWorld[2].xyz;
-}
-
 FVertexFactoryIntermediates GetVertexFactoryIntermediates(FVertexFactoryInput Input)
 {
+	FHairCardsPoint CardsPoint = GetVertexPosition(Input);
+
 	FVertexFactoryIntermediates Intermediates;
-	Intermediates.PrimitiveId		= GetPrimitiveId(Input);
-	Intermediates.HairPrimitiveId	= GetHairPrimitiveId(Input);
-	Intermediates.HairPrimitiveUV	= GetVertexPosition(Input).CardsUVs;
-	//Intermediates.HairDensity		= HairStrandsVF_Density;
-	//Intermediates.HairDimensions	= float2(GetWorldStrandLength(Input), GetWorldStrandRadius(Input));
+	Intermediates.SceneData					= VF_GPUSCENE_GET_INTERMEDIATES(Input);
+	Intermediates.HairPrimitiveUV			= CardsPoint.CardsUVs;
+	Intermediates.HairPrimitiveRootUV		= CardsPoint.RootUVs;
+	Intermediates.HairPrimitiveLength		= CardsPoint.CardLength; 
+	Intermediates.HairPrimitiveGroupIndex	= CardsPoint.GroupIndex;
+	Intermediates.HairPrimitiveMaterial		= CardsPoint.Materials;
 
 	float TangentSign;
 	Intermediates.TangentToLocal = CalcTangentToLocal(Input, TangentSign);
 	Intermediates.TangentToWorld = CalcTangentToWorld(Intermediates,Intermediates.TangentToLocal);
-	Intermediates.TangentToWorldSign = TangentSign * GetPrimitiveData(Intermediates.PrimitiveId).InvNonUniformScaleAndDeterminantSign.w;	
+	Intermediates.TangentToWorldSign = TangentSign * GetPrimitive_DeterminantSign_FromFlags(GetPrimitiveData(Intermediates).Flags);	
 	return Intermediates;
 }
-
 
 /**
 * Get the 3x3 tangent basis vectors for this vertex factory
@@ -298,7 +301,7 @@ half3x3 VertexFactoryGetTangentToLocal( FVertexFactoryInput Input, FVertexFactor
 float4 VertexFactoryGetWorldPosition(FVertexFactoryInput Input, FVertexFactoryIntermediates Intermediates)
 {
 	const float3 VertexPosition = GetVertexPosition(Input).Position;
-	const float4 WorldPosition = CalcWorldPosition(VertexPosition, Intermediates.PrimitiveId);
+	const float4 WorldPosition = CalcWorldPosition(VertexPosition, GetPrimitiveData(Intermediates).LocalToWorld);
 	return WorldPosition;
 }
 
@@ -326,14 +329,14 @@ FVertexFactoryInterpolantsVSToPS VertexFactoryGetInterpolantsVSToPS(FVertexFacto
 	Interpolants.EyeIndex = 0;
 #endif
 
-#if MANUAL_VERTEX_FETCH
-	Interpolants.HairPrimitiveId = Input.VertexId;
-	Interpolants.HairPrimitiveUV = GetVertexPosition(Input).CardsUVs;
-#else
-	Interpolants.HairPrimitiveId = 0;
-	Interpolants.HairPrimitiveUV = GetVertexPosition(Input).CardsUVs;
-#endif
-	SetPrimitiveId(Interpolants, Intermediates.PrimitiveId);
+	FHairCardsPoint CardsPoint = GetVertexPosition(Input);
+	Interpolants.HairPrimitiveUV			= CardsPoint.CardsUVs;
+	Interpolants.HairPrimitiveRootUV		= CardsPoint.RootUVs;
+	Interpolants.HairPrimitiveLength		= CardsPoint.CardLength;
+	Interpolants.HairPrimitiveGroupIndex	= CardsPoint.GroupIndex;
+	Interpolants.HairPrimitiveMaterial		= CardsPoint.Materials;
+
+	SetPrimitiveId(Interpolants, Intermediates.SceneData.PrimitiveId);
 #if NUM_TEX_COORD_INTERPOLATORS 
 	SetUV(Interpolants, 0, Interpolants.HairPrimitiveUV);
 #endif
@@ -342,7 +345,7 @@ FVertexFactoryInterpolantsVSToPS VertexFactoryGetInterpolantsVSToPS(FVertexFacto
 }
 
 /** for depth-only pass (Not used by the actual hair shaders)*/
-float4 VertexFactoryGetWorldPosition(FPositionOnlyVertexFactoryInput Input)
+float4 VertexFactoryGetWorldPosition(FVertexFactoryInput Input)
 {
 	return 0;
 }
@@ -350,25 +353,20 @@ float4 VertexFactoryGetWorldPosition(FPositionOnlyVertexFactoryInput Input)
 // @return translated world position (without quad extension/reorientation).This is used only for velocity computation
 float4 VertexFactoryGetWorldPositionRaw(FVertexFactoryInput Input, FVertexFactoryIntermediates Intermediates)
 {
-	return CalcWorldPosition(GetVertexPosition(Input).Position, Intermediates.PrimitiveId);
+	return TransformLocalToTranslatedWorld(GetVertexPosition(Input).Position, GetPrimitiveData(Intermediates).LocalToWorld);
 }
 
 // @return previous translated world position
 float4 VertexFactoryGetPreviousWorldPosition(FVertexFactoryInput Input, FVertexFactoryIntermediates Intermediates)
 {
-	float4x4 PreviousLocalToWorldTranslated = GetPrimitiveData(Intermediates.PrimitiveId).PreviousLocalToWorld;
-	PreviousLocalToWorldTranslated[3][0] += ResolvedView.PrevPreViewTranslation.x;
-	PreviousLocalToWorldTranslated[3][1] += ResolvedView.PrevPreViewTranslation.y;
-	PreviousLocalToWorldTranslated[3][2] += ResolvedView.PrevPreViewTranslation.z;
-
 	const float3 VertexPosition = GetVertexPreviousPosition(Input);
-	return mul(float4(VertexPosition,1), PreviousLocalToWorldTranslated);
+	return DFTransformLocalToTranslatedWorld(VertexPosition, GetPrimitiveData(Intermediates).PreviousLocalToWorld, ResolvedView.PrevPreViewTranslation);
 }
 
 float4 VertexFactoryGetTranslatedPrimitiveVolumeBounds(FVertexFactoryInterpolantsVSToPS Interpolants)
 {
-	float4 ObjectWorldPositionAndRadius = GetPrimitiveData(GetPrimitiveId(Interpolants)).ObjectWorldPositionAndRadius;
-	return float4(ObjectWorldPositionAndRadius.xyz + ResolvedView.PreViewTranslation.xyz, ObjectWorldPositionAndRadius.w);
+	FPrimitiveSceneData PrimitiveData = GetPrimitiveData(GetPrimitiveId(Interpolants));
+	return float4(DFFastToTranslatedWorld(PrimitiveData.ObjectWorldPosition, ResolvedView.PreViewTranslation), PrimitiveData.ObjectRadius);
 }
 
 uint VertexFactoryGetPrimitiveId(FVertexFactoryInterpolantsVSToPS Interpolants)
@@ -376,7 +374,7 @@ uint VertexFactoryGetPrimitiveId(FVertexFactoryInterpolantsVSToPS Interpolants)
 	return GetPrimitiveId(Interpolants);
 }
 
-float3 VertexFactoryGetWorldNormal(FPositionAndNormalOnlyVertexFactoryInput Input)
+float3 VertexFactoryGetWorldNormal(FVertexFactoryInput Input)
 {
 	return float3(0, 0, 1); 
 }
@@ -389,13 +387,13 @@ float3 VertexFactoryGetWorldNormal(FVertexFactoryInput Input, FVertexFactoryInte
 ////////////////////////////////////////////////////////////////////////////////////////////////
 // Tesselation support
 
-#if USING_TESSELLATION
-struct FVertexFactoryInterpolantsVSToDS
+#if NEEDS_VERTEX_FACTORY_INTERPOLATION
+struct FVertexFactoryRayTracingInterpolants
 {
 	FVertexFactoryInterpolantsVSToPS InterpolantsVSToPS;
 };
 
-float2 VertexFactoryGetTextureCoordinateDS(FVertexFactoryInterpolantsVSToDS Interpolants)
+float2 VertexFactoryGetRayTracingTextureCoordinate(FVertexFactoryRayTracingInterpolants Interpolants)
 {
 #if NUM_MATERIAL_TEXCOORDS
 	return Interpolants.InterpolantsVSToPS.TexCoords[0].xy;
@@ -404,56 +402,24 @@ float2 VertexFactoryGetTextureCoordinateDS(FVertexFactoryInterpolantsVSToDS Inte
 #endif // #if NUM_MATERIAL_TEXCOORDS
 }
 
-FVertexFactoryInterpolantsVSToPS VertexFactoryAssignInterpolants(FVertexFactoryInterpolantsVSToDS Input)
+FVertexFactoryInterpolantsVSToPS VertexFactoryAssignInterpolants(FVertexFactoryRayTracingInterpolants Input)
 {
 	return Input.InterpolantsVSToPS;
 }
 
-/** Converts from vertex factory specific interpolants to a FMaterialTessellationParameters, which is used by material inputs. */
-FMaterialTessellationParameters GetMaterialTessellationParameters(FVertexFactoryInterpolantsVSToDS Interpolants, float3 CameraLocalWorldPosition)
+FVertexFactoryRayTracingInterpolants VertexFactoryGetRayTracingInterpolants(FVertexFactoryInput Input, FVertexFactoryIntermediates Intermediates, FMaterialVertexParameters VertexParameters)
 {
-	FMaterialTessellationParameters	Result;
-#if NUM_TEX_COORD_INTERPOLATORS
-	UNROLL
-		for (int CoordinateIndex = 0; CoordinateIndex < NUM_TEX_COORD_INTERPOLATORS; CoordinateIndex += 2)
-		{
-			Result.TexCoords[CoordinateIndex] = Interpolants.InterpolantsVSToPS.TexCoords[CoordinateIndex / 2].xy;
-			if (CoordinateIndex + 1 < NUM_TEX_COORD_INTERPOLATORS)
-			{
-				Result.TexCoords[CoordinateIndex + 1] = Interpolants.InterpolantsVSToPS.TexCoords[CoordinateIndex / 2].zw;
-			}
-		}
-#endif // NUM_TEX_COORD_INTERPOLATORS
-
-	half3 TangentToWorld0 = Interpolants.InterpolantsVSToPS.TangentToWorld0.xyz;
-	half4 TangentToWorld2 = Interpolants.InterpolantsVSToPS.TangentToWorld2;
-
-#if INTERPOLATE_VERTEX_COLOR
-	Result.VertexColor = Interpolants.InterpolantsVSToPS.Color;
-#endif	// INTERPOLATE_VERTEX_COLOR
-
-	Result.TangentToWorld = AssembleTangentToWorld(TangentToWorld0, TangentToWorld2);
-
-	Result.TangentToWorldPreScale = 1;
-
-	Result.WorldPosition = CameraLocalWorldPosition + ResolvedView.WorldCameraOrigin;
-	Result.PrimitiveId = GetPrimitiveId(Interpolants.InterpolantsVSToPS);
-	return Result;
-}
-
-FVertexFactoryInterpolantsVSToDS VertexFactoryGetInterpolantsVSToDS(FVertexFactoryInput Input, FVertexFactoryIntermediates Intermediates, FMaterialVertexParameters VertexParameters)
-{
-	FVertexFactoryInterpolantsVSToDS Interpolants;
+	FVertexFactoryRayTracingInterpolants Interpolants;
 	Interpolants.InterpolantsVSToPS = VertexFactoryGetInterpolantsVSToPS(Input, Intermediates, VertexParameters);
 	return Interpolants;
 }
 
-FVertexFactoryInterpolantsVSToDS VertexFactoryInterpolate(FVertexFactoryInterpolantsVSToDS a, float aInterp, FVertexFactoryInterpolantsVSToDS b, float bInterp)
+FVertexFactoryRayTracingInterpolants VertexFactoryInterpolate(FVertexFactoryRayTracingInterpolants a, float aInterp, FVertexFactoryRayTracingInterpolants b, float bInterp)
 {
 	// Default initialize. Otherwise, some graphics pipelines that
 	// couple tessellation with geometry shaders won't write to all TEXCOORD semantics,
-	// but read from them when <FVertexFactoryInterpolantsVSToDS> is being copied as a whole.
-	FVertexFactoryInterpolantsVSToDS O = (FVertexFactoryInterpolantsVSToDS)0;
+	// but read from them when <FVertexFactoryRayTracingInterpolants> is being copied as a whole.
+	FVertexFactoryRayTracingInterpolants O = (FVertexFactoryRayTracingInterpolants)0;
 
 #if VF_USE_PRIMITIVE_SCENE_DATA
 	O.InterpolantsVSToPS.PrimitiveId = a.InterpolantsVSToPS.PrimitiveId;
@@ -464,45 +430,39 @@ FVertexFactoryInterpolantsVSToDS VertexFactoryInterpolate(FVertexFactoryInterpol
 	// Do we really need to interpolate TangentToWorld2 here? It should be replaced by the
 	// interpolated normal from 'whatever' interpolation scheme we're using
 
-	TESSELLATION_INTERPOLATE_MEMBER(InterpolantsVSToPS.TangentToWorld0.xyz);
-	TESSELLATION_INTERPOLATE_MEMBER(InterpolantsVSToPS.TangentToWorld2);
+	INTERPOLATE_MEMBER(InterpolantsVSToPS.TangentToWorld0.xyz);
+	INTERPOLATE_MEMBER(InterpolantsVSToPS.TangentToWorld2);
 #if INTERPOLATE_VERTEX_COLOR
-	TESSELLATION_INTERPOLATE_MEMBER(InterpolantsVSToPS.Color);
+	INTERPOLATE_MEMBER(InterpolantsVSToPS.Color);
 #endif
-#if USE_INSTANCING
-	TESSELLATION_INTERPOLATE_MEMBER(InterpolantsVSToPS.PerInstanceParams);
+#if	NEEDS_PER_INSTANCE_PARAMS
+	INTERPOLATE_MEMBER(InterpolantsVSToPS.PerInstanceParams);
 #endif
 
 #if NEEDS_LIGHTMAP_COORDINATE
-	TESSELLATION_INTERPOLATE_MEMBER(InterpolantsVSToPS.LightMapCoordinate);
+	INTERPOLATE_MEMBER(InterpolantsVSToPS.LightMapCoordinate);
 #endif
 
 #if NUM_TEX_COORD_INTERPOLATORS
 	UNROLL
 		for (int tc = 0; tc < (NUM_TEX_COORD_INTERPOLATORS + 1) / 2; ++tc)
 		{
-			TESSELLATION_INTERPOLATE_MEMBER(InterpolantsVSToPS.TexCoords[tc]);
+			INTERPOLATE_MEMBER(InterpolantsVSToPS.TexCoords[tc]);
 		}
 #elif USE_PARTICLE_SUBUVS
-	TESSELLATION_INTERPOLATE_MEMBER(InterpolantsVSToPS.TexCoords[0]);
+	INTERPOLATE_MEMBER(InterpolantsVSToPS.TexCoords[0]);
 #endif
 
 #if HAIR_CARD_MESH_FACTORY
-	O.InterpolantsVSToPS.HairPrimitiveId = a.InterpolantsVSToPS.HairPrimitiveId;
-	TESSELLATION_INTERPOLATE_MEMBER(InterpolantsVSToPS.HairPrimitiveUV);
+	INTERPOLATE_MEMBER(InterpolantsVSToPS.HairPrimitiveUV);
+	INTERPOLATE_MEMBER(InterpolantsVSToPS.HairPrimitiveRootUV);
+	INTERPOLATE_MEMBER(InterpolantsVSToPS.HairPrimitiveLength);
+	INTERPOLATE_MEMBER(InterpolantsVSToPS.HairPrimitiveGroupIndex);
+	INTERPOLATE_MEMBER(InterpolantsVSToPS.HairPrimitiveMaterial);
 #endif
 
 	return O;
 }
+#endif // #if NEEDS_VERTEX_FACTORY_INTERPOLATION
 
-float3x3 VertexFactoryGetTangentToLocalDS(FVertexFactoryInterpolantsVSToDS Interpolants)
-{
-	// This duplicates stuff already going on in GetMaterialTessellationParameters(), so
-	// maybe the hull shader could leverage that instead?
-	half3 TangentToWorld0 = Interpolants.InterpolantsVSToPS.TangentToWorld0.xyz;
-	half4 TangentToWorld2 = Interpolants.InterpolantsVSToPS.TangentToWorld2;
-	float3x3 TangentToWorld = AssembleTangentToWorld(TangentToWorld0, TangentToWorld2);
-
-	return TangentToWorld;
-}
-#endif // #if USING_TESSELLATION
+#include "/Engine/Private/VertexFactoryDefaultInterface.ush"

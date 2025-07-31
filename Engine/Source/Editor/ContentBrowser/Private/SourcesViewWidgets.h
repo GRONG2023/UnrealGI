@@ -2,28 +2,40 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "Misc/Attribute.h"
-#include "Layout/Visibility.h"
-#include "Widgets/DeclarativeSyntaxSupport.h"
-#include "Layout/Geometry.h"
+#include "AssetTagItemTypes.h"
+#include "Delegates/Delegate.h"
+#include "Framework/SlateDelegates.h"
+#include "HAL/Platform.h"
 #include "Input/Reply.h"
+#include "Internationalization/Text.h"
+#include "Layout/Geometry.h"
+#include "Math/Color.h"
+#include "Math/Vector2D.h"
+#include "Misc/Attribute.h"
 #include "Styling/SlateColor.h"
-#include "Widgets/SCompoundWidget.h"
-#include "AssetData.h"
-#include "CollectionViewTypes.h"
+#include "Styling/SlateTypes.h"
+#include "Templates/SharedPointer.h"
+#include "Types/SlateEnums.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
 #include "Widgets/Input/SCheckBox.h"
-#include "Editor/ContentBrowser/Private/SPathView.h"
-#include "SAssetTagItem.h"
+#include "Widgets/SCompoundWidget.h"
 
-class SEditableTextBox;
+class FDragDropEvent;
+class FSlateRect;
+class FString;
 class FTreeItem;
+class SEditableTextBox;
+class SInlineEditableTextBlock;
+class SWidget;
+struct FCollectionItem;
+struct FSlateBrush;
+struct FSlateFontInfo;
 
 /** A single item in the asset tree. Represents a folder. */
 class SAssetTreeItem : public SCompoundWidget
 {
 public:
-	DECLARE_DELEGATE_FourParams( FOnNameChanged, const TSharedPtr<FTreeItem>& /*TreeItem*/, const FString& /*InProposedName*/, const FVector2D& /*MessageLocation*/, const ETextCommit::Type /*CommitType*/);
+	DECLARE_DELEGATE_FourParams( FOnNameChanged, const TSharedPtr<FTreeItem>& /*TreeItem*/, const FString& /*InProposedName*/, const UE::Slate::FDeprecateVector2DParameter& /*MessageLocation*/, const ETextCommit::Type /*CommitType*/);
 	DECLARE_DELEGATE_RetVal_ThreeParams( bool, FOnVerifyNameChanged, const TSharedPtr<FTreeItem>& /*TreeItem*/, const FString& /*InProposedName*/, FText& /*OutErrorMessage*/);
 
 	SLATE_BEGIN_ARGS( SAssetTreeItem )
@@ -61,7 +73,6 @@ public:
 	virtual void OnDragLeave( const FDragDropEvent& DragDropEvent ) override;
 	virtual FReply OnDragOver( const FGeometry& MyGeometry, const FDragDropEvent& DragDropEvent ) override;
 	virtual FReply OnDrop( const FGeometry& MyGeometry, const FDragDropEvent& DragDropEvent ) override;
-	virtual void Tick( const FGeometry& AllottedGeometry, const double InCurrentTime, const float InDeltaTime ) override;
 
 private:
 	/** Handles verifying name changes */
@@ -88,10 +99,15 @@ private:
 	/** Returns the image for the border around this item. Used for drag/drop operations */
 	const FSlateBrush* GetBorderImage() const;
 
+	/** Returns a widget that combines the results of calling all registered PathViewStateIconGenerators **/
+	TSharedRef<SWidget> GenerateStateIcons();
+	
 private:
 	enum class EFolderType : uint8
 	{
 		Normal,
+		CustomVirtual, // No corresponding on-disk path, used for organization in the content browser
+		PluginRoot,    // Root content folder of a plugin
 		Code,
 		Developer,
 	};
@@ -111,15 +127,8 @@ private:
 	/** True when this item has children and is expanded */
 	TAttribute<bool> IsItemExpanded;
 
-	/** The geometry last frame. Used when telling popup messages where to appear. */
-	FGeometry LastGeometry;
-
-	/** Brushes for the different folder states */
-	const FSlateBrush* FolderOpenBrush;
-	const FSlateBrush* FolderClosedBrush;
-	const FSlateBrush* FolderOpenCodeBrush;
-	const FSlateBrush* FolderClosedCodeBrush;
-	const FSlateBrush* FolderDeveloperBrush;
+	/** Delegate called to get the selection state of an asset path */
+	FIsSelected IsSelected;
 
 	/** True when a drag is over this item with a drag operation that we know how to handle. The operation itself may not be valid to drop. */
 	bool bDraggedOver;
@@ -128,7 +137,7 @@ private:
 	EFolderType FolderType;
 
 	/** Widget to display the name of the asset item and allows for renaming */
-	TSharedPtr< SInlineEditableTextBlock > InlineRenameWidget;
+	TSharedPtr<SInlineEditableTextBlock> InlineRenameWidget;
 
 	/** Handle to the registered EnterEditingMode delegate. */
 	FDelegateHandle EnterEditingModeDelegateHandle;
@@ -150,7 +159,6 @@ public:
 	SLATE_BEGIN_ARGS( SCollectionTreeItem )
 		: _CollectionItem( TSharedPtr<FCollectionItem>() )
 		, _ParentWidget()
-		, _ViewMode(EAssetTagItemViewMode::Standard)
 	{}
 
 		/** Data for the collection this item represents */
@@ -158,9 +166,6 @@ public:
 
 		/** The parent widget */
 		SLATE_ARGUMENT( TSharedPtr<SWidget>, ParentWidget )
-
-		/** Should this collection item use the standard or compact view? */
-		SLATE_ARGUMENT( EAssetTagItemViewMode, ViewMode )
 
 		/** Delegate for when the user begins to rename the item */
 		SLATE_EVENT( FOnBeginNameChange, OnBeginNameChange )

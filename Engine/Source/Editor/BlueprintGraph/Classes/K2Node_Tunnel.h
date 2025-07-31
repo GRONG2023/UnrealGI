@@ -2,27 +2,46 @@
 
 #pragma once
 
+#include "Containers/Array.h"
+#include "Containers/UnrealString.h"
 #include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
-#include "K2Node_EditablePinBase.h"
+#include "EdGraph/EdGraphNode.h"
 #include "EdGraph/EdGraphPin.h"
+#include "HAL/Platform.h"
+#include "Internationalization/Text.h"
+#include "K2Node.h"
+#include "K2Node_EditablePinBase.h"
+#include "Templates/SharedPointer.h"
+#include "UObject/NameTypes.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/UObjectGlobals.h"
+
 #include "K2Node_Tunnel.generated.h"
+
+class FArchive;
+class FCompilerResultsLog;
+class UBlueprint;
+class UEdGraph;
+class UEdGraphPin;
+class UObject;
+struct FEdGraphPinType;
 
 UCLASS()
 class BLUEPRINTGRAPH_API UK2Node_Tunnel : public UK2Node_EditablePinBase
 {
 	GENERATED_UCLASS_BODY()
 
-	// A tunnel node either has output pins that came from another tunnel's input pins, or vis versa
+	// A tunnel node either has output pins that came from another tunnel's input pins, or vice versa
 	// Note: OutputSourceNode might be equal to InputSinkNode
 	
 	// The output pins of this tunnel node came from the input pins of OutputSourceNode
 	UPROPERTY()
-	UK2Node_Tunnel* OutputSourceNode;
+	TObjectPtr<UK2Node_Tunnel> OutputSourceNode;
 
 	// The input pins of this tunnel go to the output pins of InputSinkNode
 	UPROPERTY()
-	UK2Node_Tunnel* InputSinkNode;
+	TObjectPtr<UK2Node_Tunnel> InputSinkNode;
 
 	// Whether this node is allowed to have inputs
 	UPROPERTY()

@@ -1,17 +1,27 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "GeneralProjectSettingsDetails.h"
-#include "Misc/Paths.h"
-#include "Misc/App.h"
+
+#include "Containers/UnrealString.h"
+#include "DetailCategoryBuilder.h"
+#include "DetailLayoutBuilder.h"
+#include "DetailWidgetRow.h"
+#include "Fonts/SlateFontInfo.h"
+#include "HAL/PlatformCrt.h"
+#include "Internationalization/Text.h"
 #include "Layout/Margin.h"
+#include "Math/IntPoint.h"
+#include "Math/UnrealMathSSE.h"
+#include "Misc/App.h"
+#include "Misc/Attribute.h"
+#include "Misc/Paths.h"
+#include "SExternalImageReference.h"
+#include "SlotBase.h"
+#include "SourceControlOperations.h"
+#include "Types/SlateEnums.h"
 #include "Widgets/DeclarativeSyntaxSupport.h"
 #include "Widgets/SBoxPanel.h"
 #include "Widgets/Text/STextBlock.h"
-#include "DetailLayoutBuilder.h"
-#include "DetailWidgetRow.h"
-#include "DetailCategoryBuilder.h"
-
-#include "SExternalImageReference.h"
 
 #define LOCTEXT_NAMESPACE "FGeneralProjectSettingsDetails"
 
@@ -32,7 +42,7 @@ void FGeneralProjectSettingsDetails::CustomizeDetails(IDetailLayoutBuilder& Deta
 	FString ProjectThumbnail_AutomaticImagePath = FPaths::ProjectSavedDir() / TEXT("AutoScreenshot.png");
 	if (!FPaths::FileExists(ProjectThumbnail_AutomaticImagePath))
 	{
-		ProjectThumbnail_AutomaticImagePath = FPaths::EngineContentDir() / TEXT("Editor") / TEXT("Slate") / TEXT("GameProjectDialog") / TEXT("default_game_thumbnail_192x.png");
+		ProjectThumbnail_AutomaticImagePath = FPaths::EngineContentDir() / TEXT("Editor") / TEXT("Slate") / TEXT("GameProjectDialog") / TEXT("default_game_thumbnail.png");
 	}
 
 	ImageCategory.AddCustomRow(ProjectThumbnailDesc)

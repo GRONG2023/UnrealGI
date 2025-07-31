@@ -6,16 +6,26 @@
 
 #pragma once
 
+#include "Containers/Array.h"
 #include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
 #include "Factories/Factory.h"
+#include "HAL/Platform.h"
+#include "UObject/NameTypes.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/UObjectGlobals.h"
+#include "UObject/WeakObjectPtrTemplates.h"
+
 #include "SoundCueFactoryNew.generated.h"
 
-class USoundCue;
-class USoundWave;
-class USoundNode;
+class FFeedbackContext;
+class UClass;
 class UDialogueWave;
+class UObject;
+class USoundCue;
+class USoundNode;
 class USoundNodeRandom;
+class USoundWave;
 
 UCLASS(hidecategories=Object, MinimalAPI)
 class USoundCueFactoryNew : public UFactory
@@ -28,18 +38,18 @@ class USoundCueFactoryNew : public UFactory
 
 	/** Initial sound wave to place in the newly created cue */
 	UPROPERTY(meta = (DeprecatedProperty, DeprecationMessage = "Use Array InitialSoundWaves instead."))
-	USoundWave* InitialSoundWave;
+	TObjectPtr<USoundWave> InitialSoundWave;
 
 	/** Initial sound wave(s) to place in the newly created cue(s) */
-	UPROPERTY()
+	UPROPERTY(EditAnywhere, Category = Audio)
 	TArray<TWeakObjectPtr<USoundWave>> InitialSoundWaves;
 
 	/** An initial dialogue wave to place in the newly created cue */
 	UPROPERTY(meta = (DeprecatedProperty, DeprecationMessage = "Use Array InitialDialogueWaves instead."))
-	UDialogueWave* InitialDialogueWave;
+	TObjectPtr<UDialogueWave> InitialDialogueWave;
 
 	/** Initial dialogue wave(s) to place in the newly created cue(s) */
-	UPROPERTY()
+	UPROPERTY(EditAnywhere, Category = Audio)
 	TArray<TWeakObjectPtr<UDialogueWave>> InitialDialogueWaves;
 
 protected:

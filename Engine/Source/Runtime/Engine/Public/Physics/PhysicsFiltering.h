@@ -5,8 +5,8 @@
 #include "CoreMinimal.h"
 #include "EngineDefines.h"
 #include "PhysicsPublic.h"
-#include "PhysXIncludes.h"
 #include "Physics/PhysicsInterfaceTypes.h"
+#include "Chaos/ChaosEngineInterface.h"
 
 /** 
  * Set of flags stored in the PhysX FilterData
@@ -142,13 +142,3 @@ inline void UpdateMaskFilter(uint32& Word3, FMaskFilter NewMaskFilter)
 	Word3 &= (0xFFFFFFFFu >> NumExtraFilterBits);	//we drop the top NumExtraFilterBits bits because that's where the new mask filter is going
 	Word3 |= uint32(NewMaskFilter) << (32 - NumExtraFilterBits);
 }
-
-#if PHYSICS_INTERFACE_PHYSX
-	extern ENGINE_API PxSimulationFilterShader GSimulationFilterShader;
-#endif
-
-/** Utility for creating a PhysX PxFilterData for performing a query (trace) against the scene */
-// PxFilterData ZZ_CreateQueryFilterData(const uint8 MyChannel, const bool bTraceComplex,
-// 	const FCollisionResponseContainer& InCollisionResponseContainer,
-// 	const struct FCollisionObjectQueryParams & ObjectParam,
-// 	const bool bMultitrace);

@@ -2,35 +2,60 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "Stats/Stats.h"
-#include "UObject/GCObject.h"
-#include "Widgets/SWidget.h"
-#include "Framework/Commands/UICommandList.h"
-#include "Framework/Application/IMenu.h"
-#include "Toolkits/IToolkitHost.h"
-#include "Misc/NotifyHook.h"
-#include "TickableEditorObject.h"
-#include "Particles/ParticleModule.h"
+#include "Components/SceneComponent.h"
+#include "Containers/Array.h"
+#include "Containers/Map.h"
+#include "Containers/UnrealString.h"
 #include "EditorUndoClient.h"
+#include "Engine/EngineBaseTypes.h"
+#include "HAL/Platform.h"
 #include "ICascade.h"
 #include "IDistCurveEditor.h"
+#include "Internationalization/Text.h"
+#include "Logging/LogMacros.h"
+#include "Math/Color.h"
+#include "Misc/NotifyHook.h"
+#include "Misc/Optional.h"
+#include "ParticleHelper.h"
 #include "Particles/ParticleEmitter.h"
-#include "Math/RandomStream.h"
+#include "Stats/Stats2.h"
+#include "Templates/SharedPointer.h"
+#include "Tickable.h"
+#include "TickableEditorObject.h"
+#include "Toolkits/IToolkit.h"
+#include "Types/SlateEnums.h"
+#include "UObject/GCObject.h"
+#include "UObject/NameTypes.h"
+#include "UObject/WeakObjectPtr.h"
+#include "UObject/WeakObjectPtrTemplates.h"
 
+class FEditPropertyChain;
 class FFXSystemInterface;
-class IDetailsView;
+class FProperty;
+class FReferenceCollector;
+class FSpawnTabArgs;
+class FUICommandList;
 class SCascadeEmitterCanvas;
 class SCascadePreviewViewport;
-class SDockableTab;
+class SDockTab;
+class SWidget;
+class SWindow;
 class UCascadeConfiguration;
 class UCascadeOptions;
 class UCascadeParticleSystemComponent;
+class UClass;
+class UMaterialInterface;
+class UObject;
 class UParticleLODLevel;
+class UParticleModule;
 class UParticleSystem;
 class UParticleSystemComponent;
+class UTextureRenderTarget2D;
 class UVectorFieldComponent;
 struct FCurveEdEntry;
+struct FParticleCurvePair;
+struct FPropertyChangedEvent;
+struct FRandomStream;
 
 DECLARE_LOG_CATEGORY_EXTERN(LogCascade, Log, All);
 
@@ -43,7 +68,7 @@ struct FParticleEmitterThumbnail
 
 	TWeakObjectPtr<UMaterialInterface> Material;
 	/** Texture holding the material thumbnail for canvas.  Note it is the only thing we hold onto */
-	UTextureRenderTarget2D* Texture;
+	TObjectPtr<UTextureRenderTarget2D> Texture;
 };
 
 typedef TMap<TWeakObjectPtr<UParticleEmitter>, FParticleEmitterThumbnail> FParticleEmitterThumbnailMap;
@@ -410,10 +435,7 @@ private:
 
 private:
 	/** The ParticleSystem asset being inspected */
-	UParticleSystem* ParticleSystem;
-
-	/** List of open tool panels; used to ensure only one exists at any one time */
-	TMap< FName, TWeakPtr<SDockableTab> > SpawnedToolPanels;
+	TObjectPtr<UParticleSystem> ParticleSystem;
 
 	/** Preview Viewport */
 	TSharedPtr<SCascadePreviewViewport> PreviewViewport;
@@ -431,15 +453,15 @@ private:
 	TWeakPtr<class IMenu> EntryMenu;
 
 	/** Components used for drawing the particle system in the preview viewport */
-	UCascadeParticleSystemComponent* ParticleSystemComponent;
-	UVectorFieldComponent* LocalVectorFieldPreviewComponent;
+	TObjectPtr<UCascadeParticleSystemComponent> ParticleSystemComponent;
+	TObjectPtr<UVectorFieldComponent> LocalVectorFieldPreviewComponent;
 
 	/** Currently selected LOD index */
 	int32 CurrentLODIdx;
 
 	/** Config options */
-	UCascadeOptions* EditorOptions;
-	UCascadeConfiguration* EditorConfig;
+	TObjectPtr<UCascadeOptions> EditorOptions;
+	TObjectPtr<UCascadeConfiguration> EditorConfig;
 
 	/** Undo/redo support */
 	bool bTransactionInProgress;
@@ -447,15 +469,15 @@ private:
 
 	/** Selection info */
 	int32 SelectedModuleIndex;
-	UParticleModule* SelectedModule;
-	UParticleEmitter* SelectedEmitter;
+	TObjectPtr<UParticleModule> SelectedModule;
+	TObjectPtr<UParticleEmitter> SelectedEmitter;
 	
 	/** True if an emitter is "soloing" */
 	bool bIsSoloing;
 
 	/** Cached copy info */
-	UParticleModule* CopyModule;
-	UParticleEmitter* CopyEmitter;
+	TObjectPtr<UParticleModule> CopyModule;
+	TObjectPtr<UParticleEmitter> CopyEmitter;
 
 	/** View/draw info  */
 	bool bIsToggleMotion;
@@ -490,7 +512,7 @@ private:
 	EParticleSubUVInterpMethod PreviousInterpolationMethod;
 
 	/** For handling curves/distribution data */
-	UObject* CurveToReplace;
+	TObjectPtr<UObject> CurveToReplace;
 	TArray<FParticleCurvePair> DynParamCurves;
 
 	/** The geometry properties window, if it exists */

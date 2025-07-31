@@ -7,17 +7,26 @@
 #include "RenderUtils.h"
 #include "ClearQuad.h"
 
+FLongGPUTaskPS::FLongGPUTaskPS() = default;
+FLongGPUTaskPS::FLongGPUTaskPS(const ShaderMetaType::CompiledShaderInitializerType& Initializer)
+	: FGlobalShader(Initializer)
+{
+}
+
 IMPLEMENT_SHADER_TYPE(, FLongGPUTaskPS, TEXT("/Engine/Private/OneColorShader.usf"), TEXT("MainLongGPUTask"), SF_Pixel);
 
 int32 NumMeasuredIterationsToAchieve500ms = 0;
 
 void IssueScalableLongGPUTask(FRHICommandListImmediate& RHICmdList, int32 NumIteration /* = -1 by default */)
 {
-	FRHIResourceCreateInfo Info;
-	FTexture2DRHIRef LongTaskRenderTarget = RHICreateTexture2D(1920, 1080, PF_B8G8R8A8, 1, 1, TexCreate_RenderTargetable, Info);
+	const FRHITextureCreateDesc Desc =
+		FRHITextureCreateDesc::Create2D(TEXT("LongTaskRenderTarget"), 1920, 1080, PF_B8G8R8A8)
+		.SetFlags(ETextureCreateFlags::RenderTargetable);
+
+	FTextureRHIRef LongTaskRenderTarget = RHICreateTexture(Desc);
 
 	FRHIRenderPassInfo RPInfo(LongTaskRenderTarget, ERenderTargetActions::DontLoad_Store);
-	TransitionRenderPassTargets(RHICmdList, RPInfo);
+	RHICmdList.Transition(FRHITransitionInfo(LongTaskRenderTarget, ERHIAccess::Unknown, ERHIAccess::RTV));
 	RHICmdList.BeginRenderPass(RPInfo, TEXT("LongGPUTask"));
 
 	{
@@ -37,8 +46,9 @@ void IssueScalableLongGPUTask(FRHICommandListImmediate& RHICmdList, int32 NumIte
 		GraphicsPSOInit.BoundShaderState.PixelShaderRHI = PixelShader.GetPixelShader();
 		GraphicsPSOInit.PrimitiveType = PT_TriangleStrip;
 
-		SetGraphicsPipelineState(RHICmdList, GraphicsPSOInit);
-		VertexShader->SetDepthParameter(RHICmdList, 0.0f);
+		SetGraphicsPipelineState(RHICmdList, GraphicsPSOInit, 0);
+
+		SetShaderParametersLegacyVS(RHICmdList, VertexShader, 0.0f);
 
 		RHICmdList.SetStreamSource(0, GClearVertexBuffer.VertexBufferRHI, 0);
 
@@ -86,7 +96,7 @@ void MeasureLongGPUTaskExecutionTime(FRHICommandListImmediate& RHICmdList)
 	RHICmdList.SubmitCommandsHint();
 	RHICmdList.ImmediateFlush(EImmediateFlushType::FlushRHIThread);
 
-	if (RHICmdList.GetRenderQueryResult(TimeQueryStart.GetQuery(), StartTime, true) && RHICmdList.GetRenderQueryResult(TimeQueryEnd.GetQuery(), EndTime, true))
+	if (RHIGetRenderQueryResult(TimeQueryStart.GetQuery(), StartTime, true) && RHIGetRenderQueryResult(TimeQueryEnd.GetQuery(), EndTime, true))
 	{
 		NumMeasuredIterationsToAchieve500ms = FMath::Clamp(FMath::FloorToInt(500.0f / ((EndTime - StartTime) / 1000.0f / NumIterationsForMeasurement)), 1, 2000);
 	}

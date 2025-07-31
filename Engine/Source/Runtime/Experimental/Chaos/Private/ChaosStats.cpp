@@ -22,19 +22,30 @@ DEFINE_STAT(STAT_GCRaycast);
 DEFINE_STAT(STAT_GCOverlap);
 DEFINE_STAT(STAT_GCSweep);
 DEFINE_STAT(STAT_GCCUpdateBounds);
+DEFINE_STAT(STAT_GCUpdateFilterData);
 DEFINE_STAT(STAT_GCCUGlobalMatrices);
+DEFINE_STAT(STAT_GCPostPhysicsSync);
+DEFINE_STAT(STAT_GCFullyDecayedBroadcast);
 DEFINE_STAT(STAT_GCInitDynamicData);
+DEFINE_STAT(STAT_GCTotalTransforms);
+DEFINE_STAT(STAT_GCChangedTransforms);
+DEFINE_STAT(STAT_GCReplicatedClusters);
+DEFINE_STAT(STAT_GCReplicatedFractures);
 DEFINE_STAT(STAT_LockWaits);
 DEFINE_STAT(STAT_GeomBeginFrame);
 DEFINE_STAT(STAT_SkelMeshUpdateAnim);
 DEFINE_STAT(STAT_DispatchEventNotifies);
 DEFINE_STAT(STAT_DispatchCollisionEvents);
 DEFINE_STAT(STAT_DispatchBreakEvents);
+DEFINE_STAT(STAT_DispatchCrumblingEvents);
 DEFINE_STAT(STAT_BufferPhysicsResults);
 DEFINE_STAT(STAT_FlipResults);
 DEFINE_STAT(STAT_ProcessDeferredCreatePhysicsState);
 DEFINE_STAT(STAT_SqUpdateMaterials);
 DEFINE_STAT(STAT_CacheResultGeomCollection);
+DEFINE_STAT(STAT_UpdateGeometryCollectionViews);
+DEFINE_STAT(STAT_BufferPhysicsResultsParticleLoop);
+DEFINE_STAT(STAT_CaptureSolverData);
 DEFINE_STAT(STAT_CacheResultStaticMesh);
 DEFINE_STAT(STAT_CaptureDisabledState);
 DEFINE_STAT(STAT_CalcGlobalGCMatrices);
@@ -53,7 +64,16 @@ DEFINE_STAT(STAT_GatherCollisionEvent)
 DEFINE_STAT(STAT_GatherBreakingEvent)
 DEFINE_STAT(STAT_GatherTrailingEvent)
 DEFINE_STAT(STAT_GatherSleepingEvent)
+DEFINE_STAT(STAT_GatherCrumblingEvent)
 DEFINE_STAT(STAT_AccelerationStructureReset);
+
+DEFINE_STAT(STAT_FinalizeCallbacks);
+DEFINE_STAT(STAT_ResetClusteringEvents);
+DEFINE_STAT(STAT_RewindFinishFrame);
+DEFINE_STAT(STAT_ResetMarshallingData);
+DEFINE_STAT(STAT_ConditionalApplyRewind);
+DEFINE_STAT(STAT_FinalizePullData);
+DEFINE_STAT(STAT_DestroyPendingProxies);
 
 DEFINE_STAT(STAT_ParamUpdateObject);
 DEFINE_STAT(STAT_ParamUpdateField);
@@ -87,6 +107,17 @@ DEFINE_STAT(STAT_ParamUpdateField_PositionAnimated);
 DEFINE_STAT(STAT_ParamUpdateField_DynamicConstraint);
 DEFINE_STAT(STAT_ForceUpdateField_LinearForce);
 DEFINE_STAT(STAT_ForceUpdateField_AngularTorque);
+DEFINE_STAT(STAT_ForceUpdateField_LinearImpulse);
 
-
-// Field update stats
+DEFINE_STAT(STAT_Collisions_Detect);
+DEFINE_STAT(STAT_Collisions_ParticlePairBroadPhase);
+DEFINE_STAT(STAT_Collisions_SpatialBroadPhase);
+DEFINE_STAT(STAT_Collisions_MidPhase);
+DEFINE_STAT(STAT_Collisions_AssignMidPhases);
+DEFINE_STAT(STAT_Collisions_NarrowPhase);
+DEFINE_STAT(STAT_Collisions_GenerateCollisions);
+DEFINE_STAT(STAT_Collisions_Gather);
+DEFINE_STAT(STAT_Collisions_Scatter);
+DEFINE_STAT(STAT_Collisions_Apply);
+DEFINE_STAT(STAT_Collisions_ApplyPushOut);
+DEFINE_STAT(STAT_Collisions_SimplifyConvexes);

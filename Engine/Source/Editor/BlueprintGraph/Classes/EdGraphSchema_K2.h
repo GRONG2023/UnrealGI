@@ -2,28 +2,50 @@
 
 #pragma once
 
+#include "AssetRegistry/AssetData.h"
+#include "Containers/Array.h"
+#include "Containers/EnumAsByte.h"
+#include "Containers/Map.h"
+#include "Containers/Set.h"
+#include "Containers/UnrealString.h"
 #include "CoreMinimal.h"
-#include "Misc/EnumClassFlags.h"
-#include "UObject/ObjectMacros.h"
-#include "UObject/Class.h"
-#include "UObject/SoftObjectPath.h"
+#include "EdGraph/EdGraph.h"
 #include "EdGraph/EdGraphNode.h"
 #include "EdGraph/EdGraphPin.h"
-#include "AssetData.h"
-#include "EdGraph/EdGraph.h"
 #include "EdGraph/EdGraphSchema.h"
+#include "HAL/PlatformMath.h"
+#include "Internationalization/Text.h"
+#include "Math/Color.h"
+#include "Math/Vector2D.h"
+#include "Misc/EnumClassFlags.h"
+#include "Templates/SharedPointer.h"
+#include "Templates/UnrealTemplate.h"
+#include "UObject/Class.h"
+#include "UObject/NameTypes.h"
+#include "UObject/Object.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/SoftObjectPath.h"
+#include "UObject/UObjectGlobals.h"
+#include "UObject/UnrealNames.h"
+#include "UObject/WeakObjectPtr.h"
+#include "UObject/WeakObjectPtrTemplates.h"
+
 #include "EdGraphSchema_K2.generated.h"
 
 class AActor;
+class FKismetCompilerContext;
 class FMenuBuilder;
-class UToolMenu;
-struct FToolMenuSection;
+class FProperty;
 class UBlueprint;
-class UK2Node;
-struct FTypesDatabase;
-class UEnum;
 class UClass;
+class UEnum;
+class UK2Node;
 class UScriptStruct;
+class UToolMenu;
+struct FAssetData;
+struct FToolMenuSection;
+template <typename T> struct TObjectPtr;
 
 /** Reference to an structure (only used in 'docked' palette) */
 USTRUCT()
@@ -35,7 +57,7 @@ struct BLUEPRINTGRAPH_API FEdGraphSchemaAction_K2Struct : public FEdGraphSchemaA
 	static FName StaticGetTypeId() {static FName Type("FEdGraphSchemaAction_K2Struct"); return Type;}
 	virtual FName GetTypeId() const override { return StaticGetTypeId(); } 
 
-	UStruct* Struct;
+	TObjectPtr<UStruct> Struct;
 
 	void AddReferencedObjects( FReferenceCollector& Collector ) override
 	{
@@ -131,6 +153,12 @@ public:
 	// [FunctionMetadata] Indicates that a particular function parameter is for internal use only, which means it will be both hidden and not connectible.
 	static const FName MD_InternalUseParam;
 
+	// [FunctionMetadata] Indicates that the function should appear as blueprint function even if it doesn't return a value.
+	static const FName MD_ForceAsFunction;
+
+	// [FunctionMetadata] Indicates that the function should be ignored when considered for blueprint type promotion
+	static const FName MD_IgnoreTypePromotion;
+
 	//    property metadata
 
 	/** UPROPERTY will be exposed on "Spawn Blueprint" nodes as an input  */
@@ -163,6 +191,9 @@ public:
 	/** If true, an unconnected pin will generate a UPROPERTY under the hood to connect as the input, which will be set to the literal value for the pin.  Only valid for reference parameters. */
 	static const FName MD_AutoCreateRefTerm;
 
+	/** The specified parameter should hide the asset picker on the pin, even if it is a valid UObject Asset. */
+	static const FName MD_HideAssetPicker;
+
 	/** If true, the hidden world context pin will be visible when the function is placed in a child blueprint of the class. */
 	static const FName MD_ShowWorldContextPin;
 
@@ -170,6 +201,7 @@ public:
 	static const FName MD_HidePin;
 
 	static const FName MD_BlueprintInternalUseOnly;
+	static const FName MD_BlueprintInternalUseOnlyHierarchical;
 	static const FName MD_NeedsLatentFixup;
 
 	static const FName MD_LatentInfo;
@@ -246,6 +278,21 @@ public:
 	/** Metadata that should be used with UPARAM to specify whether a TSubclassOf argument allows abstract classes */
 	static const FName MD_AllowAbstractClasses;
 
+	/** Metadata that should be used with UPARAM to specify a function name that generates a list of available values */
+	static const FName MD_GetOptions;
+
+	/** Namespace into which a type can be optionally defined; if empty or not set, the type will belong to the global namespace (default). */
+	static const FName MD_Namespace;
+
+	/** Function or class marked as thread-safe. Opts class/function compilation into thread-safety checks. */
+	static const FName MD_ThreadSafe;
+
+	/** Function marked as explicitly not thread-safe. Opts function out of class-level thread-safety checks. */
+	static const FName MD_NotThreadSafe;
+
+	/** Metadata to add the property or function to the FieldNotification system. */
+	static const FName MD_FieldNotify;
+	
 private:
 	// This class should never be instantiated
 	FBlueprintMetadata() {}
@@ -298,8 +345,6 @@ enum class ETypeTreeFilter : uint8
 
 ENUM_CLASS_FLAGS(ETypeTreeFilter);
 
-struct FTypesDatabase;
-
 UCLASS(config=Editor)
 class BLUEPRINTGRAPH_API UEdGraphSchema_K2 : public UEdGraphSchema
 {
@@ -314,6 +359,8 @@ class BLUEPRINTGRAPH_API UEdGraphSchema_K2 : public UEdGraphSchema
 	static const FName PC_Int;
 	static const FName PC_Int64;
 	static const FName PC_Float;
+	static const FName PC_Double;
+	static const FName PC_Real;
 	static const FName PC_Name;
 	static const FName PC_Delegate;    // SubCategoryObject is the UFunction of the delegate signature
 	static const FName PC_MCDelegate;  // SubCategoryObject is the UFunction of the delegate signature
@@ -353,7 +400,6 @@ class BLUEPRINTGRAPH_API UEdGraphSchema_K2 : public UEdGraphSchema
 	static const FName PN_CastSucceeded;    // Category=PC_Exec, singleton, output
 	static const FName PN_CastFailed;    // Category=PC_Exec, singleton, output
 	static const FString PN_CastedValuePrefix;    // Category=PC_Object, singleton, output; actual pin name varies depending on the type to be casted to, this is just a prefix
-	static const FName PN_MatineeFinished;    // Category=PC_Exec, singleton, output
 
 	// construction script function names
 	static const FName FN_UserConstructionScript;
@@ -398,11 +444,14 @@ public:
 		FEdGraphPinType PinType;
 		uint8 PossibleObjectReferenceTypes;
 
-		/** Asset Reference, used when PinType.PinSubCategoryObject is not loaded yet */
-		FSoftObjectPath SubCategoryObjectAssetReference;
+		/** Asset Data, used when PinType.PinSubCategoryObject is not loaded yet */
+		FAssetData CachedAssetData;
 
+		/** The pin type description, localized */
 		FText CachedDescription;
 
+		/** A copy of the localized CachedDescription string, for sorting */
+		TSharedPtr<FString> CachedDescriptionString;
 	public:
 		/** The children of this pin type */
 		TArray< TSharedPtr<FPinTypeTreeInfo> > Children;
@@ -410,36 +459,30 @@ public:
 		/** Whether or not this pin type is selectable as an actual type, or is just a category, with some subtypes */
 		bool bReadOnly;
 
-		/** Friendly display name of pin type; also used to see if it has subtypes */
-		FText FriendlyName;
-
 		/** Text for regular tooltip */
 		FText Tooltip;
 
 	public:
 		const FEdGraphPinType& GetPinType(bool bForceLoadedSubCategoryObject);
+		const FEdGraphPinType& GetPinTypeNoResolve() const { return PinType; }
 		void SetPinSubTypeCategory(const FName SubCategory)
 		{
 			PinType.PinSubCategory = SubCategory;
 		}
 
-		FPinTypeTreeInfo(const FText& InFriendlyName, const FName CategoryName, const UEdGraphSchema_K2* Schema, const FText& InTooltip, bool bInReadOnly = false, FTypesDatabase* TypesDatabase = nullptr);
+		FPinTypeTreeInfo(const FText& InFriendlyName, const FName CategoryName, const UEdGraphSchema_K2* Schema, const FText& InTooltip, bool bInReadOnly = false);
 		FPinTypeTreeInfo(const FName CategoryName, UObject* SubCategoryObject, const FText& InTooltip, bool bInReadOnly = false, uint8 InPossibleObjectReferenceTypes = 0);
-		FPinTypeTreeInfo(const FText& InFriendlyName, const FName CategoryName, const FSoftObjectPath& SubCategoryObject, const FText& InTooltip, bool bInReadOnly = false, uint8 InPossibleObjectReferenceTypes = 0);
-
-		FPinTypeTreeInfo(TSharedPtr<FPinTypeTreeInfo> InInfo)
-		{
-			PinType = InInfo->PinType;
-			bReadOnly = InInfo->bReadOnly;
-			FriendlyName = InInfo->FriendlyName;
-			Tooltip = InInfo->Tooltip;
-			SubCategoryObjectAssetReference = InInfo->SubCategoryObjectAssetReference;
-			CachedDescription = InInfo->CachedDescription;
-			PossibleObjectReferenceTypes = InInfo->PossibleObjectReferenceTypes;
-		}
+		FPinTypeTreeInfo(const FText& InFriendlyName, const FName CategoryName, const FAssetData& AssetData, const FText& InTooltip, bool bInReadOnly = false, uint8 InPossibleObjectReferenceTypes = 0);
+		FPinTypeTreeInfo(TSharedPtr<FPinTypeTreeInfo> InInfo);
 		
 		/** Returns a succinct menu description of this type */
-		FText GetDescription() const;
+		const FText& GetDescription() const;
+		
+		/** Returns the localized description as a string, for faster sorting */
+		const FString& GetCachedDescriptionString() const
+		{
+			return *CachedDescriptionString;
+		}
 
 		FText GetToolTip() const
 		{
@@ -461,14 +504,14 @@ public:
 			return PossibleObjectReferenceTypes;
 		}
 
+		const FAssetData& GetCachedAssetData() const;
+
 	private:
 
 		FPinTypeTreeInfo()
 			: PossibleObjectReferenceTypes(0)
 			, bReadOnly(false)
 		{}
-
-		void Init(const FText& FriendlyCategoryName, const FName CategoryName, const UEdGraphSchema_K2* Schema, const FText& InTooltip, bool bInReadOnly, FTypesDatabase* TypesDatabase);
 
 		FText GenerateDescription();
 	};
@@ -481,7 +524,8 @@ public:
 	virtual const FPinConnectionResponse CanCreateConnection(const UEdGraphPin* A, const UEdGraphPin* B) const override;
 	virtual bool TryCreateConnection(UEdGraphPin* A, UEdGraphPin* B) const override;
 	virtual bool CreateAutomaticConversionNodeAndConnections(UEdGraphPin* A, UEdGraphPin* B) const override;
-	virtual FString IsPinDefaultValid(const UEdGraphPin* Pin, const FString& NewDefaultValue, UObject* NewDefaultObject, const FText& InNewDefaultText) const override;
+	virtual bool CreatePromotedConnection(UEdGraphPin* A, UEdGraphPin* B) const override;
+	virtual FString IsPinDefaultValid(const UEdGraphPin* Pin, const FString& NewDefaultValue, TObjectPtr<UObject> NewDefaultObject, const FText& InNewDefaultText) const override;
 	virtual bool DoesSupportPinWatching() const	override;
 	virtual bool IsPinBeingWatched(UEdGraphPin const* Pin) const override;
 	virtual void ClearPinWatch(UEdGraphPin const* Pin) const override;
@@ -493,7 +537,7 @@ public:
 	virtual bool ShouldHidePinDefaultValue(UEdGraphPin* Pin) const override;
 	virtual bool ShouldShowAssetPickerForPin(UEdGraphPin* Pin) const override;
 	virtual FLinearColor GetPinTypeColor(const FEdGraphPinType& PinType) const override;
-	FLinearColor GetSecondaryPinTypeColor(const FEdGraphPinType& PinType) const;
+	virtual FLinearColor GetSecondaryPinTypeColor(const FEdGraphPinType& PinType) const override;
 	virtual FText GetPinDisplayName(const UEdGraphPin* Pin) const override;
 	virtual void ConstructBasicPinTooltip(const UEdGraphPin& Pin, const FText& PinDescription, FString& TooltipOut) const override;
 	virtual EGraphType GetGraphType(const UEdGraph* TestEdGraph) const override;
@@ -529,12 +573,21 @@ public:
 	virtual void ForceVisualizationCacheClear() const override;
 	virtual bool SafeDeleteNodeFromGraph(UEdGraph* Graph, UEdGraphNode* NodeToDelete) const override;
 	virtual bool CanVariableBeDropped(UEdGraph* InGraph, FProperty* InVariableToDrop) const override { return true; }
+	virtual bool CanShowDataTooltipForPin(const UEdGraphPin& Pin) const override;
 
 #if WITH_EDITORONLY_DATA
 	virtual float GetActionFilteredWeight(const FGraphActionListBuilderBase::ActionGroup& InCurrentAction, const TArray<FString>& InFilterTerms, const TArray<FString>& InSanitizedFilterTerms, const TArray<UEdGraphPin*>& DraggedFromPins) const override;
+	virtual FGraphSchemaSearchWeightModifiers GetSearchWeightModifiers() const override;
 #endif // WITH_EDITORONLY_DATA	
 
 	//~ End EdGraphSchema Interface
+
+	/**
+	 * Determine if this graph supports collapsing nodes into subgraphs
+	 *
+	 * @return True if this schema supports collapsed node subgraphs
+	 */
+	virtual bool DoesSupportCollapsedNodes() const { return true; }
 
 	/**
 	 *
@@ -609,10 +662,10 @@ public:
 	UK2Node* CreateSplitPinNode(UEdGraphPin* Pin, const FCreateSplitPinNodeParams& Params) const;
 
 	/** Reads in a FString and gets the values of the pin defaults for that type. This can be passed to DefaultValueSimpleValidation to validate. OwningObject can be null */
-	virtual void GetPinDefaultValuesFromString(const FEdGraphPinType& PinType, UObject* OwningObject, const FString& NewValue, FString& UseDefaultValue, UObject*& UseDefaultObject, FText& UseDefaultText, bool bPreserveTextIdentity = true) const;
+	virtual void GetPinDefaultValuesFromString(const FEdGraphPinType& PinType, UObject* OwningObject, const FString& NewValue, FString& UseDefaultValue, TObjectPtr<UObject>& UseDefaultObject, FText& UseDefaultText, bool bPreserveTextIdentity = true) const;
 
 	/** Do validation, that doesn't require a knowledge about actual pin */
-	virtual bool DefaultValueSimpleValidation(const FEdGraphPinType& PinType, const FName PinName, const FString& NewDefaultValue, UObject* NewDefaultObject, const FText& InText, FString* OutMsg = nullptr) const;
+	virtual bool DefaultValueSimpleValidation(const FEdGraphPinType& PinType, const FName PinName, const FString& NewDefaultValue, TObjectPtr<UObject> NewDefaultObject, const FText& InText, FString* OutMsg = nullptr) const;
 
 	/** Returns true if the owning node is a function with AutoCreateRefTerm meta data */
 	static bool IsAutoCreateRefTerm(const UEdGraphPin* Pin);
@@ -917,7 +970,7 @@ public:
 	 * @param	Graph			Graph to add the function terminators to
 	 * @param	FunctionSignature	The function signature to mimic when creating the inputs and outputs for the function.
 	 */
-	virtual void CreateFunctionGraphTerminators(UEdGraph& Graph, UFunction* FunctionSignature) const;
+	virtual void CreateFunctionGraphTerminators(UEdGraph& Graph, const UFunction* FunctionSignature) const;
 
 	/**
 	 * Converts the type of a property into a fully qualified string (e.g., object'ObjectName').
@@ -926,7 +979,7 @@ public:
 	 *
 	 * @return	The converted type string.
 	 */
-	static FText TypeToText(FProperty* const Property);
+	static FText TypeToText(const FProperty* const Property);
 
 	/**
 	* Converts a terminal type into a fully qualified FText (e.g., object'ObjectName').
@@ -959,6 +1012,17 @@ public:
 	 * @return	The text to display for the category.
 	 */
 	static FText GetCategoryText(const FName Category, const bool bForMenu = false);
+
+	/**
+	 * Returns the FText to use for a given schema category and subcategory
+	 *
+	 * @param	Category	The category to convert into a FText.
+	 * @param	SubCategory	The subcategory to convert into a FText.
+	 * @param	bForMenu	Indicates if this is for display in tooltips or menu
+	 *
+	 * @return	The text to display for the category.
+	 */
+	static FText GetCategoryText(FName Category, FName SubCategory, bool bForMenu = false);
 
 	/**
 	 * Get the type tree for all of the property types valid for this schema
@@ -1014,6 +1078,16 @@ public:
 	 */
 	virtual bool ArePinTypesCompatible(const FEdGraphPinType& Output, const FEdGraphPinType& Input, const UClass* CallingContext = NULL, bool bIgnoreArray = false) const;
 
+	/**
+	 * Returns true if the types are schema Equivalent. 
+	 *
+	 * @param	PinA		  	The type of Pin A.
+	 * @param	PinB		  	The type of Pin B.
+	 *
+	 * @return	true if the pin types and directions are compatible.
+	 */
+	virtual bool ArePinTypesEquivalent(const FEdGraphPinType& PinA, const FEdGraphPinType& PinB) const;
+
 	/** Sets the autogenerated default value for a pin, optionally using the passed in function and parameter. This will also reset the current default value to the autogenerated one */
 	virtual void SetPinAutogeneratedDefaultValue(UEdGraphPin* Pin, const FString& NewValue) const;
 
@@ -1035,11 +1109,29 @@ public:
 	/** Find a 'set value by name' function for the specified pin, if it exists */
 	static UFunction* FindSetVariableByNameFunction(const FEdGraphPinType& PinType);
 
-	/** Find an appropriate function to call to perform an automatic cast operation */
-	virtual bool SearchForAutocastFunction(const UEdGraphPin* OutputPin, const UEdGraphPin* InputPin, /*out*/ FName& TargetFunction, /*out*/ UClass*& FunctionOwner) const;
+	UE_DEPRECATED(5.2, "Use the FSearchForAutocastFunctionResults variant.")
+	virtual bool SearchForAutocastFunction(const FEdGraphPinType& OutputPinType, const FEdGraphPinType& InputPinType, /*out*/ FName& TargetFunction, /*out*/ UClass*& FunctionOwner) const;
 
-	/** Find an appropriate node that can convert from one pin type to another (not a cast; e.g. "MakeLiteralArray" node) */
+	/** Find an appropriate function to call to perform an automatic cast operation */
+	struct FSearchForAutocastFunctionResults
+	{
+		FName TargetFunction;
+		UClass* FunctionOwner = nullptr;
+	};
+	[[nodiscard]] virtual TOptional<FSearchForAutocastFunctionResults> SearchForAutocastFunction(const FEdGraphPinType& OutputPinType, const FEdGraphPinType& InputPinType) const;
+
+	UE_DEPRECATED(5.2, "Use the FFindSpecializedConversionNodeResults variant.")
 	virtual bool FindSpecializedConversionNode(const UEdGraphPin* OutputPin, const UEdGraphPin* InputPin, bool bCreateNode, /*out*/ class UK2Node*& TargetNode) const;
+	
+	UE_DEPRECATED(5.2, "Use the FFindSpecializedConversionNodeResults variant.")
+	virtual bool FindSpecializedConversionNode(const FEdGraphPinType& OutputPinType, const UEdGraphPin* InputPinType, bool bCreateNode, /*out*/ class UK2Node*& TargetNode) const;
+	
+	/** Find an appropriate node that can convert from one pin type to another (not a cast; e.g. "MakeLiteralArray" node) */
+	struct FFindSpecializedConversionNodeResults
+	{
+		class UK2Node* TargetNode = nullptr;
+	};
+	[[nodiscard]] virtual TOptional<FFindSpecializedConversionNodeResults> FindSpecializedConversionNode(const FEdGraphPinType& OutputPinType, const UEdGraphPin& InputPin, bool bCreateNode) const;
 
 	/** Create menu for variable get/set nodes which refer to a variable which does not exist. */
 	void GetNonExistentVariableMenu(FToolMenuSection& Section, const UEdGraphNode* InGraphNode, UBlueprint* OwnerBlueprint) const;
@@ -1072,6 +1164,13 @@ public:
 	 */
 	bool DoesGraphSupportImpureFunctions(const UEdGraph* InGraph) const;
 
+	/** 
+	 * Checks if the graph is marked as thread safe
+	 * @param InGraph		Graph to check
+	 * @return			True if the graph is marked theead safe
+	 */
+	bool IsGraphMarkedThreadSafe(const UEdGraph* InGraph) const;
+	
 	/**
 	 * Checks to see if the passed in function is valid in the graph for the current class
 	 *
@@ -1110,7 +1209,7 @@ public:
 	void LinkDataPinFromOutputToInput(UEdGraphNode* InOutputNode, UEdGraphNode* InInputNode) const;
 
 	/** Moves all connections from the old node to the new one. Returns true and destroys OldNode on success. Fails if it cannot find a mapping from an old pin. */
-	bool ReplaceOldNodeWithNew(UK2Node* OldNode, UK2Node* NewNode, const TMap<FName, FName>& OldPinToNewPinMap) const;
+	bool ReplaceOldNodeWithNew(UEdGraphNode* OldNode, UEdGraphNode* NewNode, const TMap<FName, FName>& OldPinToNewPinMap) const;
 
 	/** Convert a deprecated node into a function call node, called from per-node ConvertDeprecatedNode */
 	UK2Node* ConvertDeprecatedNodeToFunctionCall(UK2Node* OldNode, UFunction* NewFunction, TMap<FName, FName>& OldPinToNewPinMap, UEdGraph* Graph) const;
@@ -1145,6 +1244,7 @@ private:
 	bool DoesFunctionHaveOutParameters( const UFunction* Function ) const;
 
 	static const UScriptStruct* VectorStruct;
+	static const UScriptStruct* Vector3fStruct;
 	static const UScriptStruct* RotatorStruct;
 	static const UScriptStruct* TransformStruct;
 	static const UScriptStruct* LinearColorStruct;

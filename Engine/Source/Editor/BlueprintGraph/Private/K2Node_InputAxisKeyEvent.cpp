@@ -1,13 +1,34 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "K2Node_InputAxisKeyEvent.h"
+
+#include "BlueprintActionDatabaseRegistrar.h"
+#include "BlueprintNodeSpawner.h"
+#include "Containers/Array.h"
+#include "Containers/Map.h"
+#include "Containers/UnrealString.h"
+#include "Delegates/Delegate.h"
+#include "EdGraph/EdGraph.h"
 #include "EdGraphSchema_K2.h"
+#include "EditorCategoryUtils.h"
+#include "Engine/Blueprint.h"
+#include "Engine/DynamicBlueprintBinding.h"
+#include "Engine/InputAxisKeyDelegateBinding.h"
+#include "Engine/MemberReference.h"
+#include "HAL/PlatformCrt.h"
+#include "Internationalization/Internationalization.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Kismet2/CompilerResultsLog.h"
-#include "BlueprintNodeSpawner.h"
-#include "EditorCategoryUtils.h"
-#include "Engine/InputAxisKeyDelegateBinding.h"
-#include "BlueprintActionDatabaseRegistrar.h"
+#include "Misc/AssertionMacros.h"
+#include "Serialization/Archive.h"
+#include "Styling/AppStyle.h"
+#include "Templates/Casts.h"
+#include "Templates/SubclassOf.h"
+#include "UObject/Class.h"
+#include "UObject/NameTypes.h"
+#include "UObject/ObjectVersion.h"
+
+struct FLinearColor;
 
 #define LOCTEXT_NAMESPACE "UK2Node_InputAxisKeyEvent"
 
@@ -27,7 +48,7 @@ void UK2Node_InputAxisKeyEvent::Serialize(FArchive& Ar)
 
 	if(Ar.IsLoading())
 	{
-		if(Ar.UE4Ver() < VER_UE4_K2NODE_EVENT_MEMBER_REFERENCE && EventSignatureName_DEPRECATED.IsNone() && EventSignatureClass_DEPRECATED == nullptr)
+		if(Ar.UEVer() < VER_UE4_K2NODE_EVENT_MEMBER_REFERENCE && EventSignatureName_DEPRECATED.IsNone() && EventSignatureClass_DEPRECATED == nullptr)
 		{
 			EventReference.SetExternalDelegateMember(FName(TEXT("InputAxisHandlerDynamicSignature__DelegateSignature")));
 		}
@@ -84,7 +105,7 @@ UClass* UK2Node_InputAxisKeyEvent::GetDynamicBindingClass() const
 
 FSlateIcon UK2Node_InputAxisKeyEvent::GetIconAndTint(FLinearColor& OutColor) const
 {
-	return FSlateIcon("EditorStyle", EKeys::GetMenuCategoryPaletteIcon(AxisKey.GetMenuCategory()));
+	return FSlateIcon(FAppStyle::GetAppStyleSetName(), EKeys::GetMenuCategoryPaletteIcon(AxisKey.GetMenuCategory()));
 }
 
 void UK2Node_InputAxisKeyEvent::RegisterDynamicBinding(UDynamicBlueprintBinding* BindingObject) const
@@ -110,7 +131,7 @@ bool UK2Node_InputAxisKeyEvent::IsCompatibleWithGraph(const UEdGraph* TargetGrap
 	UBlueprint* Blueprint = FBlueprintEditorUtils::FindBlueprintForGraph(TargetGraph);
 	if (Blueprint != nullptr)
 	{
-		bIsCompatible = FBlueprintEditorUtils::IsActorBased(Blueprint) && Blueprint->SupportsInputEvents();
+		bIsCompatible = Blueprint && Blueprint->SupportsInputEvents();
 	}
 
 	UEdGraphSchema_K2 const* K2Schema = Cast<UEdGraphSchema_K2>(TargetGraph->GetSchema());

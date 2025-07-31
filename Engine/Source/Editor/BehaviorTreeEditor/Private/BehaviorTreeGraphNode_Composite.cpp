@@ -1,8 +1,16 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "BehaviorTreeGraphNode_Composite.h"
-#include "BehaviorTree/BTNode.h"
+
+#include "BehaviorTreeColors.h"
+#include "BehaviorTreeGraph.h"
 #include "BehaviorTree/BTCompositeNode.h"
+#include "BehaviorTree/BTNode.h"
+#include "HAL/PlatformMath.h"
+#include "Internationalization/Internationalization.h"
+#include "Templates/Casts.h"
+
+class UToolMenu;
 
 UBehaviorTreeGraphNode_Composite::UBehaviorTreeGraphNode_Composite(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -45,8 +53,32 @@ FText UBehaviorTreeGraphNode_Composite::GetTooltipText() const
 	return Super::GetTooltipText();
 }
 
+FLinearColor UBehaviorTreeGraphNode_Composite::GetBackgroundColor(bool bIsActiveForDebugger) const
+{
+	UBTCompositeNode* CompositeNodeInstance = Cast<UBTCompositeNode>(NodeInstance);
+	const bool bIsScoped = CompositeNodeInstance && CompositeNodeInstance->IsApplyingDecoratorScope();
+	return bIsScoped ? BehaviorTreeColors::NodeBody::CompositeScoped : BehaviorTreeColors::NodeBody::Composite;
+}
+
+void UBehaviorTreeGraphNode_Composite::PostPasteNode()
+{
+	Super::PostPasteNode();
+	
+	// Clear our references to other nodes since this will be set when creating/updating the BT from the graph nodes
+	UBTCompositeNode* CompositeNode = Cast<UBTCompositeNode>(NodeInstance);
+	if (CompositeNode)
+	{
+		CompositeNode->Children.Reset();
+		CompositeNode->Services.Reset();
+	}
+}
+
 void UBehaviorTreeGraphNode_Composite::GetNodeContextMenuActions(UToolMenu* Menu, UGraphNodeContextMenuContext* Context) const
 {
 	AddContextMenuActionsDecorators(Menu, "BehaviorTreeGraphNode", Context);
-	AddContextMenuActionsServices(Menu, "BehaviorTreeGraphNode", Context);
+
+	if (GetOwnerBehaviorTreeGraph()->DoesSupportServices())
+	{
+		AddContextMenuActionsServices(Menu, "BehaviorTreeGraphNode", Context);
+	}
 }

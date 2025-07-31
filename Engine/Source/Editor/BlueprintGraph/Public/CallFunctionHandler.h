@@ -2,11 +2,20 @@
 
 #pragma once
 
+#include "Containers/Map.h"
 #include "CoreMinimal.h"
-#include "KismetCompilerMisc.h"
+#include "EdGraph/EdGraphNode.h"
 #include "K2Node_CallFunction.h"
+#include "KismetCompilerMisc.h"
+#include "Templates/Casts.h"
+#include "UObject/NameTypes.h"
 
 class FKismetCompilerContext;
+class UClass;
+class UEdGraphPin;
+class UFunction;
+struct FBPTerminal;
+struct FBlueprintCompiledStatement;
 struct FKismetFunctionContext;
 
 //////////////////////////////////////////////////////////////////////////
@@ -28,28 +37,27 @@ public:
 
 	bool IsCalledFunctionPure(UEdGraphNode* Node)
 	{
-		if(UK2Node_CallFunction* CallFunctionNode = Cast<UK2Node_CallFunction>(Node))
+		if (UK2Node_CallFunction* CallFunctionNode = Cast<UK2Node_CallFunction>(Node))
 		{
 			return CallFunctionNode->bIsPureFunc;
 		}
+
 		return false;
 	}
 
+	UE_DEPRECATED(5.4, "IsCalledFunctionFinal is deprecated")
 	bool IsCalledFunctionFinal(UEdGraphNode* Node)
 	{
-		if(UK2Node_CallFunction* CallFunctionNode = Cast<UK2Node_CallFunction>(Node))
-		{
-			return CallFunctionNode->bIsFinalFunction;
-		}
 		return false;
 	}
 
 	bool IsCalledFunctionFromInterface(UEdGraphNode* Node)
 	{
-		if(UK2Node_CallFunction* CallFunctionNode = Cast<UK2Node_CallFunction>(Node))
+		if (UK2Node_CallFunction* CallFunctionNode = Cast<UK2Node_CallFunction>(Node))
 		{
 			return CallFunctionNode->bIsInterfaceCall;
 		}
+
 		return false;
 	}
 
@@ -69,6 +77,6 @@ public:
 	virtual void CheckIfFunctionIsCallable(UFunction* Function, FKismetFunctionContext& Context, UEdGraphNode* Node);
 	virtual void AdditionalCompiledStatementHandling(FKismetFunctionContext& Context, UEdGraphNode* Node, FBlueprintCompiledStatement& Statement) {}
 
-protected:
+private:
 	TMap<UEdGraphPin*, FBPTerminal*> InterfaceTermMap;
 };

@@ -6,10 +6,13 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
 #include "Engine/Blueprint.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/UObjectGlobals.h"
+
 #include "EditorUtilityBlueprint.generated.h"
+
+class UObject;
 
 UCLASS()
 class BLUTILITY_API UEditorUtilityBlueprint : public UBlueprint
@@ -19,6 +22,5 @@ class BLUTILITY_API UEditorUtilityBlueprint : public UBlueprint
 	// UBlueprint interface
 	virtual bool SupportedByDefaultBlueprintFactory() const override;
 	virtual bool AlwaysCompileOnLoad() const override;
-	virtual bool CanRecompileWhilePlayingInEditor() const override;
 	// End of UBlueprint interface
 };

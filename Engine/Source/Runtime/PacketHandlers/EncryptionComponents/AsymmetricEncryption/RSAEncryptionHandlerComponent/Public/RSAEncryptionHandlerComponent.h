@@ -10,7 +10,8 @@ THIRD_PARTY_INCLUDES_START
 THIRD_PARTY_INCLUDES_END
 
 /* RSA Encryptor Module Interface */
-class FRSAEncryptorHandlerComponentModuleInterface : public FPacketHandlerComponentModuleInterface
+class UE_DEPRECATED(5.3, "This component is not supported for encryption.")
+FRSAEncryptorHandlerComponentModuleInterface : public FPacketHandlerComponentModuleInterface
 {
 public:
 	/* Creates an instance of this component */
@@ -31,7 +32,8 @@ namespace ERSAEncryptionHandler
 /*
 * Asymmetric block cipher handler component using RSA as the cipher
 */
-class RSAENCRYPTIONHANDLERCOMPONENT_API RSAEncryptionHandlerComponent : public HandlerComponent
+class UE_DEPRECATED(5.3, "This component is not supported for encryption.")
+RSAENCRYPTIONHANDLERCOMPONENT_API RSAEncryptionHandlerComponent : public HandlerComponent
 {
 public:
 	/*

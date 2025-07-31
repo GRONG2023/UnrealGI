@@ -2,11 +2,14 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
 #include "ComponentVisualizer.h"
+#include "Containers/Array.h"
+#include "CoreMinimal.h"
+#include "Math/Transform.h"
 
 class FPrimitiveDrawInterface;
 class FSceneView;
+class UActorComponent;
 class UTextureLightProfile;
 
 class FTextureLightProfileVisualizer
@@ -17,7 +20,7 @@ public:
 	void DrawVisualization(UTextureLightProfile* TextureLightProfile, const FTransform& LightTM, const FSceneView* View, FPrimitiveDrawInterface* PDI);
 
 private:
-	void UpdateIntensitiesCache(UTextureLightProfile* TextureLightProfile, const FTransform& LightTM);
+	bool UpdateIntensitiesCache(UTextureLightProfile* TextureLightProfile, const FTransform& LightTM);
 
 	const UTextureLightProfile* CachedLightProfile;
 	TArray< float > IntensitiesCache;

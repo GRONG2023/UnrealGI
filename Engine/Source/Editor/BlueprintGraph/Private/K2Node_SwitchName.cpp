@@ -1,10 +1,20 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "K2Node_SwitchName.h"
-#include "EdGraphSchema_K2.h"
-#include "Kismet/KismetMathLibrary.h"
-#include "BlueprintNodeSpawner.h"
+
 #include "BlueprintActionDatabaseRegistrar.h"
+#include "BlueprintNodeSpawner.h"
+#include "Containers/UnrealString.h"
+#include "EdGraph/EdGraph.h"
+#include "EdGraphSchema_K2.h"
+#include "HAL/PlatformCrt.h"
+#include "Internationalization/Internationalization.h"
+#include "Kismet/KismetMathLibrary.h"
+#include "Misc/AssertionMacros.h"
+#include "Templates/SubclassOf.h"
+#include "UObject/Class.h"
+#include "UObject/UnrealNames.h"
+#include "UObject/UnrealType.h"
 
 UK2Node_SwitchName::UK2Node_SwitchName(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -25,9 +35,9 @@ void UK2Node_SwitchName::PostEditChangeProperty(struct FPropertyChangedEvent& Pr
 	if (bIsDirty)
 	{
 		ReconstructNode();
-		GetGraph()->NotifyGraphChanged();
 	}
 	Super::PostEditChangeProperty(PropertyChangedEvent);
+	GetGraph()->NotifyNodeChanged(this);
 }
 
 FText UK2Node_SwitchName::GetNodeTitle(ENodeTitleType::Type TitleType) const

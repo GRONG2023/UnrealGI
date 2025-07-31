@@ -1,21 +1,39 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "DetailCustomizations/BlackboardSelectorDetails.h"
-#include "Widgets/DeclarativeSyntaxSupport.h"
-#include "Engine/GameViewportClient.h"
-#include "Textures/SlateIcon.h"
-#include "Framework/Commands/UIAction.h"
-#include "Widgets/Text/STextBlock.h"
-#include "Framework/MultiBox/MultiBoxBuilder.h"
-#include "Widgets/Input/SComboButton.h"
-#include "BehaviorTree/BlackboardAssetProvider.h"
-#include "BehaviorTreeDebugger.h"
-#include "DetailWidgetRow.h"
-#include "DetailLayoutBuilder.h"
+
+#include "BehaviorTree/BehaviorTreeTypes.h"
 #include "BehaviorTree/Blackboard/BlackboardKeyType.h"
+#include "BehaviorTree/BlackboardAssetProvider.h"
 #include "BehaviorTree/BlackboardData.h"
-#include "IPropertyUtilities.h"
+#include "BehaviorTreeDebugger.h"
+#include "Delegates/Delegate.h"
+#include "DetailLayoutBuilder.h"
+#include "DetailWidgetRow.h"
 #include "Editor/EditorPerProjectUserSettings.h"
+#include "Fonts/SlateFontInfo.h"
+#include "Framework/Commands/UIAction.h"
+#include "Framework/MultiBox/MultiBoxBuilder.h"
+#include "HAL/PlatformCrt.h"
+#include "HAL/PlatformMath.h"
+#include "IPropertyUtilities.h"
+#include "Layout/Margin.h"
+#include "Misc/Attribute.h"
+#include "PropertyEditorModule.h"
+#include "PropertyHandle.h"
+#include "Templates/Casts.h"
+#include "Templates/SubclassOf.h"
+#include "Textures/SlateIcon.h"
+#include "UObject/Object.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/UObjectGlobals.h"
+#include "UObject/UnrealNames.h"
+#include "UObject/UnrealType.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
+#include "Widgets/Input/SComboButton.h"
+#include "Widgets/Text/STextBlock.h"
+
+class SWidget;
 
 #define LOCTEXT_NAMESPACE "BlackboardSelectorDetails"
 
@@ -89,6 +107,11 @@ void FBlackboardSelectorDetails::CacheBlackboardData()
 	NonesAllowed->GetValue(bNoneIsAllowedValue);
 	
 	KeyValues.Reset();
+
+	if (bNoneIsAllowedValue)
+	{
+		KeyValues.AddUnique(TEXT("None"));
+	}
 
 	TArray<UBlackboardKeyType*> FilterObjects;
 	
@@ -168,11 +191,11 @@ void FBlackboardSelectorDetails::CacheBlackboardData()
 
 	if (!OnBlackboardDataChangedHandle.IsValid())
 	{
-		UBlackboardData::OnBlackboardDataChanged.AddSP(this, &FBlackboardSelectorDetails::OnBlackboardDataChanged);
+		OnBlackboardDataChangedHandle = UBlackboardData::OnBlackboardDataChanged.AddSP(this, &FBlackboardSelectorDetails::OnBlackboardDataChanged);
 	}
 	if (!OnBlackboardOwnerChangedHandle.IsValid())
 	{
-		IBlackboardAssetProvider::OnBlackboardOwnerChanged.AddSP(this, &FBlackboardSelectorDetails::OnBlackboardOwnerChanged);
+		OnBlackboardOwnerChangedHandle = IBlackboardAssetProvider::OnBlackboardOwnerChanged.AddSP(this, &FBlackboardSelectorDetails::OnBlackboardOwnerChanged);
 	}
 
 }
@@ -215,8 +238,9 @@ void FBlackboardSelectorDetails::InitKeyFromProperty()
 			}
 			else
 			{
-				MyKeyClassProperty->SetValue((UObject*)NULL);
-				MyKeyIDProperty->SetValue(FBlackboard::InvalidKey);
+				// Set ID first so callbacks can properly test against InvalidKey
+				MyKeyIDProperty->SetValue((int32)FBlackboard::InvalidKey);
+				MyKeyClassProperty->SetValue((UObject*)nullptr);				
 				MyKeyNameProperty->SetValue(TEXT("None"));
 			}
 		}
@@ -252,11 +276,11 @@ void FBlackboardSelectorDetails::OnKeyComboChange(int32 Index)
 		UBlackboardData* BlackboardAsset = CachedBlackboardAsset.Get();
 		if (BlackboardAsset)
 		{
-			const uint8 KeyID = BlackboardAsset->GetKeyID(KeyValues[Index]);
+			const FBlackboard::FKey KeyID = BlackboardAsset->GetKeyID(KeyValues[Index]);
 			const UObject* KeyClass = BlackboardAsset->GetKeyType(KeyID);
 
 			MyKeyClassProperty->SetValue(KeyClass);
-			MyKeyIDProperty->SetValue(KeyID);
+			MyKeyIDProperty->SetValue((int32)KeyID);
 
 			MyKeyNameProperty->SetValue(KeyValues[Index]);
 		}

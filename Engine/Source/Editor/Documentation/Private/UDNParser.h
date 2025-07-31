@@ -1,14 +1,22 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 #pragma once
 
-#include "CoreMinimal.h"
-#include "Misc/Attribute.h"
-#include "Input/Reply.h"
-#include "Widgets/SWidget.h"
-#include "IDocumentationPage.h"
-#include "Types/SlateStructs.h"
+#include "Containers/Array.h"
+#include "Containers/Set.h"
+#include "Containers/UnrealString.h"
+#include "HAL/Platform.h"
+#include "HAL/PlatformCrt.h"
 #include "IDocumentation.h"
-#include "Brushes/SlateDynamicImageBrush.h"
+#include "Input/Reply.h"
+#include "Internationalization/Text.h"
+#include "Misc/Attribute.h"
+#include "Templates/SharedPointer.h"
+#include "Types/SlateStructs.h"
+
+class SVerticalBox;
+class SWidget;
+struct FExcerpt;
+struct FSlateDynamicImageBrush;
 
 /** Stores all the metadata that a UDN page can have */
 struct FUDNPageMetadata
@@ -18,7 +26,9 @@ struct FUDNPageMetadata
 		, Title()
 		, Crumbs()
 		, Description()
-		, ExcerptNames() 
+		, ExcerptNames()
+		, ExcerptAliases()
+		, BaseUrl()
 	{}
 
 	FString Availability;
@@ -26,6 +36,8 @@ struct FUDNPageMetadata
 	FText Crumbs;
 	FText Description;
 	TSet< FString > ExcerptNames;
+	TMap< FString, FString > ExcerptAliases;
+	FString BaseUrl;
 };
 
 /** Represents a single UDN Markdown token */
@@ -50,6 +62,7 @@ namespace EUDNToken
 		MetadataTitle,
 		MetadataCrumbs,
 		MetadataDescription,
+		MetadataBaseUrl,
 		Percentage,
 		Asterisk
 	};
@@ -90,10 +103,12 @@ public:
 		MetadataTitle,
 		MetadataCrumbs,
 		MetadataDescription,
+		MetadataBaseUrl,
 		Variable,
 		VariableOpen,
 		VariableClose,
-		BoldContent
+		BoldContent,
+		BulletContent
 	};
 	Type ContentType;
 
@@ -149,6 +164,9 @@ private:
 	/** Adds the content text source to the scrollbox */
 	void AddContentToExcerpt(TSharedPtr<SVerticalBox> Box, const FString& ContentSource, FExcerpt& Excerpt);
 	
+	/** Adds the content text sources to the scrollbox in two columns, emulating a list item with hanging indent */
+	void AddListItemToExcerpt(TSharedPtr<SVerticalBox> Box, const FString& LeftContentSource, const FString& RightContentSource, FExcerpt& Excerpt);
+
 	/** Gets the dynamic brush for the given filename */
 	TSharedPtr<FSlateDynamicImageBrush> GetDynamicBrushFromImagePath(FString Filename);
 

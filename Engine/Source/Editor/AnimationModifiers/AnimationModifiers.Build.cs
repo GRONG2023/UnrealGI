@@ -15,16 +15,16 @@ public class AnimationModifiers : ModuleRules
                 "InputCore",
                 "Slate",
                 "SlateCore",
-                "EditorStyle",
                 "UnrealEd",
                 "MainFrame",
                 "PropertyEditor",
-                "Kismet",
                 "AssetTools",
                 "ClassViewer",
-                "AnimationEditor",
-                "SkeletonEditor",
-                "AssetRegistry"                
+                "AssetRegistry",
+                "AnimationBlueprintLibrary",
+                "DeveloperSettings",
+                "ContentBrowser",
+                "ToolMenus"
             }
 		);
     }

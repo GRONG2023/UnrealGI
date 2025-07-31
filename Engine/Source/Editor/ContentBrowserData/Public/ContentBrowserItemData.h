@@ -2,17 +2,28 @@
 
 #pragma once
 
+#include "Containers/Map.h"
+#include "Containers/StringFwd.h"
+#include "Containers/StringView.h"
+#include "Containers/UnrealString.h"
 #include "CoreMinimal.h"
+#include "Delegates/Delegate.h"
+#include "HAL/Platform.h"
+#include "Internationalization/Text.h"
+#include "Misc/EnumClassFlags.h"
+#include "Misc/StringBuilder.h"
+#include "Templates/SharedPointer.h"
+#include "Templates/TypeHash.h"
+#include "UObject/NameTypes.h"
 #include "UObject/Object.h"
 #include "UObject/WeakObjectPtr.h"
-#include "Misc/StringBuilder.h"
-#include "Containers/StringView.h"
+#include "UObject/WeakObjectPtrTemplates.h"
 
-class UContentBrowserDataSource;
 class IContentBrowserItemDataSink;
+class UContentBrowserDataSource;
 
 /** Flags denoting basic state information for an item instance */
-enum class EContentBrowserItemFlags : uint8
+enum class EContentBrowserItemFlags : uint16
 {
 	/** No flags */
 	None = 0,
@@ -26,13 +37,17 @@ enum class EContentBrowserItemFlags : uint8
 	Category_Asset = 1<<2,
 	Category_Class = 1<<3,
 	Category_Collection = 1<<4,
-	Category_Misc = 1<<5,
-	Category_MASK = Category_Asset | Category_Class | Category_Collection | Category_Misc,
+	Category_Plugin = 1 << 5, // Plugin content or classes - note that folders containing plugins do not have this flag set 
+	Category_Misc = 1<<6,
+	Category_MASK = Category_Asset | Category_Class | Category_Collection | Category_Plugin | Category_Misc,
 
 	/** Flags denoting additional information for temporary items (mutually exclusive) */
-	Temporary_Creation = 1<<6,
-	Temporary_Duplication = 1<<7,
+	Temporary_Creation = 1<<7,
+	Temporary_Duplication = 1<<8,
 	Temporary_MASK = Temporary_Creation | Temporary_Duplication,
+
+	/** Flag to mark the item as showing something that is unsupported */
+	Misc_Unsupported = 1 << 9,
 };
 ENUM_CLASS_FLAGS(EContentBrowserItemFlags);
 
@@ -155,6 +170,19 @@ public:
 	bool IsFile() const;
 
 	/**
+	 * Check to see whether this item is in a plugin. Folders and files inside plugins return true, folders which
+	 * contain and organize plugins do not.
+	 */
+	bool IsPlugin() const;
+
+	/**
+	 * Check if the item is representing a supported item
+	 * The content browser can also display some unsupported asset
+	 * @note Equivalent to testing whether EContentBrowserItemFlags::Misc_Unsupported is not set on GetItemFlags()
+	 */
+	bool IsSupported() const;
+
+	/**
 	 * Check to see whether this item is temporary.
 	 * @note Equivalent to testing whether any of EContentBrowserItemFlags::Temporary_MASK is set on GetItemFlags().
 	 */
@@ -196,9 +224,20 @@ public:
 	EContentBrowserItemFlags GetItemTemporaryReason() const;
 
 	/**
-	 * Get the complete virtual path that uniquely identifies this item within its owner data source (eg, "/MyRoot/MyFolder/MyFile").
+	 * Get the complete virtual path that uniquely identifies this item within its owner data source (eg, "/All/MyRoot/MyFolder/MyFile").
 	 */
 	FName GetVirtualPath() const;
+
+	/**
+	 * Get the complete invariant path that uniquely identifies this item within its owner data source (eg, "/MyRoot/MyFolder/MyFile").
+	 * This path will be the same regardless of the options being toggled 'Show All Folder' or 'Organize Folders'
+	 */
+	FName GetInvariantPath() const;
+
+	/**
+	 * Get the complete internal path that uniquely identifies this item within its owner data source if it has one (eg, "/MyRoot/MyFolder/MyFile").
+	 */
+	FName GetInternalPath() const;
 
 	/**
 	 * Get the leaf-name of this item (eg, "MyFile").
@@ -601,7 +640,7 @@ public:
 	bool operator==(const FContentBrowserItemDataKey& InOther) const
 	{
 		return ItemType == InOther.ItemType
-			&& VirtualPath == InOther.VirtualPath;
+			&& VirtualPath.IsEqual(InOther.VirtualPath, ENameCase::CaseSensitive);
 	}
 
 	/**
@@ -705,4 +744,9 @@ public:
 	 * Notify a wholesale item data update, for data sources that can't provide delta-updates.
 	 */
 	virtual void NotifyItemDataRefreshed() = 0;
+
+	/**
+	 * Converts an internal path to a virtual path.
+	 */
+	virtual void ConvertInternalPathToVirtual(const FStringView InPath, FStringBuilderBase& OutPath) = 0;
 };

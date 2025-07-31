@@ -1,28 +1,51 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "HardwareTargetingSettingsDetails.h"
-#include "Misc/Paths.h"
-#include "Layout/Visibility.h"
-#include "Layout/Margin.h"
-#include "Misc/Attribute.h"
-#include "Input/Reply.h"
-#include "Widgets/DeclarativeSyntaxSupport.h"
-#include "Widgets/SCompoundWidget.h"
-#include "Widgets/SBoxPanel.h"
-#include "Widgets/Text/STextBlock.h"
-#include "Widgets/Text/SRichTextBlock.h"
-#include "Widgets/Layout/SBox.h"
-#include "Widgets/Input/SButton.h"
-#include "EditorStyleSet.h"
-#include "UnrealEdMisc.h"
-#include "PropertyHandle.h"
+
+#include "Containers/Array.h"
+#include "Containers/Map.h"
+#include "Containers/Set.h"
+#include "Containers/UnrealString.h"
+#include "Delegates/Delegate.h"
+#include "DetailCategoryBuilder.h"
 #include "DetailLayoutBuilder.h"
 #include "DetailWidgetRow.h"
-#include "DetailCategoryBuilder.h"
-
-#include "HardwareTargetingSettings.h"
+#include "Fonts/SlateFontInfo.h"
+#include "Framework/Text/TextLayout.h"
+#include "HAL/Platform.h"
+#include "HAL/PlatformCrt.h"
 #include "HardwareTargetingModule.h"
+#include "HardwareTargetingSettings.h"
+#include "Input/Reply.h"
+#include "Internationalization/Internationalization.h"
+#include "Internationalization/Text.h"
+#include "Layout/Children.h"
+#include "Layout/Margin.h"
+#include "Layout/Visibility.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/Attribute.h"
+#include "Misc/Paths.h"
+#include "PropertyHandle.h"
 #include "SSettingsEditorCheckoutNotice.h"
+#include "SlotBase.h"
+#include "Styling/AppStyle.h"
+#include "Types/SlateEnums.h"
+#include "UObject/Class.h"
+#include "UObject/Object.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/UObjectGlobals.h"
+#include "UObject/WeakObjectPtr.h"
+#include "UObject/WeakObjectPtrTemplates.h"
+#include "UnrealEdMisc.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
+#include "Widgets/Input/SButton.h"
+#include "Widgets/Layout/SBox.h"
+#include "Widgets/SBoxPanel.h"
+#include "Widgets/SCompoundWidget.h"
+#include "Widgets/Text/SRichTextBlock.h"
+#include "Widgets/Text/STextBlock.h"
+
+class SWidget;
 
 #define LOCTEXT_NAMESPACE "FHardwareTargetingSettingsDetails"
 
@@ -135,8 +158,8 @@ public:
 				SNew(SRichTextBlock)
 				.AutoWrapText(false)
 				.Justification(ETextJustify::Left)
-				.TextStyle(FEditorStyle::Get(), "HardwareTargets.Normal")
-				.DecoratorStyleSet(&FEditorStyle::Get());
+				.TextStyle(FAppStyle::Get(), "HardwareTargets.Normal")
+				.DecoratorStyleSet(&FAppStyle::Get());
 
 			SettingRegions.Add(Settings.SettingsObject, EditPropertiesBlock);
 
@@ -275,19 +298,18 @@ void FHardwareTargetingSettingsDetails::CustomizeDetails(IDetailLayoutBuilder& D
 		DetailBuilder.HideProperty(PropertyName);
 
 		TSharedRef<IPropertyHandle> Property = DetailBuilder.GetProperty(PropertyName);
-		auto SetPropertyValue = [](EHardwareClass::Type NewValue, TSharedRef<IPropertyHandle> InProperty){
+		auto SetPropertyValue = [](EHardwareClass NewValue, TSharedRef<IPropertyHandle> InProperty){
 			InProperty->SetValue(uint8(NewValue));
 		};
 		auto GetPropertyValue = [](TSharedRef<IPropertyHandle> InProperty){
 			uint8 Value = 0;
 			InProperty->GetValue(Value);
-			return EHardwareClass::Type(Value);
+			return EHardwareClass(Value);
 		};
 		
 		HardwareClassCombo = HardwareTargeting.MakeHardwareClassTargetCombo(
 			FOnHardwareClassChanged::CreateStatic(SetPropertyValue, Property),
-			TAttribute<EHardwareClass::Type>::Create(TAttribute<EHardwareClass::Type>::FGetter::CreateStatic(GetPropertyValue, Property)),
-			Orient_Horizontal
+			TAttribute<EHardwareClass>::Create(TAttribute<EHardwareClass>::FGetter::CreateStatic(GetPropertyValue, Property))
 		);
 	}
 
@@ -297,42 +319,41 @@ void FHardwareTargetingSettingsDetails::CustomizeDetails(IDetailLayoutBuilder& D
 		DetailBuilder.HideProperty(PropertyName);
 
 		TSharedRef<IPropertyHandle> Property = DetailBuilder.GetProperty(PropertyName);
-		auto SetPropertyValue = [](EGraphicsPreset::Type NewValue, TSharedRef<IPropertyHandle> InProperty){
+		auto SetPropertyValue = [](EGraphicsPreset NewValue, TSharedRef<IPropertyHandle> InProperty){
 			InProperty->SetValue(uint8(NewValue));
 		};
 		auto GetPropertyValue = [](TSharedRef<IPropertyHandle> InProperty){
 			uint8 Value = 0;
 			InProperty->GetValue(Value);
-			return EGraphicsPreset::Type(Value);
+			return EGraphicsPreset(Value);
 		};
 		GraphicsPresetCombo = HardwareTargeting.MakeGraphicsPresetTargetCombo(
 			FOnGraphicsPresetChanged::CreateStatic(SetPropertyValue, Property),
-			TAttribute<EGraphicsPreset::Type>::Create(TAttribute<EGraphicsPreset::Type>::FGetter::CreateStatic(GetPropertyValue, Property)),
-			Orient_Horizontal
+			TAttribute<EGraphicsPreset>::Create(TAttribute<EGraphicsPreset>::FGetter::CreateStatic(GetPropertyValue, Property))
 		);
 	}
 
-	HardwareTargetingCategory.AddCustomRow(LOCTEXT("HardwareTargetingOption", "Targeted Hardware:"))
+	HardwareTargetingCategory.AddCustomRow(LOCTEXT("HardwareTargetingOption", "Targeted Hardware"))
 	.NameContent()
 	[
 		SNew(STextBlock)
-		.Text(LOCTEXT("OptimizeProjectFor", "Optimize project settings for:"))
+		.Text(LOCTEXT("OptimizeProjectFor", "Optimize project settings for"))
 		.Font(DetailBuilder.GetDetailFont())
 	]
 	.ValueContent()
 	.MaxDesiredWidth(0)
 	[
 		SNew(SHorizontalBox)
-
 		+ SHorizontalBox::Slot()
 		.Padding(FMargin(10.f, 0.f))
+		.VAlign(VAlign_Center)
 		.AutoWidth()
 		[
 			HardwareClassCombo.ToSharedRef()
 		]
-
 		+ SHorizontalBox::Slot()
 		.Padding(FMargin(0.f, 0.f, 10.f, 0.f))
+		.VAlign(VAlign_Center)
 		.AutoWidth()
 		[
 			GraphicsPresetCombo.ToSharedRef()

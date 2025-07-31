@@ -12,6 +12,9 @@
 #include "BlueprintNodeSpawner.h"
 #include "EditorCategoryUtils.h"
 #include "BlueprintActionDatabaseRegistrar.h"
+#include "Styling/AppStyle.h"
+#include "GameFramework/InputSettings.h"
+#include "Editor.h"								// for FEditorDelegates::OnEnableGestureRecognizerChanged
 
 #define LOCTEXT_NAMESPACE "UK2Node_InputKey"
 
@@ -37,7 +40,7 @@ void UK2Node_InputKey::PostLoad()
 {
 	Super::PostLoad();
 
-	if (GetLinkerUE4Version() < VER_UE4_BLUEPRINT_INPUT_BINDING_OVERRIDES)
+	if (GetLinkerUEVersion() < VER_UE4_BLUEPRINT_INPUT_BINDING_OVERRIDES)
 	{
 		// Don't change existing behaviors
 		bOverrideParentBinding = false;
@@ -194,7 +197,7 @@ FText UK2Node_InputKey::GetTooltipText() const
 
 FSlateIcon UK2Node_InputKey::GetIconAndTint(FLinearColor& OutColor) const
 {
-	return FSlateIcon("EditorStyle", EKeys::GetMenuCategoryPaletteIcon(InputKey.GetMenuCategory()));
+	return FSlateIcon(FAppStyle::GetAppStyleSetName(), EKeys::GetMenuCategoryPaletteIcon(InputKey.GetMenuCategory()));
 }
 
 bool UK2Node_InputKey::IsCompatibleWithGraph(UEdGraph const* Graph) const
@@ -287,7 +290,7 @@ void UK2Node_InputKey::ExpandNode(FKismetCompilerContext& CompilerContext, UEdGr
 		{
 			UEdGraphPin *EachPin = (*PinIt).Pin;
 			// Create the input touch event
-			UK2Node_InputKeyEvent* InputKeyEvent = CompilerContext.SpawnIntermediateEventNode<UK2Node_InputKeyEvent>(this, EachPin, SourceGraph);
+			UK2Node_InputKeyEvent* InputKeyEvent = CompilerContext.SpawnIntermediateNode<UK2Node_InputKeyEvent>(this, SourceGraph);
 			const FName ModifierName = GetModifierName();
 			if ( ModifierName != NAME_None )
 			{
@@ -332,7 +335,7 @@ void UK2Node_InputKey::ExpandNode(FKismetCompilerContext& CompilerContext, UEdGr
 
 		if (InputKeyPin->LinkedTo.Num() > 0)
 		{
-			UK2Node_InputKeyEvent* InputKeyEvent = CompilerContext.SpawnIntermediateEventNode<UK2Node_InputKeyEvent>(this, InputKeyPin, SourceGraph);
+			UK2Node_InputKeyEvent* InputKeyEvent = CompilerContext.SpawnIntermediateNode<UK2Node_InputKeyEvent>(this, SourceGraph);
 			const FName ModifierName = GetModifierName();
 			if ( ModifierName != NAME_None )
 			{
@@ -372,11 +375,18 @@ void UK2Node_InputKey::GetMenuActions(FBlueprintActionDatabaseRegistrar& ActionR
 		InputNode->InputKey = Key;
 	};
 
+	auto RefreshClassActions = []()
+	{
+		FBlueprintActionDatabase::Get().RefreshClassActions(StaticClass());
+	};
+
 	// actions get registered under specific object-keys; the idea is that
 	// actions might have to be updated (or deleted) if their object-key is
 	// mutated (or removed)... here we use the node's class (so if the node
 	// type disappears, then the action should go with it)
 	UClass* ActionKey = GetClass();
+	
+	const bool bAllowGestures = GetDefault<UInputSettings>()->bEnableGestureRecognizer;
 
 	// to keep from needlessly instantiating a UBlueprintNodeSpawner (and
 	// iterating over keys), first check to make sure that the registrar is
@@ -385,10 +395,20 @@ void UK2Node_InputKey::GetMenuActions(FBlueprintActionDatabaseRegistrar& ActionR
 	// corresponding to that asset)
 	if (ActionRegistrar.IsOpenForRegistration(ActionKey))
 	{
+		// Refresh the action database of this node when the input settings are changed
+		static bool bRegisterOnce = true;
+		if (bRegisterOnce)
+		{
+			bRegisterOnce = false;
+			FEditorDelegates::OnEnableGestureRecognizerChanged.AddStatic(RefreshClassActions);
+		}
+		
 		for (const FKey& Key : AllKeys)
 		{
+			// Do not show gesture keys if they are not enabled in the settings
+			const bool bInvalidGestureKey = !bAllowGestures && Key.IsGesture();
 			// these will be handled by UK2Node_GetInputAxisKeyValue and UK2Node_GetInputVectorAxisValue respectively
-			if (!Key.IsBindableInBlueprints() || Key.IsAnalog())
+			if (!Key.IsBindableInBlueprints() || Key.IsAnalog() || bInvalidGestureKey)
 			{
 				continue;
 			}

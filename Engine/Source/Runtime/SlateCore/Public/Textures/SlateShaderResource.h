@@ -5,6 +5,8 @@
 #include "CoreMinimal.h"
 #include "Stats/Stats.h"
 #include "SlateGlobals.h"
+#include "Rendering/SlateRendererTypes.h"
+#include "Rendering/SlateResourceHandle.h"
 
 class FSlateShaderResourceProxy;
 
@@ -38,7 +40,7 @@ namespace ESlateShaderResource
 /** 
  * Base class for all platform independent texture types
  */
-class SLATECORE_API FSlateShaderResource
+class FSlateShaderResource
 {
 public:
 
@@ -62,6 +64,16 @@ public:
 	 * @return Resource type.
 	 */
 	virtual ESlateShaderResource::Type GetType() const = 0;
+
+	/**
+	 * Additional validation that can vary per resource type
+	 */
+	virtual bool IsResourceValid() const { return true; };
+
+	/**
+	 * Does this resource use slate post buffers? If no resources use a post buffer we won't populate it.
+	 */
+	virtual ESlatePostRT GetUsedSlatePostBuffers() const { return ESlatePostRT::None; }
 
 #if SLATE_CHECK_UOBJECT_RENDER_RESOURCES
 	virtual void CheckForStaleResources() const { }
@@ -108,15 +120,15 @@ public:
  * May point to a full resource or point or to a texture resource in an atlas
  * Note: This class does not free any resources.  Resources should be owned and freed elsewhere
  */
-class SLATECORE_API FSlateShaderResourceProxy
+class FSlateShaderResourceProxy
 {
 public:
 
 	/** The start uv of the texture.  If atlased this is some subUV of the atlas, 0,0 otherwise */
-	FVector2D StartUV;
+	FVector2f StartUV;
 
 	/** The size of the texture in UV space.  If atlas this some sub uv of the atlas.  1,1 otherwise */
-	FVector2D SizeUV;
+	FVector2f SizeUV;
 
 	/** The resource to be used for rendering */
 	FSlateShaderResource* Resource;
@@ -132,7 +144,7 @@ public:
 		: StartUV(0.0f, 0.0f)
 		, SizeUV(1.0f, 1.0f)
 		, Resource(nullptr)
-		, ActualSize(0.0f, 0.0f)
+		, ActualSize(0, 0)
 	{ }
 
 	~FSlateShaderResourceProxy()
@@ -200,37 +212,4 @@ class IViewportRenderTargetProvider
 {
 public:
 	virtual FSlateShaderResource* GetViewportRenderTargetTexture() = 0;
-};
-
-/**
- * A SlateResourceHandle is used as fast path for looking up a rendering resource for a given brush when adding Slate draw elements
- * This can be cached and stored safely in code.  It will become invalid when a resource is destroyed
-*/
-class FSlateResourceHandle
-{
-	friend class FSlateShaderResourceManager;
-	friend class FSlateNullShaderResourceManager;
-public:
-	FSlateResourceHandle() {}
-
-	/**
-	 * @return true if the handle still points to a valid rendering resource
-	 */
-	bool IsValid() const { return Data.IsValid() && Data->Proxy; }
-
-	/**
-	 * @return the resource proxy used to render.
-	 */
-	const FSlateShaderResourceProxy* GetResourceProxy() const
-	{
-		return Data.IsValid() ? Data->Proxy : nullptr;
-	}
-
-private:
-	FSlateResourceHandle(const TSharedPtr<FSlateSharedHandleData>& InData)
-		: Data(InData)
-	{}
-
-	/** Internal data to pair the handle to the resource */
-	TSharedPtr<FSlateSharedHandleData> Data;
 };

@@ -2,13 +2,28 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "Kismet/BlueprintFunctionLibrary.h"
+#include "Containers/Array.h"
+#include "Containers/ArrayView.h"
+#include "Containers/ContainerAllocationPolicies.h"
+#include "Containers/UnrealString.h"
 #include "ContentBrowserItemData.h"
+#include "CoreMinimal.h"
+#include "HAL/Platform.h"
+#include "HAL/PlatformCrt.h"
+#include "Internationalization/Text.h"
+#include "Kismet/BlueprintFunctionLibrary.h"
+#include "Templates/TypeHash.h"
+#include "UObject/NameTypes.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/UObjectGlobals.h"
+
 #include "ContentBrowserItem.generated.h"
 
-struct FAssetData;
 class FAssetThumbnail;
+class UContentBrowserDataSource;
+class UObject;
+struct FAssetData;
+struct FFrame;
 
 /**
  * Representation of a Content Browser item.
@@ -121,6 +136,19 @@ public:
 	bool IsFile() const;
 
 	/**
+	 * Check to see whether this item is in a plugin.
+	 * @note Equivalent to testing whether EContentBrowserItemFlags::Category_Plugin is set on GetItemFlags().
+	 */
+	bool IsInPlugin() const;
+
+	/**
+	 * Check if the item is representing a supported item
+	 * The content browser can also display some unsupported asset
+	 * @note Equivalent to testing whether EContentBrowserItemFlags::Misc_Unsupported is not set on GetItemFlags()
+	 */
+	bool IsSupported() const;
+
+	/**
 	 * Check to see whether this item is temporary.
 	 * @note Equivalent to testing whether any of EContentBrowserItemFlags::Temporary_MASK is set on GetItemFlags().
 	 */
@@ -159,6 +187,16 @@ public:
 	 * Get the complete virtual path that uniquely identifies this item within its owner data source (eg, "/MyRoot/MyFolder/MyFile").
 	 */
 	FName GetVirtualPath() const;
+
+	/**
+	 * Gets the path that will not change based on toggling "Show All Folder", "Organize Folders" or other rules (eg,. "/Plugins").
+	 */
+	FName GetInvariantPath() const;
+
+	/**
+	 * Gets the internal path if it has one (eg,. "/Game").
+	 */
+	FName GetInternalPath() const;
 
 	/**
 	 * Get the leaf-name of this item (eg, "MyFile").
@@ -227,6 +265,15 @@ public:
 	 * @return True if the item can be previewed, false otherwise.
 	 */
 	bool CanPreview(FText* OutErrorMsg = nullptr) const;
+
+	/**
+	 * Query whether the given item is can be viewed (a read-only asset editor), optionally providing error information if it cannot.
+	 *
+	 * @param OutErrorMessage Optional error message to fill on failure.
+	 *
+	 * @return True if the item can be viewed in a read-only editor, false otherwise.
+	 */
+	bool CanView(FText* OutErrorMsg = nullptr) const;
 
 	/**
 	 * Attempt to preview this item.
@@ -369,6 +416,9 @@ public:
 	 *
 	 * @return True if the ID was retrieved, false otherwise.
 	 */
+	bool TryGetCollectionId(FSoftObjectPath& OutCollectionId) const;
+
+	UE_DEPRECATED(5.1, "FNames containing full object paths are deprecated. Use FSoftObjectPath instead.")
 	bool TryGetCollectionId(FName & OutCollectionId) const;
 
 	/**

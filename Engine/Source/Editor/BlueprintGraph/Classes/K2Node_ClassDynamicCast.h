@@ -4,10 +4,19 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
+#include "EdGraph/EdGraphNode.h"
+#include "Internationalization/Text.h"
 #include "K2Node.h"
 #include "K2Node_DynamicCast.h"
+#include "Math/Color.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/UObjectGlobals.h"
+
 #include "K2Node_ClassDynamicCast.generated.h"
+
+class FString;
+class UEdGraphPin;
+class UObject;
 
 UCLASS(MinimalAPI)
 class UK2Node_ClassDynamicCast : public UK2Node_DynamicCast
@@ -18,6 +27,7 @@ class UK2Node_ClassDynamicCast : public UK2Node_DynamicCast
 	virtual void AllocateDefaultPins() override;
 	virtual FLinearColor GetNodeTitleColor() const override;
 	virtual FText GetNodeTitle(ENodeTitleType::Type TitleType) const override;
+	virtual FText GetTooltipText() const override;
 	//~ End UEdGraphNode Interface
 
 	//~ Begin UK2Node Interface

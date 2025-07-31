@@ -2,19 +2,37 @@
 
 #pragma once
 
+#include "BlueprintActionFilter.h"
+#include "Containers/Array.h"
+#include "Containers/UnrealString.h"
 #include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
-#include "UObject/Class.h"
+#include "EdGraph/EdGraphNode.h"
+#include "EdGraph/EdGraphNodeUtils.h"
+#include "Engine/MemberReference.h"
+#include "HAL/Platform.h"
+#include "Internationalization/Text.h"
+#include "K2Node.h"
+#include "KismetCompilerMisc.h"
+#include "Math/Color.h"
+#include "Templates/SharedPointer.h"
 #include "Templates/SubclassOf.h"
 #include "Textures/SlateIcon.h"
-#include "Engine/MemberReference.h"
-#include "EdGraph/EdGraphNodeUtils.h"
-#include "K2Node.h"
+#include "UObject/Class.h"
+#include "UObject/NameTypes.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/UObjectGlobals.h"
+
 #include "K2Node_CallFunction.generated.h"
 
+class FArchive;
 class FKismetCompilerContext;
+class FProperty;
 class SWidget;
 class UEdGraph;
+class UEdGraphPin;
+class UFunction;
+class UObject;
+template <typename KeyType, typename ValueType> struct TKeyValuePair;
 
 UCLASS()
 class BLUEPRINTGRAPH_API UK2Node_CallFunction : public UK2Node
@@ -37,12 +55,10 @@ class BLUEPRINTGRAPH_API UK2Node_CallFunction : public UK2Node
 	UPROPERTY()
 	uint32 bIsInterfaceCall:1;
 
-	/** Indicates that this is a call to a final / superclass's function */
-	UPROPERTY()
+	UE_DEPRECATED(5.4, "bIsFinalFunction is deprecated.")
 	uint32 bIsFinalFunction:1;
 
-	/** Indicates that this is a 'bead' function with no fixed location; it is drawn between the nodes that it is wired to */
-	UPROPERTY()
+	UE_DEPRECATED(5.4, "bIsBeadFunction is deprecated")
 	uint32 bIsBeadFunction:1;
 
 	/** The function to call */
@@ -58,9 +74,11 @@ private:
 	UPROPERTY()
 	TSubclassOf<class UObject> CallFunctionClass_DEPRECATED;
 
+protected:
 	/** Constructing FText strings can be costly, so we cache the node's tooltip */
 	FNodeTextCache CachedTooltip;
 
+private:
 	/** Flag used to track validity of pin tooltips, when tooltips are invalid they will be refreshed before being displayed */
 	mutable bool bPinTooltipsValid;
 
@@ -77,6 +95,7 @@ public:
 	virtual void GetPinHoverText(const UEdGraphPin& Pin, FString& HoverTextOut) const override;
 	virtual void AllocateDefaultPins() override;
 	virtual FLinearColor GetNodeTitleColor() const override;
+	virtual FString GetFindReferenceSearchString_Impl(EGetFindReferenceSearchStringFlags InFlags) const override;
 	virtual FText GetTooltipText() const override;
 	virtual FText GetNodeTitle(ENodeTitleType::Type TitleType) const override;
 	virtual FString GetDescriptiveCompiledName() const override;
@@ -89,22 +108,26 @@ public:
 	virtual bool CanPasteHere(const UEdGraph* TargetGraph) const override;
 	virtual void PinDefaultValueChanged(UEdGraphPin* Pin) override;
 	virtual void AddSearchMetaDataInfo(TArray<struct FSearchTagDataPair>& OutTaggedMetaData) const override;
+	virtual void AddPinSearchMetaDataInfo(const UEdGraphPin* Pin, TArray<struct FSearchTagDataPair>& OutTaggedMetaData) const override;
 	virtual TSharedPtr<SWidget> CreateNodeImage() const override;
 	virtual UObject* GetJumpTargetForDoubleClick() const override;
 	virtual bool CanJumpToDefinition() const override;
 	virtual void JumpToDefinition() const override;
+	virtual void GetNodeContextMenuActions(class UToolMenu* Menu, class UGraphNodeContextMenuContext* Context) const override;
 	virtual FString GetPinMetaData(FName InPinName, FName InKey) override;
+	virtual bool HasExternalDependencies(TArray<class UStruct*>* OptionalOutput) const override;
 	// End of UEdGraphNode interface
 
 	// UK2Node interface
 	virtual void ReallocatePinsDuringReconstruction(TArray<UEdGraphPin*>& OldPins) override;
 	virtual bool IsNodePure() const override { return bIsPureFunc; }
-	virtual bool HasExternalDependencies(TArray<class UStruct*>* OptionalOutput) const override;
 	virtual void PostReconstructNode() override;
 	virtual bool ShouldDrawCompact() const override;
-	virtual bool ShouldDrawAsBead() const override;
+	UE_DEPRECATED(5.4, "ShouldDrawAsBead is deprecated")
+	virtual bool ShouldDrawAsBead() const override { return false; }
 	virtual FText GetCompactNodeTitle() const override;
 	virtual void PostPasteNode() override;
+	virtual bool CanSplitPin(const UEdGraphPin* Pin) const override;
 	virtual void ValidateNodeDuringCompilation(class FCompilerResultsLog& MessageLog) const override;
 	virtual bool ShouldShowNodeProperties() const override;
 	virtual void GetRedirectPinNames(const UEdGraphPin& Pin, TArray<FString>& RedirectPinNames) const override;
@@ -141,7 +164,7 @@ public:
 	 * @return	Pointer to the pin that was created
 	 */
 	virtual UEdGraphPin* CreateSelfPin(const UFunction* Function);
-	
+
 	/**
 	 * Creates all of the pins required to call a particular UFunction.
 	 *
@@ -201,6 +224,9 @@ public:
 	/** Used to determine the result of AllowMultipleSelfs() (without having a node instance) */
 	static bool CanFunctionSupportMultipleTargets(UFunction const* InFunction);
 
+	/** Checks if the input function can be called in the input object with respect to editor-only/runtime mismatch*/
+	static bool CanEditorOnlyFunctionBeCalled(const UFunction* InFunction, const UObject* InObject);
+
 	/** */
 	static FSlateIcon GetPaletteIconForFunction(UFunction const* Function, FLinearColor& OutColor);
 
@@ -222,15 +248,25 @@ private:
 	 */
 	bool ReconnectPureExecPins(TArray<UEdGraphPin*>& OldPins);
 
-	/** Invalidates current pin tool tips, so that they will be refreshed before being displayed: */
-	void InvalidatePinTooltips();
-
 	/** Conforms container pins */
 	void ConformContainerPins();
 
 protected:
+
+	/** Invalidates current pin tool tips, so that they will be refreshed before being displayed: */
+	void InvalidatePinTooltips();
+
 	/** Helper function to ensure function is called in our context */
 	virtual void FixupSelfMemberContext();
+
+	/** Adds this function to the suppressed deprecation warnings list for this project */
+	void SuppressDeprecationWarning() const;
+
+	/** Helper function for searching a UFunction for the names of requires pins/params: */
+	static TSet<FName> GetRequiredParamNames(const UFunction* ForFunction);
+
+	/** Routine for validating that all UPARAM(Required) parmas have a connection: */
+	void ValidateRequiredPins(const UFunction* Function, class FCompilerResultsLog& MessageLog) const;
 
 	/** Helper function to find UFunction entries from the skeleton class, use with caution.. */
 	UFunction* GetTargetFunctionFromSkeletonClass() const;

@@ -3,10 +3,19 @@
 #pragma once 
 
 #include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
 #include "GameFramework/Actor.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/UObjectGlobals.h"
 #include "ViewportInteractableInterface.h"
+
 #include "Manipulator.generated.h"
+
+class UActorComponent;
+class UObject;
+class USceneComponent;
+class UViewportInteractor;
+struct FHitResult;
 
 UCLASS()
 class COMPONENTVISUALIZERS_API AManipulator : public AActor, public IViewportInteractableInterface
@@ -39,10 +48,10 @@ private:
 
 	/** The component to transform when this manipulator was moved. */
 	UPROPERTY()
-	USceneComponent* AssociatedComponent;
+	TObjectPtr<USceneComponent> AssociatedComponent;
 
 	/** Visual representation of this manipulator. */
 	UPROPERTY()
-	class UStaticMeshComponent* StaticMeshComponent;
+	TObjectPtr<class UStaticMeshComponent> StaticMeshComponent;
 
 };

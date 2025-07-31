@@ -3,12 +3,18 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
 #include "EdGraph/EdGraphNode.h"
+#include "Internationalization/Text.h"
+#include "Math/Color.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/UObjectGlobals.h"
+
 #include "SoundClassGraphNode.generated.h"
 
 class UEdGraphPin;
 class UEdGraphSchema;
+class UObject;
 class USoundClass;
 
 UCLASS(MinimalAPI)
@@ -18,7 +24,7 @@ class USoundClassGraphNode : public UEdGraphNode
 
 	/** The SoundNode this represents */
 	UPROPERTY(VisibleAnywhere, instanced, Category=Sound)
-	USoundClass*		SoundClass;
+	TObjectPtr<USoundClass>		SoundClass;
 
 	/** Get the Pin that connects to all children */
 	UEdGraphPin* GetChildPin() const { return ChildPin; }

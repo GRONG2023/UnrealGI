@@ -8,8 +8,11 @@
 #include "Fonts/FontTypes.h"
 #include "Fonts/FontCache.h"
 #include "Rendering/DrawElements.h"
+#include "Rendering/SlateDrawBuffer.h"
 #include "Rendering/SlateRenderer.h"
+#if WITH_ENGINE
 #include "TextureResource.h"
+#endif
 #include "Interfaces/ISlateNullRendererModule.h"
 #include "SlateNullRenderer.h"
 
@@ -25,7 +28,7 @@ public:
 #endif
 
 	// FSlateShaderResourceManager interface
-	virtual FSlateShaderResourceProxy* GetShaderResource( const FSlateBrush& InBrush ) override { return nullptr; }
+	virtual FSlateShaderResourceProxy* GetShaderResource(const FSlateBrush& Brush, FVector2f LocalSize, float DrawScale) override { return nullptr; }
 	virtual ISlateAtlasProvider* GetTextureAtlasProvider() { return this; }
 	virtual FSlateResourceHandle GetResourceHandle( const FSlateBrush& InBrush ) override 
 	{
@@ -64,10 +67,10 @@ class FSlateFontAtlasNull : public FSlateFontAtlas
 {
 public:
 	FSlateFontAtlasNull(float AtlasSize)
-		: FSlateFontAtlas(AtlasSize, AtlasSize, true)
+		: FSlateFontAtlas(AtlasSize, AtlasSize, ESlateFontAtlasContentType::Alpha, ESlateTextureAtlasPaddingStyle::PadWithZero)
 	{}
 
-	virtual class FSlateShaderResource* GetSlateTexture() override { return &NullFontTexture; }
+	virtual class FSlateShaderResource* GetSlateTexture() const override { return &NullFontTexture; }
 	virtual class FTextureResource* GetEngineTexture() override
 	{
 #if WITH_ENGINE
@@ -93,17 +96,17 @@ public:
 
 	virtual ~FSlateNullFontAtlasFactory() {}
 
-	virtual FIntPoint GetAtlasSize(const bool InIsGrayscale) const override
+	virtual FIntPoint GetAtlasSize(ESlateFontAtlasContentType InContentType) const override
 	{
 		return FIntPoint(AtlasSize, AtlasSize);
 	}
 
-	virtual TSharedRef<FSlateFontAtlas> CreateFontAtlas(const bool InIsGrayscale) const override
+	virtual TSharedRef<FSlateFontAtlas> CreateFontAtlas(ESlateFontAtlasContentType InContentType) const override
 	{
 		return MakeShareable(new FSlateFontAtlasNull(AtlasSize));
 	}
 
-	virtual TSharedPtr<ISlateFontTexture> CreateNonAtlasedTexture(const uint32 InWidth, const uint32 InHeight, const bool InIsGrayscale, const TArray<uint8>& InRawData) const override
+	virtual TSharedPtr<ISlateFontTexture> CreateNonAtlasedTexture(const uint32 InWidth, const uint32 InHeight, ESlateFontAtlasContentType InContentType, const TArray<uint8>& InRawData) const override
 	{
 		return nullptr;
 	}

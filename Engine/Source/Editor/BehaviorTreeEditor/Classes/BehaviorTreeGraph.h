@@ -2,13 +2,21 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
 #include "AIGraph.h"
+#include "Containers/Set.h"
+#include "CoreMinimal.h"
+#include "HAL/Platform.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/UObjectGlobals.h"
+
 #include "BehaviorTreeGraph.generated.h"
 
+class UBehaviorTreeGraphNode_Root;
+class UEdGraphNode;
+class UObject;
+
 UCLASS()
-class UBehaviorTreeGraph : public UAIGraph
+class BEHAVIORTREEEDITOR_API UBehaviorTreeGraph : public UAIGraph
 {
 	GENERATED_UCLASS_BODY()
 
@@ -26,6 +34,9 @@ class UBehaviorTreeGraph : public UAIGraph
 	UPROPERTY()
 	bool bIsUsingModCounter;
 
+	UPROPERTY()
+	TSubclassOf<UBehaviorTreeGraphNode_Root> RootNodeClass;
+
 	virtual void OnCreated() override;
 	virtual void OnLoaded() override;
 	virtual void Initialize() override;
@@ -35,6 +46,8 @@ class UBehaviorTreeGraph : public UAIGraph
 	virtual void MarkVersion() override;
 	virtual void UpdateAsset(int32 UpdateFlags = 0) override;
 	virtual void OnSubNodeDropped() override;
+
+	virtual bool DoesSupportServices() const { return true; }
 
 	void UpdateBlackboardChange();
 	void UpdateAbortHighlight(struct FAbortDrawHelper& Mode0, struct FAbortDrawHelper& Mode1);

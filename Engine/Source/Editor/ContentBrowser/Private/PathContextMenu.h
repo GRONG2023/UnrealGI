@@ -2,12 +2,18 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "Input/Reply.h"
+#include "Containers/Array.h"
 #include "ContentBrowserItem.h"
+#include "ContentBrowserItemData.h"
+#include "Delegates/Delegate.h"
+#include "HAL/Platform.h"
+#include "Input/Reply.h"
+#include "Internationalization/Text.h"
+#include "Math/Color.h"
+#include "Templates/SharedPointer.h"
 
 class FExtender;
-class FMenuBuilder;
+class FString;
 class SWidget;
 class SWindow;
 class UToolMenu;
@@ -31,6 +37,10 @@ public:
 	/** Delegate for when the context menu has successfully toggled the favorite status of a folder */
 	DECLARE_DELEGATE_OneParam(FOnFolderFavoriteToggled, const TArray<FString>& /*FoldersToToggle*/)
 	void SetOnFolderFavoriteToggled(const FOnFolderFavoriteToggled& InOnFolderFavoriteToggled);
+
+	/* Delegate for when the context menu has succesfully toggled the private content edit mode of a folder*/
+	DECLARE_DELEGATE_OneParam(FOnPrivateContentEditToggled, const TArray<FString>& /*FolderVirtualPaths*/)
+	void SetOnPrivateContentEditToggled(const FOnPrivateContentEditToggled& InOnPrivateContentEditableToggled);
 
 	/** Gets the currently selected folders */
 	const TArray<FContentBrowserItem>& GetSelectedFolders() const;
@@ -74,23 +84,37 @@ public:
 	/** Handler for favoriting */
 	void ExecuteFavorite();
 
+	/* Handler for enabling private content editing*/
+	void ExecutePrivateContentEdit();
+
 	/** Handler for when "Save" is selected */
 	void ExecuteSaveFolder();
 
 	/** Handler for when "Resave" is selected */
 	void ExecuteResaveFolder();
 
+	/** Handler for when "Copy AssetPath" is selected */
+	void CopySelectedFolder();
+
 	/** Handler for when "Delete" is selected and the delete was confirmed */
 	FReply ExecuteDeleteFolderConfirmed();
 
+	/** Get the parent widget for which this menu was summoned. */
+	TSharedPtr<SWidget> GetParentContent() const { return ParentContent.Pin(); }
+
 private:
+	/** Get tooltip for delete */
+	FText GetDeleteToolTip() const;
+
 	void SaveFilesWithinSelectedFolders(EContentBrowserItemSaveFlags InSaveFlags);
+	
+	void CopySelectedFoldersToClipoard();
 
 	/** Checks to see if any of the selected paths use custom colors */
 	bool SelectedHasCustomColors() const;
 
-	/** Callback when the color picker dialog has been closed */
-	void NewColorComplete(const TSharedRef<SWindow>& Window);
+	/** Callback when the color picker dialog changed the color. */
+	void OnLinearColorValueChanged(const FLinearColor InColor);
 
 	/** Callback when the color is picked from the set color submenu */
 	FReply OnColorClicked( const FLinearColor InColor );
@@ -104,4 +128,5 @@ private:
 	FOnRenameFolderRequested OnRenameFolderRequested;
 	FOnFolderDeleted OnFolderDeleted;
 	FOnFolderFavoriteToggled OnFolderFavoriteToggled;
+	FOnPrivateContentEditToggled OnPrivateContentEditToggled;
 };

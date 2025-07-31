@@ -4,14 +4,23 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
+#include "EdGraph/EdGraphNode.h"
+#include "HAL/Platform.h"
+#include "Internationalization/Text.h"
 #include "K2Node.h"
+#include "KismetCompilerMisc.h"
+#include "Math/Color.h"
 #include "Textures/SlateIcon.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/UObjectGlobals.h"
+
 #include "K2Node_Literal.generated.h"
 
 class AActor;
 class FBlueprintActionDatabaseRegistrar;
 class UEdGraphPin;
+class UObject;
 
 UCLASS(MinimalAPI)
 class UK2Node_Literal : public UK2Node
@@ -21,7 +30,7 @@ class UK2Node_Literal : public UK2Node
 private:
 	/** If this is an object reference literal, keep a reference here so that it can be updated as objects move around */
 	UPROPERTY()
-	class UObject* ObjectRef;
+	TObjectPtr<class UObject> ObjectRef;
 
 public:
 

@@ -6,12 +6,12 @@
 #include "Fonts/FontBulkData.h"
 #include "Misc/FileHelper.h"
 #include "Algo/BinarySearch.h"
-#include "HAL/LowLevelMemTracker.h"
 #include "Internationalization/Culture.h"
 #include "Internationalization/Internationalization.h"
 #include "Application/SlateApplicationBase.h"
 #include "Async/Async.h"
 #include "HAL/PlatformProcess.h"
+#include "Trace/SlateMemoryTags.h"
 
 static bool GAsyncFontLazyLoad = false;
 FAutoConsoleVariableRef CVarAsyncLazyLoad(
@@ -246,7 +246,7 @@ void FCachedCompositeFontData::RefreshFontRanges()
 					FInt32Range::BoundsType::Inclusive(ThisRange.Range.GetLowerBoundValue()), 
 					FInt32Range::BoundsType::Inclusive(FMath::Max(ThisRange.Range.GetUpperBoundValue(), NextRange.Range.GetUpperBoundValue()))
 					);
-				InFontRanges.RemoveAt(RangeIndex + 1, 1, /*bAllowShrinking*/false);
+				InFontRanges.RemoveAt(RangeIndex + 1, 1, EAllowShrinking::No);
 			}
 		}
 	};
@@ -386,7 +386,7 @@ const FFontData& FCompositeFontCache::GetFontDataForCodepoint(const FSlateFontIn
 
 TSharedPtr<FFreeTypeFace> FCompositeFontCache::GetFontFace(const FFontData& InFontData)
 {
-	LLM_SCOPE(ELLMTag::UI);
+	LLM_SCOPE_BYTAG(UI_Text);
 
 	TSharedPtr<FFreeTypeFace> FaceAndMemory = FontFaceMap.FindRef(InFontData);
 	if (!FaceAndMemory.IsValid() && InFontData.HasFont())
@@ -448,12 +448,19 @@ TSharedPtr<FFreeTypeFace> FCompositeFontCache::GetFontFace(const FFontData& InFo
 		// Got a valid font?
 		if (FaceAndMemory.IsValid())
 		{
+			FaceAndMemory->OverrideAscent(InFontData.IsAscendOverridden(), InFontData.GetAscendOverriddenValue());
+			FaceAndMemory->OverrideDescent(InFontData.IsDescendOverridden(), InFontData.GetDescendOverriddenValue());
+
 			FontFaceMap.Add(InFontData, FaceAndMemory);
 
 			if (!LoadLogMessage.IsEmpty())
 			{
 				UE_LOG(LogSlate, Log, TEXT("%s"), *LoadLogMessage);
 			}
+
+#if WITH_EDITOR //Triggers texts layout regeneration only in editor, don't want to slow down things in engine.
+			GSlateLayoutGeneration++;
+#endif
 		}
 		else
 		{
@@ -531,9 +538,9 @@ void FCompositeFontCache::Update()
 	}
 }
 
-uint32 FCompositeFontCache::GetFontDataAssetResidentMemory(const UObject* FontDataAsset) const
+SIZE_T FCompositeFontCache::GetFontDataAssetResidentMemory(const UObject* FontDataAsset) const
 {
-	int32 TotalAllocatedSize = 0;
+	SIZE_T TotalAllocatedSize = 0;
 	for (const TPair<FFontData, TSharedPtr<FFreeTypeFace>>& FaceAndMemoryData : FontFaceMap)
 	{
 		const FFontData& ExistingFontData = FaceAndMemoryData.Key;

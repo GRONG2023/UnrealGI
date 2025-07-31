@@ -14,11 +14,12 @@
 #include "GlobalShader.h"
 #include "ShaderParameterUtils.h"
 #include "SceneView.h"
+#include "StereoRenderUtils.h"
 
 struct FScreenVertex
 {
-	FVector2D Position;
-	FVector2D UV;
+	FVector2f Position;
+	FVector2f UV;
 };
 
 inline bool operator== (const FScreenVertex &a, const FScreenVertex &b)
@@ -40,10 +41,10 @@ public:
 	// Destructor.
 	virtual ~FScreenVertexDeclaration() {}
 
-	virtual void InitRHI() override
+	virtual void InitRHI(FRHICommandListBase& RHICmdList) override
 	{
 		FVertexDeclarationElementList Elements;
-		uint32 Stride = sizeof(FScreenVertex);
+		uint16 Stride = sizeof(FScreenVertex);
 		Elements.Add(FVertexElement(0,STRUCT_OFFSET(FScreenVertex,Position),VET_Float2,0,Stride));
 		Elements.Add(FVertexElement(0,STRUCT_OFFSET(FScreenVertex,UV),VET_Float2,1,Stride));
 		VertexDeclarationRHI = RHICreateVertexDeclaration(Elements);
@@ -75,19 +76,66 @@ public:
 	}
 	FScreenPS() {}
 
-	void SetParameters(FRHICommandList& RHICmdList, const FTexture* Texture)
+	void SetParameters(FRHIBatchedShaderParameters& BatchedParameters, const FTexture* Texture)
 	{
-		SetTextureParameter(RHICmdList, RHICmdList.GetBoundPixelShader(),InTexture,InTextureSampler,Texture);
+		SetTextureParameter(BatchedParameters,InTexture,InTextureSampler,Texture);
 	}
 
+	void SetParameters(FRHIBatchedShaderParameters& BatchedParameters, FRHISamplerState* SamplerStateRHI, FRHITexture* TextureRHI)
+	{
+		SetTextureParameter(BatchedParameters,InTexture,InTextureSampler,SamplerStateRHI,TextureRHI);
+	}
+
+	UE_DEPRECATED(5.3, "SetParameters with FRHIBatchedShaderParameters should be used.")
+	void SetParameters(FRHICommandList& RHICmdList, const FTexture* Texture)
+	{
+		FRHIBatchedShaderParameters& BatchedParameters = RHICmdList.GetScratchShaderParameters();
+		SetParameters(BatchedParameters, Texture);
+		RHICmdList.SetBatchedShaderParameters(RHICmdList.GetBoundPixelShader(), BatchedParameters);
+	}
+
+	UE_DEPRECATED(5.3, "SetParameters with FRHIBatchedShaderParameters should be used.")
 	void SetParameters(FRHICommandList& RHICmdList, FRHISamplerState* SamplerStateRHI, FRHITexture* TextureRHI)
 	{
-		SetTextureParameter(RHICmdList, RHICmdList.GetBoundPixelShader(),InTexture,InTextureSampler,SamplerStateRHI,TextureRHI);
+		FRHIBatchedShaderParameters& BatchedParameters = RHICmdList.GetScratchShaderParameters();
+		SetParameters(BatchedParameters, SamplerStateRHI, TextureRHI);
+		RHICmdList.SetBatchedShaderParameters(RHICmdList.GetBoundPixelShader(), BatchedParameters);
 	}
 
 private:
 	LAYOUT_FIELD(FShaderResourceParameter, InTexture);
 	LAYOUT_FIELD(FShaderResourceParameter, InTextureSampler);
+};
+
+/**
+ * A pixel shader for rendering a textured screen element, taking only the first slice of the array
+ */
+class FScreenFromSlice0PS : public FScreenPS
+{
+	DECLARE_EXPORTED_SHADER_TYPE(FScreenFromSlice0PS, Global, ENGINE_API);
+public:
+
+	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
+	{ 
+		if (FScreenPS::ShouldCompilePermutation(Parameters))
+		{
+			UE::StereoRenderUtils::FStereoShaderAspects Aspects(Parameters.Platform);
+			return Aspects.IsMobileMultiViewEnabled();
+		}
+		return false;
+	}
+
+	static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment)
+	{
+		FScreenPS::ModifyCompilationEnvironment(Parameters, OutEnvironment);
+		OutEnvironment.SetDefine(TEXT("SCREEN_PS_FROM_SLICE0"), 1);
+	}
+
+	FScreenFromSlice0PS(const ShaderMetaType::CompiledShaderInitializerType& Initializer) :
+		FScreenPS(Initializer)
+	{
+	}
+	FScreenFromSlice0PS() {}
 };
 
 
@@ -109,14 +157,30 @@ public:
 	}
 	FScreenPSInvertAlpha() {}
 
-	void SetParameters(FRHICommandList& RHICmdList, const FTexture* Texture)
+	void SetParameters(FRHIBatchedShaderParameters& BatchedParameters, const FTexture* Texture)
 	{
-		SetTextureParameter(RHICmdList, RHICmdList.GetBoundPixelShader(), InTexture, InTextureSampler, Texture);
+		SetTextureParameter(BatchedParameters, InTexture, InTextureSampler, Texture);
 	}
 
+	void SetParameters(FRHIBatchedShaderParameters& BatchedParameters, FRHISamplerState* SamplerStateRHI, FRHITexture* TextureRHI)
+	{
+		SetTextureParameter(BatchedParameters, InTexture, InTextureSampler, SamplerStateRHI, TextureRHI);
+	}
+
+	UE_DEPRECATED(5.3, "SetParameters with FRHIBatchedShaderParameters should be used.")
+	void SetParameters(FRHICommandList& RHICmdList, const FTexture* Texture)
+	{
+		FRHIBatchedShaderParameters& BatchedParameters = RHICmdList.GetScratchShaderParameters();
+		SetParameters(BatchedParameters, Texture);
+		RHICmdList.SetBatchedShaderParameters(RHICmdList.GetBoundPixelShader(), BatchedParameters);
+	}
+
+	UE_DEPRECATED(5.3, "SetParameters with FRHIBatchedShaderParameters should be used.")
 	void SetParameters(FRHICommandList& RHICmdList, FRHISamplerState* SamplerStateRHI, FRHITexture* TextureRHI)
 	{
-		SetTextureParameter(RHICmdList, RHICmdList.GetBoundPixelShader(), InTexture, InTextureSampler, SamplerStateRHI, TextureRHI);
+		FRHIBatchedShaderParameters& BatchedParameters = RHICmdList.GetScratchShaderParameters();
+		SetParameters(BatchedParameters, SamplerStateRHI, TextureRHI);
+		RHICmdList.SetBatchedShaderParameters(RHICmdList.GetBoundPixelShader(), BatchedParameters);
 	}
 
 private:
@@ -142,14 +206,30 @@ public:
 	}
 	FScreenPSsRGBSource() {}
 
-	void SetParameters(FRHICommandList& RHICmdList, const FTexture* Texture)
+	void SetParameters(FRHIBatchedShaderParameters& BatchedParameters, const FTexture* Texture)
 	{
-		SetTextureParameter(RHICmdList, RHICmdList.GetBoundPixelShader(), InTexture, InTextureSampler, Texture);
+		SetTextureParameter(BatchedParameters, InTexture, InTextureSampler, Texture);
 	}
 
+	void SetParameters(FRHIBatchedShaderParameters& BatchedParameters, FRHISamplerState* SamplerStateRHI, FRHITexture* TextureRHI)
+	{
+		SetTextureParameter(BatchedParameters, InTexture, InTextureSampler, SamplerStateRHI, TextureRHI);
+	}
+
+	UE_DEPRECATED(5.3, "SetParameters with FRHIBatchedShaderParameters should be used.")
+	void SetParameters(FRHICommandList& RHICmdList, const FTexture* Texture)
+	{
+		FRHIBatchedShaderParameters& BatchedParameters = RHICmdList.GetScratchShaderParameters();
+		SetParameters(BatchedParameters, Texture);
+		RHICmdList.SetBatchedShaderParameters(RHICmdList.GetBoundPixelShader(), BatchedParameters);
+	}
+
+	UE_DEPRECATED(5.3, "SetParameters with FRHIBatchedShaderParameters should be used.")
 	void SetParameters(FRHICommandList& RHICmdList, FRHISamplerState* SamplerStateRHI, FRHITexture* TextureRHI)
 	{
-		SetTextureParameter(RHICmdList, RHICmdList.GetBoundPixelShader(), InTexture, InTextureSampler, SamplerStateRHI, TextureRHI);
+		FRHIBatchedShaderParameters& BatchedParameters = RHICmdList.GetScratchShaderParameters();
+		SetParameters(BatchedParameters, SamplerStateRHI, TextureRHI);
+		RHICmdList.SetBatchedShaderParameters(RHICmdList.GetBoundPixelShader(), BatchedParameters);
 	}
 
 private:
@@ -176,16 +256,32 @@ public:
 	}
 	FScreenPSMipLevel() {}
 
-	void SetParameters(FRHICommandList& RHICmdList, const FTexture* Texture, int MipLevel = 0)
+	void SetParameters(FRHIBatchedShaderParameters& BatchedParameters, const FTexture* Texture, int MipLevel = 0)
 	{
-		SetTextureParameter(RHICmdList, RHICmdList.GetBoundPixelShader(), InTexture, InTextureSampler, Texture);
-		SetShaderValue(RHICmdList, RHICmdList.GetBoundPixelShader(), InMipLevelParameter, MipLevel);
+		SetTextureParameter(BatchedParameters, InTexture, InTextureSampler, Texture);
+		SetShaderValue(BatchedParameters, InMipLevelParameter, MipLevel);
 	}
 
+	void SetParameters(FRHIBatchedShaderParameters& BatchedParameters, FRHISamplerState* SamplerStateRHI, FRHITexture* TextureRHI, int MipLevel = 0)
+	{
+		SetTextureParameter(BatchedParameters, InTexture, InTextureSampler, SamplerStateRHI, TextureRHI);
+		SetShaderValue(BatchedParameters, InMipLevelParameter, MipLevel);
+	}
+
+	UE_DEPRECATED(5.3, "SetParameters with FRHIBatchedShaderParameters should be used.")
+	void SetParameters(FRHICommandList& RHICmdList, const FTexture* Texture, int MipLevel = 0)
+	{
+		FRHIBatchedShaderParameters& BatchedParameters = RHICmdList.GetScratchShaderParameters();
+		SetParameters(BatchedParameters, Texture, MipLevel);
+		RHICmdList.SetBatchedShaderParameters(RHICmdList.GetBoundPixelShader(), BatchedParameters);
+	}
+
+	UE_DEPRECATED(5.3, "SetParameters with FRHIBatchedShaderParameters should be used.")
 	void SetParameters(FRHICommandList& RHICmdList, FRHISamplerState* SamplerStateRHI, FRHITexture* TextureRHI, int MipLevel = 0)
 	{
-		SetTextureParameter(RHICmdList, RHICmdList.GetBoundPixelShader(), InTexture, InTextureSampler, SamplerStateRHI, TextureRHI);
-		SetShaderValue(RHICmdList, RHICmdList.GetBoundPixelShader(), InMipLevelParameter, MipLevel);
+		FRHIBatchedShaderParameters& BatchedParameters = RHICmdList.GetScratchShaderParameters();
+		SetParameters(BatchedParameters, SamplerStateRHI, TextureRHI, MipLevel);
+		RHICmdList.SetBatchedShaderParameters(RHICmdList.GetBoundPixelShader(), BatchedParameters);
 	}
 
 private:
@@ -213,16 +309,32 @@ public:
 	}
 	FScreenPSsRGBSourceMipLevel() {}
 
-	void SetParameters(FRHICommandList& RHICmdList, const FTexture* Texture, int MipLevel = 0)
+	void SetParameters(FRHIBatchedShaderParameters& BatchedParameters, const FTexture* Texture, int MipLevel = 0)
 	{
-		SetTextureParameter(RHICmdList, RHICmdList.GetBoundPixelShader(), InTexture, InTextureSampler, Texture);
-		SetShaderValue(RHICmdList, RHICmdList.GetBoundPixelShader(), InMipLevelParameter, MipLevel);
+		SetTextureParameter(BatchedParameters, InTexture, InTextureSampler, Texture);
+		SetShaderValue(BatchedParameters, InMipLevelParameter, MipLevel);
 	}
 
+	void SetParameters(FRHIBatchedShaderParameters& BatchedParameters, FRHISamplerState* SamplerStateRHI, FRHITexture* TextureRHI, int MipLevel = 0)
+	{
+		SetTextureParameter(BatchedParameters, InTexture, InTextureSampler, SamplerStateRHI, TextureRHI);
+		SetShaderValue(BatchedParameters, InMipLevelParameter, MipLevel);
+	}
+
+	UE_DEPRECATED(5.3, "SetParameters with FRHIBatchedShaderParameters should be used.")
+	void SetParameters(FRHICommandList& RHICmdList, const FTexture* Texture, int MipLevel = 0)
+	{
+		FRHIBatchedShaderParameters& BatchedParameters = RHICmdList.GetScratchShaderParameters();
+		SetParameters(BatchedParameters, Texture, MipLevel);
+		RHICmdList.SetBatchedShaderParameters(RHICmdList.GetBoundPixelShader(), BatchedParameters);
+	}
+
+	UE_DEPRECATED(5.3, "SetParameters with FRHIBatchedShaderParameters should be used.")
 	void SetParameters(FRHICommandList& RHICmdList, FRHISamplerState* SamplerStateRHI, FRHITexture* TextureRHI, int MipLevel = 0)
 	{
-		SetTextureParameter(RHICmdList, RHICmdList.GetBoundPixelShader(), InTexture, InTextureSampler, SamplerStateRHI, TextureRHI);
-		SetShaderValue(RHICmdList, RHICmdList.GetBoundPixelShader(), InMipLevelParameter, MipLevel);
+		FRHIBatchedShaderParameters& BatchedParameters = RHICmdList.GetScratchShaderParameters();
+		SetParameters(BatchedParameters, SamplerStateRHI, TextureRHI, MipLevel);
+		RHICmdList.SetBatchedShaderParameters(RHICmdList.GetBoundPixelShader(), BatchedParameters);
 	}
 
 private:
@@ -247,15 +359,31 @@ public:
 
     FScreenPS_OSE() {}
 
-    void SetParameters(FRHICommandList& RHICmdList, const FTexture* Texture)
+    void SetParameters(FRHIBatchedShaderParameters& BatchedParameters, const FTexture* Texture)
     {
-        SetTextureParameter(RHICmdList, RHICmdList.GetBoundPixelShader(),InTexture,InTextureSampler,Texture);
-    }
+		SetTextureParameter(BatchedParameters, InTexture, InTextureSampler, Texture);
+	}
 
-    void SetParameters(FRHICommandList& RHICmdList, FRHISamplerState* SamplerStateRHI, FRHITexture* TextureRHI)
+    void SetParameters(FRHIBatchedShaderParameters& BatchedParameters, FRHISamplerState* SamplerStateRHI, FRHITexture* TextureRHI)
     {
-        SetTextureParameter(RHICmdList, RHICmdList.GetBoundPixelShader(),InTexture,InTextureSampler,SamplerStateRHI,TextureRHI);
-    }
+		SetTextureParameter(BatchedParameters, InTexture, InTextureSampler, SamplerStateRHI, TextureRHI);
+	}
+
+	UE_DEPRECATED(5.3, "SetParameters with FRHIBatchedShaderParameters should be used.")
+	void SetParameters(FRHICommandList& RHICmdList, const FTexture* Texture)
+	{
+		FRHIBatchedShaderParameters& BatchedParameters = RHICmdList.GetScratchShaderParameters();
+		SetParameters(BatchedParameters, Texture);
+		RHICmdList.SetBatchedShaderParameters(RHICmdList.GetBoundPixelShader(), BatchedParameters);
+	}
+
+	UE_DEPRECATED(5.3, "SetParameters with FRHIBatchedShaderParameters should be used.")
+	void SetParameters(FRHICommandList& RHICmdList, FRHISamplerState* SamplerStateRHI, FRHITexture* TextureRHI)
+	{
+		FRHIBatchedShaderParameters& BatchedParameters = RHICmdList.GetScratchShaderParameters();
+		SetParameters(BatchedParameters, SamplerStateRHI, TextureRHI);
+		RHICmdList.SetBatchedShaderParameters(RHICmdList.GetBoundPixelShader(), BatchedParameters);
+	}
 
 private:
 	LAYOUT_FIELD(FShaderResourceParameter, InTexture);
@@ -278,9 +406,17 @@ public:
 	}
 	FScreenVS() {}
 
+	void SetParameters(FRHIBatchedShaderParameters& BatchedParameters, FRHIUniformBuffer* ViewUniformBuffer)
+	{
+		FGlobalShader::SetParameters<FViewUniformShaderParameters>(BatchedParameters, ViewUniformBuffer);
+	}
+
+	UE_DEPRECATED(5.3, "SetParameters with FRHIBatchedShaderParameters should be used.")
 	void SetParameters(FRHICommandList& RHICmdList, FRHIUniformBuffer* ViewUniformBuffer)
 	{
-		FGlobalShader::SetParameters<FViewUniformShaderParameters>(RHICmdList, RHICmdList.GetBoundVertexShader(), ViewUniformBuffer);
+		FRHIBatchedShaderParameters& BatchedParameters = RHICmdList.GetScratchShaderParameters();
+		FGlobalShader::SetParameters<FViewUniformShaderParameters>(BatchedParameters, ViewUniformBuffer);
+		RHICmdList.SetBatchedShaderParameters(RHICmdList.GetBoundVertexShader(), BatchedParameters);
 	}
 };
 

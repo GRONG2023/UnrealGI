@@ -2,19 +2,27 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
 #include "BehaviorTreeGraphNode.h"
+#include "CoreMinimal.h"
+#include "EdGraph/EdGraphNode.h"
+#include "Internationalization/Text.h"
+#include "UObject/NameTypes.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/UObjectGlobals.h"
+
 #include "BehaviorTreeGraphNode_Root.generated.h"
+
+class UObject;
 
 /** Root node of this behavior tree, holds Blackboard data */
 UCLASS()
-class UBehaviorTreeGraphNode_Root : public UBehaviorTreeGraphNode
+class BEHAVIORTREEEDITOR_API UBehaviorTreeGraphNode_Root : public UBehaviorTreeGraphNode
 {
 	GENERATED_UCLASS_BODY()
 
 	UPROPERTY(EditAnywhere, Category="AI|BehaviorTree")
-	class UBlackboardData* BlackboardAsset;
+	TObjectPtr<class UBlackboardData> BlackboardAsset;
 
 	virtual void PostPlacedNewNode() override;
 	virtual void AllocateDefaultPins() override;
@@ -30,6 +38,8 @@ class UBehaviorTreeGraphNode_Root : public UBehaviorTreeGraphNode
 	virtual void PostEditChangeProperty( struct FPropertyChangedEvent& PropertyChangedEvent) override;
 	virtual void PostEditUndo() override;
 	virtual FText GetDescription() const override;
+
+	virtual FLinearColor GetBackgroundColor(bool bIsActiveForDebugger) const override;
 
 	/** notify behavior tree about blackboard change */
 	void UpdateBlackboard();

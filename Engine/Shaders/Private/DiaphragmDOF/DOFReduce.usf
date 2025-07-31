@@ -45,7 +45,7 @@
 
 
 // Configures the neighborhood analysis method to use for slight out of focus early out.
-#if COMPILER_SUPPORTS_WAVE_BIT_ORAND && (PS4_PROFILE || XBOXONE_PROFILE)
+#if COMPILER_SUPPORTS_WAVE_BIT_ORAND && (COMPILER_PSSL || XBOXONE_PROFILE)
 	// GCN only optimisation 
 	#define SCATTER_ALLOC_METHOD (SCATTER_ALLOC_METHOD_WAVE)
 	
@@ -294,6 +294,11 @@ void ReduceCS(
 	{
 		GatheredColor = GatherInput_SceneColor.SampleLevel(GlobalPointClampedSampler, BufferUV, 0);
 		CocRadius = GatherInput_SeparateCoc.SampleLevel(GlobalPointClampedSampler, BufferUV, 0).r;
+
+		// Convert from translucency to opacity.
+		#if !DIM_DISABLE_OUTPUT_MIP0
+			GatheredColor.a = 1.0 - GatheredColor.a;
+		#endif
 	}
 	#else
 	{
@@ -303,11 +308,7 @@ void ReduceCS(
 	#endif
 
 	// Sample the frame exposure to SGPR.
-	#if USE_PREEXPOSURE
-		float FrameExposureScale = ToScalarMemory(EyeAdaptationLookup() * View.OneOverPreExposure);
-	#else
-		float FrameExposureScale = ToScalarMemory(EyeAdaptationLookup());
-	#endif
+	float FrameExposureScale = ToScalarMemory(EyeAdaptationLookup() * View.OneOverPreExposure);
 
 	// Indirect dispatch 
 	#if DIM_HYBRID_SCATTER_FGD || DIM_HYBRID_SCATTER_BGD
@@ -377,7 +378,7 @@ void ReduceCS(
 			}
 		}
 
-		uint ScatteringGroupMask = 1 << ScatteringGroupIndex;
+		uint ScatteringGroupMask = 1u << ScatteringGroupIndex;
 		
 		const float ScatterFactorThreshold = 0.01;
 		bool bScatterThisColor = ScatterFactor > ScatterFactorThreshold;
@@ -389,11 +390,11 @@ void ReduceCS(
 		#if SCATTER_ALLOC_METHOD == SCATTER_ALLOC_METHOD_WAVE
 		{
 			#if DIM_HYBRID_SCATTER_FGD
-				ForegroundScatterGroupMask = WaveAllBitOr((bScatterThisColor && bIsForeground) ? ScatteringGroupMask : 0);
+				ForegroundScatterGroupMask = WaveActiveBitOr((bScatterThisColor && bIsForeground) ? ScatteringGroupMask : 0);
 			#endif
 			
 			#if DIM_HYBRID_SCATTER_BGD
-				BackgroundScatterGroupMask = WaveAllBitOr((bScatterThisColor && !bIsForeground) ? ScatteringGroupMask : 0);
+				BackgroundScatterGroupMask = WaveActiveBitOr((bScatterThisColor && !bIsForeground) ? ScatteringGroupMask : 0);
 			#endif
 		}
 		#elif SCATTER_ALLOC_METHOD == SCATTER_ALLOC_METHOD_ATOMIC
@@ -482,7 +483,7 @@ void ReduceCS(
 		
 		// Intensity loss factor caused by the area of confusion.
 		// TODO: no need min()
-		float IntensityLossFactor = min(1, SafeRcp(PI * CocRadius * CocRadius, 1.0));
+		float IntensityLossFactor = min(1, SafeRcp(PI * CocRadius * CocRadius, 1.0) * CocSqueeze);
 
 		// Enqueue scattering group in foreground scatter draw list.
 		BRANCH
@@ -562,10 +563,10 @@ void ReduceCS(
 		for (uint i = 0; i < (DIM_REDUCE_MIP_COUNT - 1); i++)
 		{
 			// Multiplier that needs to be applied on Coc computation to be resolution independent.
-			DownsampleParams.CocRadiusMultiplier = 0.5 / float(1 << (i));
+			DownsampleParams.CocRadiusMultiplier = 0.5 / float(1u << (i));
 
 			// Scale of the reduction within the 8x8 tile.
-			const uint ReductionScale = 1 << i;
+			const uint ReductionScale = 1u << i;
 			
 			// Chooses output CoC across lanes.
 			float OutputCocRadius = DownsampleCoc_Wave8x8(CocRadius, ReductionScale);
@@ -589,7 +590,7 @@ void ReduceCS(
 			// Output mip map.
 			OutputPixelId = OutputPixelId >> 1;
 			BRANCH
-			if (((DispatchThreadId.x | DispatchThreadId.y) & ((2 << i) - 1)) == 0)
+			if (((DispatchThreadId.x | DispatchThreadId.y) & ((2u << i) - 1)) == 0)
 			{
 				OutputMipLevel(/* MipLevel = */ i + 1, OutputPixelId, GatheredColor, CocRadius);
 			}
@@ -614,7 +615,7 @@ void ReduceCS(
 		for (uint i = 0; i < (DIM_REDUCE_MIP_COUNT - 1); i++)
 		{
 			// Multiplier that needs to be applied on Coc computation to be resolution independent.
-			const uint TileSize = THREADGROUP_TILE_SIZE / (1 << (i + 1));
+			const uint TileSize = THREADGROUP_TILE_SIZE / (1u << (i + 1));
 			const uint ReduceBankSize = TileSize * TileSize;
 		
 			// GroupSharedArray has been written before.
@@ -622,7 +623,7 @@ void ReduceCS(
 		
 			if (GroupThreadIndex < ReduceBankSize)
 			{
-				DownsampleParams.CocRadiusMultiplier = 0.5 / float(1 << (i));
+				DownsampleParams.CocRadiusMultiplier = 0.5 / float(1u << (i));
 
 				// Reduce.
 				ReduceOperator(DownsampleParams, GroupThreadIndex, ReduceBankSize);

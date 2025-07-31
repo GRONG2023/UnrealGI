@@ -14,6 +14,10 @@
 
 #if INTEL_ISPC
 #include "PBDCollisionConstraints.ispc.generated.h"
+
+static_assert(sizeof(ispc::FVector) == sizeof(Chaos::FVec3), "sizeof(ispc::FVector) != sizeof(Chaos::FVec3)");
+static_assert(sizeof(ispc::FIntVector) == sizeof(Chaos::TVector<int32, 3>), "sizeof(ispc::FIntVector) != sizeof(Chaos::TVector<int32, 3>");
+static_assert(sizeof(ispc::FTransform) == sizeof(Chaos::FRigidTransform3), "sizeof(ispc::FTransform) != sizeof(Chaos::FRigidTransform3)");
 #endif
 
 //PRAGMA_DISABLE_OPTIMIZATION
@@ -29,21 +33,6 @@ namespace Chaos
 			return FRigidTransform3(Generic->P(), Generic->Q());
 		}
 
-		// @todo(ccaulfield): This is duplicated in JointConstraints - move to a utility file
-		FMatrix33 ComputeFactorMatrix3(const FVec3& V, const FMatrix33& M, const FReal Im)
-		{
-			// Rigid objects rotational contribution to the impulse.
-			// Vx*M*VxT+Im
-			ensure(Im > FLT_MIN);
-				return FMatrix33(
-					-V[2] * (-V[2] * M.M[1][1] + V[1] * M.M[2][1]) + V[1] * (-V[2] * M.M[2][1] + V[1] * M.M[2][2]) + Im,
-					V[2] * (-V[2] * M.M[1][0] + V[1] * M.M[2][0]) - V[0] * (-V[2] * M.M[2][1] + V[1] * M.M[2][2]),
-					-V[1] * (-V[2] * M.M[1][0] + V[1] * M.M[2][0]) + V[0] * (-V[2] * M.M[1][1] + V[1] * M.M[2][1]),
-					V[2] * (V[2] * M.M[0][0] - V[0] * M.M[2][0]) - V[0] * (V[2] * M.M[2][0] - V[0] * M.M[2][2]) + Im,
-					-V[1] * (V[2] * M.M[0][0] - V[0] * M.M[2][0]) + V[0] * (V[2] * M.M[1][0] - V[0] * M.M[2][1]),
-					-V[1] * (-V[1] * M.M[0][0] + V[0] * M.M[1][0]) + V[0] * (-V[1] * M.M[1][0] + V[0] * M.M[1][1]) + Im);
-		}
-
 		// Reference: Energy Stability and Fracture for Frame Rate Rigid Body Simulations (Su et al.) (3.2. Clamping Impulses)
 		FVec3 GetEnergyClampedImpulse(const TPBDRigidParticleHandle<FReal, 3>* PBDRigid0, const TPBDRigidParticleHandle<FReal, 3>* PBDRigid1, const FVec3& Impulse, const FVec3& VectorToPoint1, const FVec3& VectorToPoint2, const FVec3& Velocity1, const FVec3& Velocity2)
 		{
@@ -53,7 +42,7 @@ namespace Chaos
 			FVec3 Jr0, Jr1, IInvJr0, IInvJr1;
 			FReal ImpulseRatioNumerator0 = 0, ImpulseRatioNumerator1 = 0, ImpulseRatioDenom0 = 0, ImpulseRatioDenom1 = 0;
 			FReal ImpulseSizeSQ = Impulse.SizeSquared();
-			if (ImpulseSizeSQ < SMALL_NUMBER)
+			if (ImpulseSizeSQ < UE_SMALL_NUMBER)
 			{
 				return Impulse;
 			}
@@ -61,15 +50,15 @@ namespace Chaos
 			if (bIsRigidDynamic0)
 			{
 				Jr0 = FVec3::CrossProduct(VectorToPoint1, Impulse);
-				IInvJr0 = PBDRigid0->Q().RotateVector(PBDRigid0->InvI() * PBDRigid0->Q().UnrotateVector(Jr0));
-				ImpulseRatioNumerator0 = FVec3::DotProduct(Impulse, PBDRigid0->V() - KinematicVelocity) + FVec3::DotProduct(Jr0, PBDRigid0->W());
+				IInvJr0 = PBDRigid0->GetQ().RotateVector(FVec3(PBDRigid0->InvI()) * PBDRigid0->GetQ().UnrotateVector(Jr0));
+				ImpulseRatioNumerator0 = FVec3::DotProduct(Impulse, PBDRigid0->GetV() - KinematicVelocity) + FVec3::DotProduct(Jr0, PBDRigid0->GetW());
 				ImpulseRatioDenom0 = ImpulseSizeSQ / PBDRigid0->M() + FVec3::DotProduct(Jr0, IInvJr0);
 			}
 			if (bIsRigidDynamic1)
 			{
 				Jr1 = FVec3::CrossProduct(VectorToPoint2, Impulse);
-				IInvJr1 = PBDRigid1->Q().RotateVector(PBDRigid1->InvI() * PBDRigid1->Q().UnrotateVector(Jr1));
-				ImpulseRatioNumerator1 = FVec3::DotProduct(Impulse, PBDRigid1->V() - KinematicVelocity) + FVec3::DotProduct(Jr1, PBDRigid1->W());
+				IInvJr1 = PBDRigid1->GetQ().RotateVector(FVec3(PBDRigid1->InvI()) * PBDRigid1->GetQ().UnrotateVector(Jr1));
+				ImpulseRatioNumerator1 = FVec3::DotProduct(Impulse, PBDRigid1->GetV() - KinematicVelocity) + FVec3::DotProduct(Jr1, PBDRigid1->GetW());
 				ImpulseRatioDenom1 = ImpulseSizeSQ / PBDRigid1->M() + FVec3::DotProduct(Jr1, IInvJr1);
 			}
 			FReal Numerator = -2 * (ImpulseRatioNumerator0 - ImpulseRatioNumerator1);
@@ -102,7 +91,7 @@ namespace Chaos
 			FVec3 Jr0, Jr1, IInvJr0, IInvJr1;
 			FReal ImpulseRatioNumerator0 = 0, ImpulseRatioNumerator1 = 0, ImpulseRatioDenom0 = 0, ImpulseRatioDenom1 = 0;
 			FReal ImpulseSizeSQ = Impulse.SizeSquared();
-			if (ImpulseSizeSQ < SMALL_NUMBER)
+			if (ImpulseSizeSQ < UE_SMALL_NUMBER)
 			{
 				return Impulse;
 			}
@@ -131,22 +120,6 @@ namespace Chaos
 			return Numerator < Denominator ? (Impulse * Numerator / Denominator) : Impulse;
 		}
 
-		bool SampleObjectHelper(const FImplicitObject& Object, const FRigidTransform3& ObjectTransform, const FRigidTransform3& SampleToObjectTransform, const FVec3& SampleParticle, FReal Thickness, FContactPoint& Contact)
-		{
-			FVec3 LocalPoint = SampleToObjectTransform.TransformPositionNoScale(SampleParticle);
-			FVec3 LocalNormal;
-			FReal LocalPhi = Object.PhiWithNormal(LocalPoint, LocalNormal);
-
-			if (LocalPhi < Contact.Phi)
-			{
-				Contact.Phi = LocalPhi;
-				Contact.Normal = ObjectTransform.TransformVectorNoScale(LocalNormal);
-				Contact.Location = ObjectTransform.TransformPositionNoScale(LocalPoint);
-				return true;
-			}
-			return false;
-		}
-
 		bool SampleObjectNoNormal(const FImplicitObject& Object, const FRigidTransform3& ObjectTransform, const FRigidTransform3& SampleToObjectTransform, const FVec3& SampleParticle, FReal Thickness, FContactPoint& Contact)
 		{
 			FVec3 LocalPoint = SampleToObjectTransform.TransformPositionNoScale(SampleParticle);
@@ -168,9 +141,9 @@ namespace Chaos
 			FReal LocalPhi = Object.PhiWithNormal(LocalPoint, LocalNormal);
 			FReal LocalThickness = LocalPhi - Thickness;
 
-			if (LocalThickness < -KINDA_SMALL_NUMBER)
+			if (LocalThickness < -UE_KINDA_SMALL_NUMBER)
 			{
-				Contact.Location += LocalPoint * LocalThickness;
+				Contact.ShapeContactPoints[0] += LocalPoint * LocalThickness;
 				TotalThickness += LocalThickness;
 				return true;
 			}
@@ -191,7 +164,9 @@ namespace Chaos
 		FAutoConsoleVariableRef CVarSampleMinParticlesForAcceleration(TEXT("p.SampleMinParticlesForAcceleration"), SampleMinParticlesForAcceleration, TEXT("The minimum number of particles needed before using an acceleration structure when sampling"));
 
 
-#if INTEL_ISPC
+#if INTEL_ISPC && 0
+		// LWC_TODO: get ISPC levelset collision working again
+
 		template<ECollisionUpdateType UpdateType>
 		FContactPoint SampleObject(const FImplicitObject& Object, const FRigidTransform3& ObjectTransform, const FBVHParticles& SampleParticles, const FRigidTransform3& SampleParticlesTransform, FReal CullingDistance)
 		{
@@ -201,10 +176,12 @@ namespace Chaos
 			FContactPoint Contact;
 			FContactPoint AvgContact;
 
-			Contact.Location = FVec3::ZeroVector;
-			Contact.Normal = FVec3::ZeroVector;
-			AvgContact.Location = FVec3::ZeroVector;
-			AvgContact.Normal = FVec3::ZeroVector;
+			Contact.ShapeContactPoints[0] = FVec3(0);
+			Contact.ShapeContactPoints[1] = FVec3(0);
+			Contact.ShapeContactNormal = FVec3(0);
+			AvgContact.ShapeContactPoints[0] = FVec3(0);
+			AvgContact.ShapeContactPoints[1] = FVec3(0);
+			AvgContact.ShapeContactNormal = FVec3(0);
 			AvgContact.Phi = CullingDistance;
 			FReal WeightSum = FReal(0); // Sum of weights used for averaging (negative)
 
@@ -245,7 +222,7 @@ namespace Chaos
 								&PotentialParticles[0],
 								CullingDistance,
 								WeightSum,
-								(ispc::FVector&)AvgContact.Location,
+								(ispc::FVector&)AvgContact.ShapeContactPoints[0],
 								PotentialParticles.Num());
 						}
 						else
@@ -287,7 +264,7 @@ namespace Chaos
 								&PotentialParticles[0],
 								CullingDistance,
 								WeightSum,
-								(ispc::FVector&)AvgContact.Location,
+								(ispc::FVector&)AvgContact.ShapeContactPoints[0],
 								PotentialParticles.Num());
 						}
 						else
@@ -354,7 +331,7 @@ namespace Chaos
 							(ispc::FVector*)&SampleParticles.XArray()[0],
 							CullingDistance,
 							WeightSum,
-							(ispc::FVector&)AvgContact.Location,
+							(ispc::FVector&)AvgContact.ShapeContactPoints[0],
 							NumParticles);
 					}
 					else
@@ -391,7 +368,7 @@ namespace Chaos
 							(ispc::FVector*)&SampleParticles.XArray()[0],
 							CullingDistance,
 							WeightSum,
-							(ispc::FVector&)AvgContact.Location,
+							(ispc::FVector&)AvgContact.ShapeContactPoints[0],
 							NumParticles);
 					}
 					else
@@ -425,7 +402,7 @@ namespace Chaos
 							(ispc::FVector*) & SampleParticles.XArray()[0],
 							CullingDistance,
 							WeightSum,
-							(ispc::FVector&)AvgContact.Location,
+							(ispc::FVector&)AvgContact.ShapeContactPoints[0],
 							NumParticles);
 					}
 					else
@@ -461,7 +438,7 @@ namespace Chaos
 							(ispc::FVector*)&SampleParticles.XArray()[0],
 							CullingDistance,
 							WeightSum,
-							(ispc::FVector&)AvgContact.Location,
+							(ispc::FVector&)AvgContact.ShapeContactPoints[0],
 							NumParticles);
 					}
 					else
@@ -511,14 +488,15 @@ namespace Chaos
 			{
 				if (WeightSum < -KINDA_SMALL_NUMBER)
 				{
-					FVec3 LocalPoint = AvgContact.Location / WeightSum;
+					FVec3 LocalPoint = AvgContact.ShapeContactPoints[0] / WeightSum;
 					FVec3 LocalNormal;
 					const FReal NewPhi = Object.PhiWithNormal(LocalPoint, LocalNormal);
 					if (NewPhi < Contact.Phi)
 					{
 						Contact.Phi = NewPhi;
-						Contact.Location = ObjectTransform.TransformPositionNoScale(LocalPoint);
-						Contact.Normal = ObjectTransform.TransformVectorNoScale(LocalNormal);
+						Contact.ShapeContactPoints[0] = SampleToObjectTM.InverseTransformPositionNoScale(LocalPoint);
+						Contact.ShapeContactPoints[1] = LocalPoint - NewPhi * LocalNormal;
+						Contact.ShapeContactNormal = LocalNormal;
 					}
 				}
 				else
@@ -532,8 +510,9 @@ namespace Chaos
 				FVec3 LocalPoint = SampleToObjectTM.TransformPositionNoScale(SampleParticles.X(DeepestParticle));
 				FVec3 LocalNormal;
 				Contact.Phi = Object.PhiWithNormal(LocalPoint, LocalNormal);
-				Contact.Location = ObjectTransform.TransformPositionNoScale(LocalPoint);
-				Contact.Normal = ObjectTransform.TransformVectorNoScale(LocalNormal);
+				Contact.ShapeContactPoints[0] = SampleParticles.X(DeepestParticle);
+				Contact.ShapeContactPoints[1] = LocalPoint - Contact.Phi * LocalNormal;
+				Contact.ShapeContactNormal = LocalNormal;
 			}
 
 			return Contact;
@@ -547,10 +526,12 @@ namespace Chaos
 			FContactPoint Contact;
 			FContactPoint AvgContact;
 
-			Contact.Location = FVec3::ZeroVector;
-			Contact.Normal = FVec3::ZeroVector;
-			AvgContact.Location = FVec3::ZeroVector;
-			AvgContact.Normal = FVec3::ZeroVector;
+			Contact.ShapeContactPoints[0] = FVec3(0);
+			Contact.ShapeContactPoints[1] = FVec3(0);
+			Contact.ShapeContactNormal = FVec3(0);
+			AvgContact.ShapeContactPoints[0] = FVec3(0);
+			AvgContact.ShapeContactPoints[1] = FVec3(0);
+			AvgContact.ShapeContactNormal = FVec3(0);
 			AvgContact.Phi = CullingDistance;
 			FReal WeightSum = FReal(0); // Sum of weights used for averaging (negative)
 
@@ -574,11 +555,11 @@ namespace Chaos
 					{
 						if (NormalAveraging && UpdateType != ECollisionUpdateType::Any)	//if we just want one don't bother with normal
 						{
-							SampleObjectNormalAverageHelper(Object, ObjectTransform, SampleToObjectTM, SampleParticles.X(i), CullingDistance, WeightSum, AvgContact);
+							SampleObjectNormalAverageHelper(Object, ObjectTransform, SampleToObjectTM, SampleParticles.GetX(i), CullingDistance, WeightSum, AvgContact);
 						}
 						else
 						{
-							if (SampleObjectNoNormal(Object, ObjectTransform, SampleToObjectTM, SampleParticles.X(i), CullingDistance, AvgContact))
+							if (SampleObjectNoNormal(Object, ObjectTransform, SampleToObjectTM, SampleParticles.GetX(i), CullingDistance, AvgContact))
 							{
 								DeepestParticle = i;
 								if (UpdateType == ECollisionUpdateType::Any)
@@ -598,11 +579,11 @@ namespace Chaos
 				{
 					if (NormalAveraging && UpdateType != ECollisionUpdateType::Any)	//if we just want one don't bother with normal
 					{
-						const bool bInside = SampleObjectNormalAverageHelper(Object, ObjectTransform, SampleToObjectTM, SampleParticles.X(i), CullingDistance, WeightSum, AvgContact);
+						const bool bInside = SampleObjectNormalAverageHelper(Object, ObjectTransform, SampleToObjectTM, SampleParticles.GetX(i), CullingDistance, WeightSum, AvgContact);
 					}
 					else
 					{
-						if (SampleObjectNoNormal(Object, ObjectTransform, SampleToObjectTM, SampleParticles.X(i), CullingDistance, AvgContact))
+						if (SampleObjectNoNormal(Object, ObjectTransform, SampleToObjectTM, SampleParticles.GetX(i), CullingDistance, AvgContact))
 						{
 							DeepestParticle = i;
 							if (UpdateType == ECollisionUpdateType::Any)
@@ -617,16 +598,17 @@ namespace Chaos
 
 			if (NormalAveraging)
 			{
-				if (WeightSum < -KINDA_SMALL_NUMBER)
+				if (WeightSum < -UE_KINDA_SMALL_NUMBER)
 				{
-					FVec3 LocalPoint = AvgContact.Location / WeightSum;
+					FVec3 LocalPoint = AvgContact.ShapeContactPoints[0] / WeightSum;
 					FVec3 LocalNormal;
 					const FReal NewPhi = Object.PhiWithNormal(LocalPoint, LocalNormal);
 					if (NewPhi < Contact.Phi)
 					{
 						Contact.Phi = NewPhi;
-						Contact.Location = ObjectTransform.TransformPositionNoScale(LocalPoint);
-						Contact.Normal = ObjectTransform.TransformVectorNoScale(LocalNormal);
+						Contact.ShapeContactPoints[0] = SampleToObjectTM.InverseTransformPositionNoScale(LocalPoint);
+						Contact.ShapeContactPoints[1] = LocalPoint - NewPhi * LocalNormal; 
+						Contact.ShapeContactNormal = LocalNormal;
 					}
 				}
 				else
@@ -637,12 +619,12 @@ namespace Chaos
 			else if (AvgContact.Phi < CullingDistance)
 			{
 				check(DeepestParticle >= 0);
-				FVec3 LocalPoint = SampleToObjectTM.TransformPositionNoScale(SampleParticles.X(DeepestParticle));
+				FVec3 LocalPoint = SampleToObjectTM.TransformPositionNoScale(SampleParticles.GetX(DeepestParticle));
 				FVec3 LocalNormal;
 				Contact.Phi = Object.PhiWithNormal(LocalPoint, LocalNormal);
-				Contact.Location = ObjectTransform.TransformPositionNoScale(LocalPoint);
-				Contact.Normal = ObjectTransform.TransformVectorNoScale(LocalNormal);
-
+				Contact.ShapeContactPoints[0] = SampleParticles.GetX(DeepestParticle);
+				Contact.ShapeContactPoints[1] = LocalPoint - Contact.Phi * LocalNormal;
+				Contact.ShapeContactNormal = LocalNormal;
 			}
 
 			return Contact;

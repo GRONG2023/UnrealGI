@@ -17,8 +17,8 @@ namespace CrossCompiler
 		SHADER_STAGE_VERTEX = 0,
 		SHADER_STAGE_PIXEL,
 		SHADER_STAGE_GEOMETRY,
-		SHADER_STAGE_HULL,
-		SHADER_STAGE_DOMAIN,
+		SHADER_STAGE_MESH,
+        SHADER_STAGE_AMPLIFICATION,
 		NUM_NON_COMPUTE_SHADER_STAGES,
 		SHADER_STAGE_COMPUTE = NUM_NON_COMPUTE_SHADER_STAGES,
 		NUM_SHADER_STAGES,
@@ -79,12 +79,10 @@ namespace CrossCompiler
 		case SHADER_STAGE_VERTEX:	return 'v';
 		case SHADER_STAGE_PIXEL:	return 'p';
 		case SHADER_STAGE_GEOMETRY:	return 'g';
-		case SHADER_STAGE_HULL:		return 'h';
-		case SHADER_STAGE_DOMAIN:	return 'd';
 		case SHADER_STAGE_COMPUTE:	return 'c';
 		default: break;
 		}
-		check(0);
+		checkf(0, TEXT("invalid value: ShaderStageIndexToTypeName(ShaderStage = '%u')"), ShaderStage);
 		return 0;
 	}
 
@@ -101,7 +99,7 @@ namespace CrossCompiler
 		case PACKED_TYPEINDEX_IMAGE:	return PACKED_TYPENAME_IMAGE;
 		default: break;
 		}
-		check(0);
+		checkf(0, TEXT("invalid value: PackedTypeIndexToTypeName(ArrayType = %d)"), (int32)ArrayType);
 		return 0;
 	}
 
@@ -109,6 +107,7 @@ namespace CrossCompiler
 	{
 		switch (ArrayName)
 		{
+		case 0: // Fallthrough; Used for bindless on some platforms
 		case PACKED_TYPENAME_HIGHP:		return PACKED_TYPEINDEX_HIGHP;
 		case PACKED_TYPENAME_MEDIUMP:	return PACKED_TYPEINDEX_MEDIUMP;
 		case PACKED_TYPENAME_LOWP:		return PACKED_TYPEINDEX_LOWP;
@@ -118,7 +117,7 @@ namespace CrossCompiler
 		case PACKED_TYPENAME_IMAGE:		return PACKED_TYPEINDEX_IMAGE;
 		default: break;
 		}
-		check(0);
+		checkf(0, TEXT("invalid value: PackedTypeNameToTypeIndex(ArrayName = %d)"), (int32)ArrayName);
 		return 0;
 	}
 
@@ -189,17 +188,62 @@ namespace CrossCompiler
 		return Ar;
 	}
 
+#pragma warning(push)
+#pragma warning(error : 4596)
+	struct FShaderBindingInOutMask
+	{
+		uint32 Bitmask = 0;
+
+		/** Maximum value for a valid index in this bitmask. */
+		static constexpr int32 MaxIndex = (sizeof(decltype(FShaderBindingInOutMask::Bitmask)) * 8u) - 1u;
+
+		/** Index to mark the binding of a depth-stencil output resource. */
+		static constexpr int32 DepthStencilMaskIndex = MaxIndex;
+
+		/** Sets the specified bitfield in this bitmask and validates its index boundary. */
+		FORCEINLINE void EnableField(int32 Index)
+		{
+			ensure(Index >= 0 && Index <= FShaderBindingInOutMask::MaxIndex);
+			Bitmask |= (1u << Index);
+		}
+
+		/** Returns whether the specified bitfield in this bitmask is set and validates its index boundary. */
+		FORCEINLINE bool IsFieldEnabled(int32 Index) const
+		{
+			ensure(Index >= 0 && Index <= FShaderBindingInOutMask::MaxIndex);
+			return (Bitmask & (1u << Index)) != 0;
+		}
+
+		friend bool operator == (const FShaderBindingInOutMask& Lhs, const FShaderBindingInOutMask& Rhs)
+		{
+			return Lhs.Bitmask == Rhs.Bitmask;
+		}
+
+		friend bool operator != (const FShaderBindingInOutMask& Lhs, const FShaderBindingInOutMask& Rhs)
+		{
+			return !(Lhs == Rhs);
+		}
+	};
+#pragma warning(pop)
+
+	inline FArchive& operator<<(FArchive& Ar, FShaderBindingInOutMask& BindingInOutMask)
+	{
+		Ar << BindingInOutMask.Bitmask;
+		return Ar;
+	}
+
 	struct FShaderBindings
 	{
 		TArray<TArray<FPackedArrayInfo>>	PackedUniformBuffers;
 		TArray<FPackedArrayInfo>			PackedGlobalArrays;
 		FShaderCompilerResourceTable		ShaderResourceTable;
 
-		uint16	InOutMask;
-		uint8	NumSamplers;
-		uint8	NumUniformBuffers;
-		uint8	NumUAVs;
-		bool	bHasRegularUniformBuffers;
+		FShaderBindingInOutMask	InOutMask;
+		uint8					NumSamplers;
+		uint8					NumUniformBuffers;
+		uint8					NumUAVs;
+		uint8					NumAccelerationStructures;
+		bool					bHasRegularUniformBuffers;
 	};
 
 	// Information for copying members from uniform buffers to packed

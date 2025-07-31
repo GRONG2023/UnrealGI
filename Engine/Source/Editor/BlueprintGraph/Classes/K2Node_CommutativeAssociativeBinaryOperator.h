@@ -3,13 +3,17 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
 #include "EdGraph/EdGraphPin.h"
-#include "K2Node_CallFunction.h"
+#include "HAL/Platform.h"
 #include "K2Node_AddPinInterface.h"
+#include "K2Node_CallFunction.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/UObjectGlobals.h"
+
 #include "K2Node_CommutativeAssociativeBinaryOperator.generated.h"
 
 class UEdGraph;
+class UObject;
 
 UCLASS(MinimalAPI)
 class UK2Node_CommutativeAssociativeBinaryOperator : public UK2Node_CallFunction, public IK2Node_AddPinInterface
@@ -23,13 +27,13 @@ class UK2Node_CommutativeAssociativeBinaryOperator : public UK2Node_CallFunction
 private:
 	const static int32 BinaryOperatorInputsNum = 2;
 
-	static int32 GetMaxInputPinsNum();
-	static FName GetNameForPin(int32 PinIndex);
-
 	FEdGraphPinType GetType() const;
 
 	void AddInputPinInner(int32 AdditionalPinIndex);
-	bool CanRemovePin(const UEdGraphPin* Pin) const;
+
+protected: 
+	bool CanRemovePin(const UEdGraphPin* Pin) const override;
+
 public:
 	BLUEPRINTGRAPH_API UEdGraphPin* FindOutPin() const;
 	BLUEPRINTGRAPH_API UEdGraphPin* FindSelfPin() const;
@@ -37,7 +41,10 @@ public:
 	/** Get TRUE input type (self, etc.. are skipped) */
 	BLUEPRINTGRAPH_API UEdGraphPin* GetInputPin(int32 InputPinIndex);
 
-	BLUEPRINTGRAPH_API void RemoveInputPin(UEdGraphPin* Pin);
+	/** Returns the number of additional input pins that this node has */
+	BLUEPRINTGRAPH_API int32 GetNumberOfAdditionalInputs() const { return NumAdditionalInputs; }
+
+	virtual void RemoveInputPin(UEdGraphPin* Pin) override;
 
 	// UEdGraphNode interface
 	virtual void AllocateDefaultPins() override;

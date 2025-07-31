@@ -6,9 +6,9 @@
 #include "Misc/CoreMisc.h"
 #include "SocketSubsystemModule.h"
 #include "Modules/ModuleManager.h"
-#include "Async/AsyncWork.h"
 #include "SocketTypes.h"
 #include "IPAddress.h"
+#include "IPAddressAsyncResolve.h"
 #include "Sockets.h"
 #include "Templates/UniquePtr.h"
 
@@ -72,9 +72,10 @@ static IModuleInterface* LoadSubsystemModule(const FString& SubsystemName)
 		return ModuleManager.GetModule(ModuleName);
 	}
 
+#if !UE_BUILD_SHIPPING && !UE_BUILD_SHIPPING_WITH_EDITOR
 	return nullptr;
+#endif
 }
-
 
 FUniqueSocket ISocketSubsystem::CreateUniqueSocket(const FName& SocketType, const FString& SocketDescription, bool bForceUDP)
 {
@@ -85,7 +86,6 @@ FUniqueSocket ISocketSubsystem::CreateUniqueSocket(const FName& SocketType, cons
 {
 	return FUniqueSocket(CreateSocket(SocketType, SocketDescription, ProtocolName), FSocketDeleter(this));
 }
-
 
 /**
  * Shutdown all registered subsystems
@@ -343,9 +343,13 @@ TArray<TSharedRef<FInternetAddr>> ISocketSubsystem::GetLocalBindAddresses()
 	if (BindableAddresses.ReturnCode == SE_NO_ERROR)
 	{
 		// Push in all the bindable addresses.
-		for (const auto& BindAddresses : BindableAddresses.Results)
+		for (const FAddressInfoResultData& BindAddresses : BindableAddresses.Results)
 		{
-			BindingAddresses.Add(BindAddresses.Address);
+			// GetAddressInfo can return both TCP and UDP bindings for the same address - which is redundant when returning only addresses
+			if (!BindingAddresses.ContainsByPredicate([&](const TSharedRef<FInternetAddr>& A) { return *A == *BindAddresses.Address; }))
+			{
+				BindingAddresses.Add(BindAddresses.Address);
+			}
 		}
 	}
 
@@ -355,6 +359,9 @@ TArray<TSharedRef<FInternetAddr>> ISocketSubsystem::GetLocalBindAddresses()
 bool ISocketSubsystem::GetLocalAdapterAddresses(TArray<TSharedPtr<FInternetAddr>>& OutAddresses)
 {
 	FString HostName;
+
+	UE_LOG(LogSockets, Warning, TEXT("Falling back to generic GetLocalAdapterAddresses implementation. Consider implementing a Platform specific version."));
+
 	// Attempt to get a hostname so that we can look it up in order to get an idea of adapters that we might have 
 	// (or the addresses that are tied to us). This is a fallback implementation for platforms that do not have this implemented.
 	// Platforms are encouraged to implement this themselves.
@@ -419,7 +426,7 @@ TSharedRef<FInternetAddr> ISocketSubsystem::GetLocalHostAddr(FOutputDevice& Out,
 		else
 		{
 			if (AdapterAddresses.Num() > 0)
-			{ 
+			{
 				HostAddr = AdapterAddresses[0]->Clone();
 			}
 		}
@@ -443,7 +450,7 @@ TSharedRef<FInternetAddr> ISocketSubsystem::GetLocalBindAddr(FOutputDevice& Out)
 
 bool ISocketSubsystem::GetMultihomeAddress(TSharedRef<FInternetAddr>& Addr)
 {
-	TCHAR Home[256] = TEXT("");
+	TCHAR Home[256] = {};
 	if (FParse::Value(FCommandLine::Get(), TEXT("MULTIHOME="), Home, UE_ARRAY_COUNT(Home)))
 	{
 		TSharedPtr<FInternetAddr> MultiHomeQuery = GetAddressFromString(Home);

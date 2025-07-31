@@ -16,13 +16,72 @@
 //        with a version check and not have to do this anymore for updated assets
 #define ALWAYS_VALIDATE_DESIRED_PIN_DIRECTION_ON_LOAD 1
 
+
+//////////////////////////////////////////////////////////////////////////
+// FKismetUserDeclaredFunctionMetadata
+
+bool FKismetUserDeclaredFunctionMetadata::HasMetaData(FName Key) const
+{
+	const FString* ValuePtr = nullptr;
+	if (!Key.IsNone())
+	{
+		ValuePtr = MetaDataMap.Find(Key);
+	}
+	return ValuePtr != nullptr;
+}
+
+const FString& FKismetUserDeclaredFunctionMetadata::GetMetaData(FName Key) const
+{
+	// if not found, return a static empty string
+	static FString EmptyString;
+
+	if (Key.IsNone())
+	{
+		return EmptyString;
+	}
+	const FString* ValuePtr = MetaDataMap.Find(Key);
+	return ValuePtr ? *ValuePtr : EmptyString;
+}
+
+void FKismetUserDeclaredFunctionMetadata::SetMetaData(FName Key, FString&& Value)
+{
+	if (!Key.IsNone())
+	{
+		MetaDataMap.Add(Key, MoveTempIfPossible(Value));
+	}
+}
+
+void FKismetUserDeclaredFunctionMetadata::SetMetaData(FName Key, const FStringView Value)
+{
+	if (!Key.IsNone())
+	{
+		MetaDataMap.Add(Key, FString(Value));
+	}
+}
+
+void FKismetUserDeclaredFunctionMetadata::RemoveMetaData(FName Key)
+{
+	if (!Key.IsNone())
+	{
+		MetaDataMap.Remove(Key);
+	}
+}
+
+const TMap<FName, FString>& FKismetUserDeclaredFunctionMetadata::GetMetaDataMap() const
+{
+	return MetaDataMap;
+}
+
+//////////////////////////////////////////////////////////////////////////
+// FUserPinInfo
+
 FArchive& operator<<(FArchive& Ar, FUserPinInfo& Info)
 {
 	Ar.UsingCustomVersion(FFrameworkObjectVersion::GUID);
 
 	if (Ar.CustomVer(FFrameworkObjectVersion::GUID) >= FFrameworkObjectVersion::PinsStoreFName)
 	{
-	Ar << Info.PinName;
+		Ar << Info.PinName;
 	}
 	else
 	{
@@ -31,7 +90,7 @@ FArchive& operator<<(FArchive& Ar, FUserPinInfo& Info)
 		Info.PinName = *PinNameStr;
 	}
 
-	if (Ar.UE4Ver() >= VER_UE4_SERIALIZE_PINTYPE_CONST)
+	if (Ar.UEVer() >= VER_UE4_SERIALIZE_PINTYPE_CONST)
 	{
 		Info.PinType.Serialize(Ar);
 		Ar << Info.DesiredPinDirection;
@@ -46,8 +105,8 @@ FArchive& operator<<(FArchive& Ar, FUserPinInfo& Info)
 		bool bIsReference = Info.PinType.bIsReference;
 		Ar << bIsReference;
 
-			Info.PinType.ContainerType = (bIsArray ? EPinContainerType::Array : EPinContainerType::None);
-			Info.PinType.bIsReference = bIsReference;
+		Info.PinType.ContainerType = (bIsArray ? EPinContainerType::Array : EPinContainerType::None);
+		Info.PinType.bIsReference = bIsReference;
 
 		FString PinCategoryStr;
 		FString PinSubCategoryStr;
@@ -58,6 +117,15 @@ FArchive& operator<<(FArchive& Ar, FUserPinInfo& Info)
 		Info.PinType.PinCategory = *PinCategoryStr;
 		Info.PinType.PinSubCategory = *PinSubCategoryStr;
 
+		bool bFixupPinCategories =
+			((Info.PinType.PinCategory == TEXT("double")) || (Info.PinType.PinCategory == TEXT("float")));
+
+		if (bFixupPinCategories)
+		{
+			Info.PinType.PinCategory = TEXT("real");
+			Info.PinType.PinSubCategory = TEXT("double");
+		}
+
 		Ar << Info.PinType.PinSubCategoryObject;
 	}
 
@@ -66,6 +134,8 @@ FArchive& operator<<(FArchive& Ar, FUserPinInfo& Info)
 	return Ar;
 }
 
+//////////////////////////////////////////////////////////////////////////
+// UK2Node_EditablePinBase
 
 UK2Node_EditablePinBase::UK2Node_EditablePinBase(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -119,7 +189,7 @@ void UK2Node_EditablePinBase::RemoveUserDefinedPinByName(const FName PinName)
 			Pin->Modify();
 
 			Pins.Remove(Pin);
-			Pin->MarkPendingKill();
+			Pin->MarkAsGarbage();
 
 			if (UBlueprint* Blueprint = GetBlueprint())
 			{
@@ -313,8 +383,7 @@ void UK2Node_EditablePinBase::AddReferencedObjects(UObject* InThis, FReferenceCo
 	for (int32 Index = 0; Index < This->UserDefinedPins.Num(); ++Index)
 	{
 		FUserPinInfo PinInfo = *This->UserDefinedPins[Index].Get();
-		UObject* PinSubCategoryObject = PinInfo.PinType.PinSubCategoryObject.Get();
-		Collector.AddReferencedObject(PinSubCategoryObject, This);
+		Collector.AddReferencedObject(PinInfo.PinType.PinSubCategoryObject, This);
 	}
 	Super::AddReferencedObjects( This, Collector );
 }

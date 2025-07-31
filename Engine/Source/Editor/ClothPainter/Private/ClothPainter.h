@@ -2,16 +2,40 @@
 
 #pragma once
 
+#include "Containers/Array.h"
+#include "Containers/ArrayView.h"
+#include "Containers/Map.h"
+#include "Delegates/IDelegateInstance.h"
+#include "Engine/EngineBaseTypes.h"
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_4
+#include "Engine/HitResult.h"
+#endif // UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_4
 #include "IMeshPainter.h"
-
-#include "MeshPaintTypes.h"
+#include "InputCoreTypes.h"
+#include "Internationalization/Text.h"
+#include "Math/UnrealMathSSE.h"
 #include "MeshPaintHelpers.h"
+#include "MeshPaintTypes.h"
+#include "Templates/SharedPointer.h"
 
+class AActor;
+class FEditorViewportClient;
+class FPrimitiveDrawInterface;
+class FReferenceCollector;
+class FSceneView;
+class FUICommandList;
+class FViewport;
+class IMeshPaintGeometryAdapter;
 class SClothPaintWidget;
 class UClothPainterSettings;
-class UPaintBrushSettings;
 class UClothingAssetCommon;
 class UDebugSkelMeshComponent;
+class UMeshComponent;
+class UMeshPaintSettings;
+class UPaintBrushSettings;
+class USkeletalMesh;
+struct FHitResult;
+
 enum class EPaintableClothProperty;
 class FClothPaintToolBase;
 
@@ -102,13 +126,13 @@ protected:
 	/** Current adapter used to paint the clothing properties */
 	TSharedPtr<IMeshPaintGeometryAdapter> Adapter;	
 	/** Debug skeletal mesh to which painting should be applied */
-	UDebugSkelMeshComponent* SkeletalMeshComponent;
+	TObjectPtr<UDebugSkelMeshComponent> SkeletalMeshComponent;
 	/** Widget used to represent the state/functionality of the painter */
 	TSharedPtr<SClothPaintWidget> Widget;
 	/** Cloth paint settings instance */
-	UClothPainterSettings* PaintSettings;
+	TObjectPtr<UClothPainterSettings> PaintSettings;
 	/** Cloth brush settings instance */
-	UPaintBrushSettings* BrushSettings;
+	TObjectPtr<UPaintBrushSettings> BrushSettings;
 
 	/** Flag whether or not the simulation should run */
 	bool bShouldSimulate;

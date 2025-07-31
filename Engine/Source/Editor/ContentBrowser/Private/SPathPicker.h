@@ -2,12 +2,19 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
+#include "Containers/Array.h"
+#include "Containers/ArrayView.h"
+#include "Containers/UnrealString.h"
+#include "ContentBrowserDelegates.h"
+#include "IContentBrowserSingleton.h"
+#include "Templates/SharedPointer.h"
+#include "Types/SlateEnums.h"
 #include "Widgets/DeclarativeSyntaxSupport.h"
 #include "Widgets/SCompoundWidget.h"
-#include "IContentBrowserSingleton.h"
 
 class SPathView;
+class SWidget;
+struct FContentBrowserItem;
 
 /**
  * A sources view designed for path picking
@@ -37,6 +44,15 @@ public:
 	/** Handler for creating a new folder in the path picker */
 	void CreateNewFolder(FString FolderPath, FOnCreateNewFolder InOnCreateNewFolder);
 
+	/** Rename the selected, will just use the first folder selected*/
+	void ExecuteRenameFolder();
+
+	/** Add a folder to the first selected folder*/
+	void ExecuteAddFolder();
+
+	/** Refresh the path view*/
+	void RefreshPathView();
+
 private:
 
 	/** Handle for when selection changes */
@@ -59,4 +75,7 @@ private:
 
 	/** The delegate that fires when a path is right clicked and a context menu is requested */
 	FContentBrowserMenuExtender_SelectedPaths OnGetPathContextMenuExtender;
+
+	/** If true, passes virtual paths to OnPathSelected instead of internal asset paths */
+	bool bOnPathSelectedPassesVirtualPaths;
 };

@@ -1,23 +1,35 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "ClassViewerNode.h"
-#include "Engine/Blueprint.h"
-#include "GameFramework/Actor.h"
-#include "Engine/Brush.h"
 
 #include "ClassViewerFilter.h"
+#include "Engine/Blueprint.h"
+#include "Engine/Brush.h"
+#include "GameFramework/Actor.h"
+#include "HAL/Platform.h"
+#include "HAL/PlatformCrt.h"
+#include "Internationalization/Text.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/StringFormatArg.h"
 #include "PropertyHandle.h"
+#include "Templates/Casts.h"
+#include "UObject/Class.h"
+#include "UObject/Object.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/UObjectGlobals.h"
+#include "UObject/UnrealNames.h"
+#include "UObject/WeakObjectPtr.h"
 
 FClassViewerNode::FClassViewerNode(UClass* InClass)
 {
 	Class = InClass;
 	ClassName = MakeShareable(new FString(Class->GetName()));
 	ClassDisplayName = MakeShareable(new FString(Class->GetDisplayNameText().ToString()));
-	ClassPath = FName(*Class->GetPathName());
+	ClassPath = Class->GetPathName();
 
 	if (Class->GetSuperClass())
 	{
-		ParentClassPath = FName(*Class->GetSuperClass()->GetPathName());
+		ParentClassPath = Class->GetSuperClass()->GetClassPathName();
 	}
 
 	if (Class->ClassGeneratedBy && Class->ClassGeneratedBy->IsA(UBlueprint::StaticClass()))
@@ -74,38 +86,6 @@ void FClassViewerNode::AddChild( TSharedPtr<FClassViewerNode> Child )
 	check(Child.IsValid());
 	Child->ParentNode = AsShared();
 	ChildrenList.Add(Child);
-}
-
-void FClassViewerNode::AddUniqueChild(TSharedPtr<FClassViewerNode> NewChild)
-{
-	check(NewChild.IsValid());
-	const UClass* NewChildClass = NewChild->Class.Get();
-	if (nullptr != NewChildClass)
-	{
-		for(int ChildIndex = 0; ChildIndex < ChildrenList.Num(); ++ChildIndex)
-		{
-			TSharedPtr<FClassViewerNode> OldChild = ChildrenList[ChildIndex];
-			if(OldChild.IsValid() && OldChild->Class == NewChildClass)
-			{
-				const bool bNewChildHasMoreInfo = NewChild->UnloadedBlueprintData.IsValid();
-				const bool bOldChildHasMoreInfo = OldChild->UnloadedBlueprintData.IsValid();
-				if(bNewChildHasMoreInfo && !bOldChildHasMoreInfo)
-				{
-					// make sure, that new child has all needed children
-					for(int OldChildIndex = 0; OldChildIndex < OldChild->ChildrenList.Num(); ++OldChildIndex)
-					{
-						NewChild->AddUniqueChild( OldChild->ChildrenList[OldChildIndex] );
-					}
-
-					// replace child
-					ChildrenList[ChildIndex] = NewChild;
-				}
-				return;
-			}
-		}
-	}
-
-	AddChild(NewChild);
 }
 
 bool FClassViewerNode::IsRestricted() const
@@ -169,10 +149,15 @@ bool FClassViewerNode::IsClassPlaceable() const
 
 bool FClassViewerNode::IsBlueprintClass() const
 {
-	return BlueprintAssetPath != NAME_None;
+	return !BlueprintAssetPath.IsNull();
 }
 
 bool FClassViewerNode::IsEditorOnlyClass() const
 {
 	return Class.IsValid() && IsEditorOnlyObject(Class.Get());
+}
+
+TSharedPtr< FClassViewerNode > FClassViewerNode::GetParentNode() const
+{
+	return ParentNode.Pin();
 }

@@ -4,9 +4,17 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
+#include "EdGraph/EdGraphNode.h"
+#include "Internationalization/Text.h"
 #include "K2Node_CallFunction.h"
+#include "Math/Color.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/UObjectGlobals.h"
+
 #include "K2Node_CallParentFunction.generated.h"
+
+class UFunction;
+class UObject;
 
 UCLASS(MinimalAPI)
 class UK2Node_CallParentFunction : public UK2Node_CallFunction
@@ -18,6 +26,7 @@ class UK2Node_CallParentFunction : public UK2Node_CallFunction
 	virtual void AllocateDefaultPins() override;
 	virtual FLinearColor GetNodeTitleColor() const override;
 	virtual void PostPlacedNewNode() override;
+	virtual void AddSearchMetaDataInfo(TArray<struct FSearchTagDataPair>& OutTaggedMetaData) const override;
 	//~ End EdGraphNode Interface
 
 	virtual void SetFromFunction(const UFunction* Function) override;

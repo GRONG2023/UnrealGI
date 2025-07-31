@@ -3,15 +3,26 @@
 
 #pragma once
 
+#include "Containers/Array.h"
 #include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
-#include "UObject/UnrealType.h"
-#include "Engine/Blueprint.h"
+#include "EdGraph/EdGraphNode.h"
 #include "EdGraph/EdGraphNodeUtils.h"
+#include "Engine/Blueprint.h"
+#include "Internationalization/Text.h"
 #include "K2Node_Variable.h"
+#include "KismetCompilerMisc.h"
+#include "UObject/NameTypes.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/UObjectGlobals.h"
+#include "UObject/UnrealType.h"
+
 #include "K2Node_VariableSet.generated.h"
 
+class FProperty;
 class UEdGraph;
+class UEdGraphPin;
+class UObject;
+struct FBPVariableDescription;
 
 UCLASS(MinimalAPI)
 class UK2Node_VariableSet : public UK2Node_Variable
@@ -41,6 +52,8 @@ class UK2Node_VariableSet : public UK2Node_Variable
 	BLUEPRINTGRAPH_API FName GetRepNotifyName() const;
 	BLUEPRINTGRAPH_API bool ShouldFlushDormancyOnSet() const;
 	BLUEPRINTGRAPH_API bool IsNetProperty() const;
+	BLUEPRINTGRAPH_API bool IsFieldNotifyProperty() const;
+	BLUEPRINTGRAPH_API bool HasFieldNotificationBroadcast() const;
 
 	static FText GetPropertyTooltip(FProperty const* VariableProperty);
 	static FText GetBlueprintVarTooltip(FBPVariableDescription const& VarDesc);

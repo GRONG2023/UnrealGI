@@ -9,7 +9,7 @@
 #include "AIGraphTypes.h"
 #include "BehaviorTreeDecoratorGraphNode_Decorator.h"
 #include "BehaviorTreeDecoratorGraphNode_Logic.h"
-#include "Classes/EditorStyleSettings.h"
+#include "Settings/EditorStyleSettings.h"
 #include "Framework/MultiBox/MultiBoxBuilder.h"
 #include "ToolMenus.h"
 #include "BehaviorTreeEditorModule.h"
@@ -132,16 +132,23 @@ void UEdGraphSchema_BehaviorTreeDecorator::CreateDefaultNodesForGraph(UEdGraph& 
 	NodeCreator.Finalize();
 }
 
+FGraphNodeClassHelper& UEdGraphSchema_BehaviorTreeDecorator::GetClassCache() const
+{
+	const FBehaviorTreeEditorModule& EditorModule = FModuleManager::GetModuleChecked<FBehaviorTreeEditorModule>(TEXT("BehaviorTreeEditor"));
+	FGraphNodeClassHelper* ClassHelper = EditorModule.GetClassCache().Get();
+	check(ClassHelper);
+	return *ClassHelper;
+}
+
 void UEdGraphSchema_BehaviorTreeDecorator::GetGraphContextActions(FGraphContextMenuBuilder& ContextMenuBuilder) const
 {
 	const UBehaviorTreeDecoratorGraphNode* ParentGraphNode = ContextMenuBuilder.FromPin 
 		? Cast<UBehaviorTreeDecoratorGraphNode>(ContextMenuBuilder.FromPin->GetOuter()) : NULL;
 
-	FBehaviorTreeEditorModule& EditorModule = FModuleManager::GetModuleChecked<FBehaviorTreeEditorModule>(TEXT("BehaviorTreeEditor"));
-	FGraphNodeClassHelper* ClassCache = EditorModule.GetClassCache().Get();
+	FGraphNodeClassHelper& ClassCache = GetClassCache();
 
 	TArray<FGraphNodeClassData> NodeClasses;
-	ClassCache->GatherClasses(UBTDecorator::StaticClass(), NodeClasses);
+	ClassCache.GatherClasses(UBTDecorator::StaticClass(), NodeClasses);
 
 	for (const auto& NodeClass : NodeClasses)
 	{
@@ -214,6 +221,21 @@ FLinearColor UEdGraphSchema_BehaviorTreeDecorator::GetPinTypeColor(const FEdGrap
 bool UEdGraphSchema_BehaviorTreeDecorator::ShouldHidePinDefaultValue(UEdGraphPin* Pin) const
 {
 	return true;
+}
+
+bool UEdGraphSchema_BehaviorTreeDecorator::IsCacheVisualizationOutOfDate(const int32 InVisualizationCacheID) const
+{
+	return CurrentCacheRefreshID != InVisualizationCacheID;
+}
+
+int32 UEdGraphSchema_BehaviorTreeDecorator::GetCurrentVisualizationCacheID() const
+{
+	return CurrentCacheRefreshID;
+}
+
+void UEdGraphSchema_BehaviorTreeDecorator::ForceVisualizationCacheClear() const
+{
+	++CurrentCacheRefreshID;
 }
 
 #undef LOCTEXT_NAMESPACE

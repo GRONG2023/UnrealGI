@@ -29,18 +29,13 @@ public class ClothingSystemEditor : ModuleRules
                 "ClothingSystemRuntimeCommon",
                 "ClothingSystemRuntimeNv",
                 "ContentBrowser",
+				"EditorFramework",
                 "UnrealEd",
                 "SlateCore",
                 "Slate",
                 "ClothingSystemEditorInterface"
             }
 		);
-
-		PrivateIncludePathModuleNames.AddRange(
-            new string[] {
-                "Persona",
-            }
-        );
 
         SetupModulePhysicsSupport(Target);
 	}

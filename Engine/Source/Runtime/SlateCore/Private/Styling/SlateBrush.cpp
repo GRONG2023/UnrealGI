@@ -3,9 +3,19 @@
 #include "Styling/SlateBrush.h"
 #include "SlateGlobals.h"
 #include "Application/SlateApplicationBase.h"
+#include "Types/SlateVector2.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(SlateBrush)
 
 FSlateBrush::FSlateBrush()
-	: ImageSize(SlateBrushDefs::DefaultImageSize, SlateBrushDefs::DefaultImageSize)
+	: bIsDynamicallyLoaded(false)
+	, bHasUObject_DEPRECATED(false)
+	, bIsSet(true)
+	, DrawAs(ESlateBrushDrawType::Image)
+	, Tiling(ESlateBrushTileType::NoTile)
+	, Mirroring(ESlateBrushMirrorType::NoMirror)
+	, ImageType(ESlateBrushImageType::NoImage)
+	, ImageSize(SlateBrushDefs::DefaultImageSize, SlateBrushDefs::DefaultImageSize)
 	, Margin(0.0f)
 #if WITH_EDITORONLY_DATA
 	, Tint_DEPRECATED(FLinearColor::White)
@@ -14,17 +24,27 @@ FSlateBrush::FSlateBrush()
 	, ResourceObject(nullptr)
 	, ResourceName(NAME_None)
 	, UVRegion(ForceInit)
-	, DrawAs(ESlateBrushDrawType::Image)
-	, Tiling(ESlateBrushTileType::NoTile)
+{
+}
+
+FSlateBrush::FSlateBrush( ESlateBrushDrawType::Type InDrawType, 
+						  const FName InResourceName, 
+						  const FMargin& InMargin, 
+						  ESlateBrushTileType::Type InTiling, 
+						  ESlateBrushImageType::Type InImageType, 
+						  const UE::Slate::FDeprecateVector2DParameter& InImageSize, 
+						  const FLinearColor& InTint, 
+						  UObject* InObjectResource, 
+						  bool bInDynamicallyLoaded
+						)
+
+	: bIsDynamicallyLoaded(bInDynamicallyLoaded)
+	, bIsSet(true)
+	, DrawAs(InDrawType)
+	, Tiling(InTiling)
 	, Mirroring(ESlateBrushMirrorType::NoMirror)
-	, ImageType(ESlateBrushImageType::NoImage)
-	, bIsDynamicallyLoaded(false)
-	, bHasUObject_DEPRECATED(false)
-{
-}
-
-FSlateBrush::FSlateBrush( ESlateBrushDrawType::Type InDrawType, const FName InResourceName, const FMargin& InMargin, ESlateBrushTileType::Type InTiling, ESlateBrushImageType::Type InImageType, const FVector2D& InImageSize, const FLinearColor& InTint, UObject* InObjectResource, bool bInDynamicallyLoaded )
-	: ImageSize( InImageSize )
+	, ImageType(InImageType)
+	, ImageSize( InImageSize )
 	, Margin( InMargin )
 #if WITH_EDITORONLY_DATA
 	, Tint_DEPRECATED(FLinearColor::White)
@@ -33,23 +53,34 @@ FSlateBrush::FSlateBrush( ESlateBrushDrawType::Type InDrawType, const FName InRe
 	, ResourceObject( InObjectResource )
 	, ResourceName( InResourceName )
 	, UVRegion( ForceInit )
-	, DrawAs( InDrawType )
-	, Tiling( InTiling )
-	, Mirroring( ESlateBrushMirrorType::NoMirror )
-	, ImageType( InImageType )
-	, bIsDynamicallyLoaded( bInDynamicallyLoaded )
 {
 	bHasUObject_DEPRECATED = (InObjectResource != nullptr) || InResourceName.ToString().StartsWith(FSlateBrush::UTextureIdentifier());
 
 	//Useful for debugging style breakages
 	//if ( !bHasUObject_DEPRECATED && InResourceName.IsValid() && InResourceName != NAME_None )
 	//{
-	//	checkf( FPaths::FileExists( InResourceName.ToString() ), *FPaths::ConvertRelativePathToFull( InResourceName.ToString() ) );
+	//	checkf( FPaths::FileExists( InResourceName.ToString() ), TEXT("The resource '%s' doesn't exist"), *FPaths::ConvertRelativePathToFull( InResourceName.ToString() ) );
 	//}
 }
 
-FSlateBrush::FSlateBrush( ESlateBrushDrawType::Type InDrawType, const FName InResourceName, const FMargin& InMargin, ESlateBrushTileType::Type InTiling, ESlateBrushImageType::Type InImageType, const FVector2D& InImageSize, const TSharedRef< FLinearColor >& InTint, UObject* InObjectResource, bool bInDynamicallyLoaded )
-	: ImageSize( InImageSize )
+FSlateBrush::FSlateBrush( ESlateBrushDrawType::Type InDrawType,
+ 						  const FName InResourceName,
+ 						  const FMargin& InMargin,
+ 						  ESlateBrushTileType::Type InTiling,
+ 						  ESlateBrushImageType::Type InImageType,
+ 						  const UE::Slate::FDeprecateVector2DParameter& InImageSize,
+ 						  const TSharedRef< FLinearColor >& InTint,
+ 						  UObject* InObjectResource, 
+ 						  bool bInDynamicallyLoaded
+ 						)
+
+	: bIsDynamicallyLoaded(bInDynamicallyLoaded)
+	, bIsSet(true)
+	, DrawAs(InDrawType)
+	, Tiling(InTiling)
+	, Mirroring(ESlateBrushMirrorType::NoMirror)
+	, ImageType(InImageType)
+	, ImageSize(InImageSize)
 	, Margin( InMargin )
 #if WITH_EDITORONLY_DATA
 	, Tint_DEPRECATED(FLinearColor::White)
@@ -58,23 +89,33 @@ FSlateBrush::FSlateBrush( ESlateBrushDrawType::Type InDrawType, const FName InRe
 	, ResourceObject( InObjectResource )
 	, ResourceName( InResourceName )
 	, UVRegion( ForceInit )
-	, DrawAs( InDrawType )
-	, Tiling( InTiling )
-	, Mirroring( ESlateBrushMirrorType::NoMirror )
-	, ImageType( InImageType )
-	, bIsDynamicallyLoaded( bInDynamicallyLoaded )
 {
 	bHasUObject_DEPRECATED = (InObjectResource != nullptr) || InResourceName.ToString().StartsWith(FSlateBrush::UTextureIdentifier());
 
 	//Useful for debugging style breakages
 	//if ( !bHasUObject_DEPRECATED && InResourceName.IsValid() && InResourceName != NAME_None )
 	//{
-	//	checkf( FPaths::FileExists( InResourceName.ToString() ), *FPaths::ConvertRelativePathToFull( InResourceName.ToString() ) );
+	//	checkf( FPaths::FileExists( InResourceName.ToString() ), TEXT("The resource '%s' doesn't exist"), *FPaths::ConvertRelativePathToFull( InResourceName.ToString() ) );
 	//}
 }
 
-FSlateBrush::FSlateBrush( ESlateBrushDrawType::Type InDrawType, const FName InResourceName, const FMargin& InMargin, ESlateBrushTileType::Type InTiling, ESlateBrushImageType::Type InImageType, const FVector2D& InImageSize, const FSlateColor& InTint, UObject* InObjectResource, bool bInDynamicallyLoaded )
-	: ImageSize(InImageSize)
+FSlateBrush::FSlateBrush( ESlateBrushDrawType::Type InDrawType, 
+						  const FName InResourceName, 
+						  const FMargin& InMargin,
+						  ESlateBrushTileType::Type InTiling, 
+						  ESlateBrushImageType::Type InImageType, 
+						  const UE::Slate::FDeprecateVector2DParameter& InImageSize, const FSlateColor& InTint, 
+						  UObject* InObjectResource, 
+						  bool bInDynamicallyLoaded
+ 						)
+
+	: bIsDynamicallyLoaded(bInDynamicallyLoaded)
+	, bIsSet(true)
+	, DrawAs(InDrawType)
+	, Tiling(InTiling)
+	, Mirroring(ESlateBrushMirrorType::NoMirror)
+	, ImageType(InImageType)
+	, ImageSize(InImageSize)
 	, Margin(InMargin)
 #if WITH_EDITORONLY_DATA
 	, Tint_DEPRECATED(FLinearColor::White)
@@ -83,18 +124,13 @@ FSlateBrush::FSlateBrush( ESlateBrushDrawType::Type InDrawType, const FName InRe
 	, ResourceObject(InObjectResource)
 	, ResourceName(InResourceName)
 	, UVRegion(ForceInit)
-	, DrawAs(InDrawType)
-	, Tiling(InTiling)
-	, Mirroring( ESlateBrushMirrorType::NoMirror )
-	, ImageType(InImageType)
-	, bIsDynamicallyLoaded(bInDynamicallyLoaded)
 {
 	bHasUObject_DEPRECATED = (InObjectResource != nullptr) || InResourceName.ToString().StartsWith(FSlateBrush::UTextureIdentifier());
 
 	//Useful for debugging style breakages
 	//if ( !bHasUObject_DEPRECATED && InResourceName.IsValid() && InResourceName != NAME_None )
 	//{
-	//	checkf( FPaths::FileExists( InResourceName.ToString() ), *FPaths::ConvertRelativePathToFull( InResourceName.ToString() ) );
+	//	checkf( FPaths::FileExists( InResourceName.ToString() ), TEXT("The resource '%s' doesn't exist"), *FPaths::ConvertRelativePathToFull( InResourceName.ToString() ) );
 	//}
 }
 
@@ -103,12 +139,41 @@ const FString FSlateBrush::UTextureIdentifier()
 	return FString(TEXT("texture:/"));
 }
 
-void FSlateBrush::UpdateRenderingResource() const
+const FSlateResourceHandle& FSlateBrush::GetRenderingResource() const
+{
+	if (ImageType == ESlateBrushImageType::Vector)
+	{
+		UE_LOG(LogSlate, Warning, TEXT("FSlateBrush::GetRenderingResource should be called with a size and scale for vector brushes"));
+	}
+	
+	UpdateRenderingResource(GetImageSize(), 1.0f);
+
+	return ResourceHandle;
+}
+
+void FSlateBrush::UpdateRenderingResource(FVector2f LocalSize, float DrawScale) const
 {
 	if (DrawAs != ESlateBrushDrawType::NoDrawType && (ResourceName != NAME_None || ResourceObject != nullptr))
 	{
-		ResourceHandle = FSlateApplicationBase::Get().GetRenderer()->GetResourceHandle(*this);
+		// Always re-acquire a handle if the current handle is invalid or if its vector graphics.
+		// For vector graphics we will rebuild the handle only if the shape needs to be rasterized again and the new size and scale
+		if (!ResourceHandle.IsValid() || ImageType == ESlateBrushImageType::Vector)
+		{
+			ResourceHandle = FSlateApplicationBase::Get().GetRenderer()->GetResourceHandle(*this, LocalSize, DrawScale);
+		}
+		else if (ResourceHandle.IsValid())
+		{
+			// Test the resource itself
+			if (FSlateShaderResource* Resource = ResourceHandle.GetResourceProxy()->Resource)
+			{
+				if (!Resource->IsResourceValid())
+				{
+					ResourceHandle = FSlateApplicationBase::Get().GetRenderer()->GetResourceHandle(*this, LocalSize, DrawScale);
+				}
+			}
+		}
 	}
+
 }
 
 bool FSlateBrush::CanRenderResourceObject(UObject* InResourceObject) const

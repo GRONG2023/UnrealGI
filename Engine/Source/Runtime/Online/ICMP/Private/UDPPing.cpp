@@ -233,7 +233,7 @@ private:
 // ----------------------------------------------------------------------------
 
 class FUdpPingManyAsync
-	: public FTickerObjectBase
+	: public FTSTickerObjectBase
 {
 public:
 	FUdpPingManyAsync(ISocketSubsystem* const InSocketSub, const FIcmpEchoManyCompleteDelegate& InCompletionDelegate);
@@ -487,6 +487,7 @@ bool FUdpPingWorker::SendPings(ISocketSubsystem& SocketSub)
 	bool bDone = false;
 
 	uint64 LastSendActivityTimeCycles = FPlatformTime::Cycles64();
+	bool bSentLastPing = false;
 	int NumSkippedPings = -1;
 
 	while (!bDone && !IsCanceled())
@@ -575,7 +576,7 @@ bool FUdpPingWorker::SendPings(ISocketSubsystem& SocketSub)
 				}
 
 				const double DeltaMs = FPlatformTime::ToMilliseconds64(FPlatformTime::Cycles64() - LastSendActivityTimeCycles);
-				if (DeltaMs < MinPingSendWaitTimeMs && NumSkippedPings >= 0)
+				if (bSentLastPing && (DeltaMs < MinPingSendWaitTimeMs && NumSkippedPings >= 0))
 				{
 					// Skip sending pings for a bit (but continue receiving) to not spam traffic.
 					++NumSkippedPings;
@@ -593,13 +594,18 @@ bool FUdpPingWorker::SendPings(ISocketSubsystem& SocketSub)
 
 				const ESendStatus Status = SendPing(SocketSub, SendBuf, SendDataSize, Progress);
 				NumSkippedPings = 0;
+				bSentLastPing = false;
 
 				if ((ESendStatus::Ok == Status) || (ESendStatus::NoTarget == Status))
 				{
 					// Don't wait/block here; poll for is-reply-data-available in loop until received or timeout.
-
-					LastSendActivityTimeCycles = FPlatformTime::Cycles64();
-
+					if (ESendStatus::Ok == Status)
+					{
+						// actually kick in the wait timer if we did anything on the network this time
+						bSentLastPing = true;
+						LastSendActivityTimeCycles = FPlatformTime::Cycles64();
+					}
+					
 					// Advance to next send target address.
 					++ItSend;
 				}
@@ -627,7 +633,7 @@ bool FUdpPingWorker::SendPings(ISocketSubsystem& SocketSub)
 				{
 					// Status is one of: BadTarget, NoSocket, BadBuffer, SocketSendFail, BadSendSize
 
-					UE_LOG(LogPing, Verbose, TEXT("SendPings; send error, status: %u"), Status);
+					UE_LOG(LogPing, Verbose, TEXT("SendPings; send error, status: %u"), int(Status));
 
 					// Send failed, mark the failure in the results and advance to next target address.
 					Progress.Result.Status = EIcmpResponseStatus::Unresolvable;
@@ -640,6 +646,21 @@ bool FUdpPingWorker::SendPings(ISocketSubsystem& SocketSub)
 	// Cleanup.
 	DestroySockets();
 	SocketTable.Empty();
+	// if we have any unresolvable results in the progress table, notify everyone of their failure now that we're all done
+	for (TPair<FProgressKey, FProgress>& Row : ProgressTable)
+	{
+		FProgress& Progress = Row.Value;
+		FIcmpEchoResult& Result = Progress.Result;
+
+		if (Result.Status != EIcmpResponseStatus::Success && Result.Status != EIcmpResponseStatus::Timeout)
+		{
+			UE_LOG(LogPing, Verbose, TEXT("SendPings(Done): %s:%d (id: %d, seq: %d) had non-successful status '%s' after send loop"), *Progress.Address, Progress.Port, Progress.EchoId, Progress.SequenceNum, LexToString(Result.Status));
+			Result.Time = Progress.TimeoutDuration;
+			Result.ReplyFrom.Empty();
+			const FIcmpTarget SendInfo(Progress.Address, Progress.Port);
+			GotResultDelegate.ExecuteIfBound(FIcmpEchoManyResult(Progress.Result, SendInfo));
+		}
+	}
 
 	return true;
 }
@@ -653,6 +674,8 @@ int FUdpPingWorker::CheckAwaitReplies()
 		FProgress& Progress = Row.Value;
 		FIcmpEchoResult& Result = Progress.Result;
 
+		bool bShouldNotifyFailure = false;
+
 		// InternalError status means no result yet.
 		if ((EIcmpResponseStatus::InternalError == Result.Status) && (Progress.StartTime > 0))
 		{
@@ -660,8 +683,9 @@ int FUdpPingWorker::CheckAwaitReplies()
 
 			if (ReplyWaitDuration >= Progress.TimeoutDuration)
 			{
-				// Waited for too long, timeout the ping request.
-				Result.ReplyFrom.Empty();
+				UE_LOG(LogPing, Log, TEXT("CheckAwaitReplies: %s:%d (id: %d, seq: %d) timed out after %.4f seconds"), *Progress.Address, Progress.Port, Progress.EchoId, Progress.SequenceNum, Progress.TimeoutDuration);
+				bShouldNotifyFailure = true;
+
 				Result.Time = Progress.TimeoutDuration;
 				Result.Status = EIcmpResponseStatus::Timeout;
 			}
@@ -669,6 +693,16 @@ int FUdpPingWorker::CheckAwaitReplies()
 			{
 				++NumAwaitingReply;
 			}
+		}
+
+		if (bShouldNotifyFailure)
+		{
+			Result.ReplyFrom.Empty();
+			Progress.SocketPtr = nullptr;
+
+			// Notify result listeners since we failed
+			const FIcmpTarget SendInfo(Progress.Address, Progress.Port);
+			GotResultDelegate.ExecuteIfBound(FIcmpEchoManyResult(Progress.Result, SendInfo));
 		}
 	}
 
@@ -878,8 +912,8 @@ FUdpPingWorker::FProgress* FUdpPingWorker::ProcessReply(const FInternetAddr& Fro
 	CalculateTripTime(RecvPacket.Body.TimeCode, RecvTimeCode, TimeoutSecs, Result.Time, Result.Status);
 
 	UE_LOG(LogPing, VeryVerbose, TEXT("ProcessReply; ok: %s:%u (%s)  id=%u (%#06x)  seq=%#06x  ping=%.4f s  status=%d"),
-		*Progress.Address, Progress.Port, *Result.ResolvedAddress, Progress.EchoId, Progress.EchoId,
-		Progress.SequenceNum, Result.Time, Result.Status);
+				 *Progress.Address, Progress.Port, *Result.ResolvedAddress, Progress.EchoId, Progress.EchoId,
+				 Progress.SequenceNum, Result.Time, int(Result.Status));
 
 	return FoundProgress;
 }
@@ -901,7 +935,7 @@ bool FUdpPingWorker::CalculateTripTime(const uint64 ReplyTimeCode, const uint64 
 		OutStatus = EIcmpResponseStatus::InternalError;
 	}
 
-	UE_LOG(LogPing, VeryVerbose, TEXT("CalculateTripTime; time=%.4f s  status=%d"), DurationSecs, OutStatus);
+	UE_LOG(LogPing, VeryVerbose, TEXT("CalculateTripTime; time=%.4f s  status=%d"), DurationSecs, int(OutStatus));
 
 	return bIsValid;
 }
@@ -951,7 +985,7 @@ uint32 FUdpPingWorker::FProgressKey::CalcHash() const
 // ----------------------------------------------------------------------------
 
 FUdpPingManyAsync::FUdpPingManyAsync(ISocketSubsystem* const InSocketSub, const FIcmpEchoManyCompleteDelegate& InCompletionDelegate)
-	: FTickerObjectBase(0)
+	: FTSTickerObjectBase(0)
 	, SocketSub(InSocketSub)
 	, CompletionDelegate(InCompletionDelegate)
 	, bThreadCompleted(false)
@@ -1370,7 +1404,7 @@ FIcmpEchoResult UDPEchoImpl(ISocketSubsystem* SocketSub, const FString& TargetAd
 							TSharedRef<FInternetAddr> RecvAddr = SocketSub->CreateInternetAddr();
 							if (Socket->RecvFrom(ResultBuffer, ResultPacketSize, BytesRead, *RecvAddr))
 							{
-								if (BytesRead > 0)
+								if (BytesRead == ResultPacketSize)
 								{
 									uint64 NowTime = FPlatformTime::Cycles64();
 
@@ -1436,12 +1470,12 @@ FIcmpEchoResult UDPEchoImpl(ISocketSubsystem* SocketSub, const FString& TargetAd
 }
 
 class FUDPPingAsyncResult
-	: public FTickerObjectBase
+	: public FTSTickerObjectBase
 {
 public:
 
 	FUDPPingAsyncResult(ISocketSubsystem* InSocketSub, const FString& TargetAddress, float Timeout, uint32 StackSize, FIcmpEchoResultCallback InCallback)
-		: FTickerObjectBase(0)
+		: FTSTickerObjectBase(0)
 		, SocketSub(InSocketSub)
 		, Callback(InCallback)
 		, bThreadCompleted(false)

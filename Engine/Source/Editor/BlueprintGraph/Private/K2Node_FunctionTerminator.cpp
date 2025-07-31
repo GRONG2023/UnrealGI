@@ -2,12 +2,30 @@
 
 
 #include "K2Node_FunctionTerminator.h"
-#include "UObject/UnrealType.h"
-#include "UObject/FrameworkObjectVersion.h"
-#include "GraphEditorSettings.h"
+
+#include "Containers/EnumAsByte.h"
+#include "Containers/UnrealString.h"
+#include "EdGraph/EdGraph.h"
+#include "EdGraph/EdGraphPin.h"
 #include "EdGraphSchema_K2.h"
+#include "Engine/Blueprint.h"
+#include "FindInBlueprints.h"
+#include "GraphEditorSettings.h"
+#include "HAL/Platform.h"
+#include "HAL/PlatformCrt.h"
+#include "Internationalization/Internationalization.h"
+#include "Internationalization/Text.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Kismet2/CompilerResultsLog.h"
+#include "Misc/AssertionMacros.h"
+#include "Serialization/Archive.h"
+#include "Templates/Casts.h"
+#include "Templates/SharedPointer.h"
+#include "UObject/Class.h"
+#include "UObject/FrameworkObjectVersion.h"
+#include "UObject/Object.h"
+#include "UObject/UnrealType.h"
+#include "UObject/WeakObjectPtrTemplates.h"
 
 #define LOCTEXT_NAMESPACE "K2Node"
 
@@ -34,6 +52,43 @@ void UK2Node_FunctionTerminator::Serialize(FArchive& Ar)
 FLinearColor UK2Node_FunctionTerminator::GetNodeTitleColor() const
 {
 	return GetDefault<UGraphEditorSettings>()->FunctionTerminatorNodeTitleColor;
+}
+
+FString UK2Node_FunctionTerminator::GetFindReferenceSearchString_Impl(EGetFindReferenceSearchStringFlags InFlags) const
+{
+	if (EnumHasAnyFlags(InFlags, EGetFindReferenceSearchStringFlags::UseSearchSyntax))
+	{
+		// Resolve the function
+		if (const UFunction* Function = FFunctionFromNodeHelper::FunctionFromNode(this))
+		{
+			// Attempt to construct an advanced search syntax query from the function
+			FString SearchTerm;
+			if (FindInBlueprintsHelpers::ConstructSearchTermFromFunction(Function, SearchTerm))
+			{
+				return SearchTerm;
+			}
+			else
+			{
+				// Fallback behavior: function was found but failed to construct a search term from it
+				// Just search for the function's friendly name
+				return UEdGraphSchema_K2::GetFriendlySignatureName(Function).ToString();
+			}
+		}
+	}
+	else
+	{
+		// When searching by name, return function native name in quotes.
+		// The quotes guarantee that the whole function name is used as single search term.
+		// This avoids function names with special characters being interpreted as operators.
+		if (const UFunction* Function = FFunctionFromNodeHelper::FunctionFromNode(this))
+		{
+			const FString NativeName = Function->GetName();
+			return FString::Printf(TEXT("\"%s\""), *NativeName);
+		}
+	}
+
+	// Fallback behavior: function was not resolved
+	return Super::GetFindReferenceSearchString_Impl(InFlags);
 }
 
 FName UK2Node_FunctionTerminator::CreateUniquePinName(FName InSourcePinName) const
@@ -73,7 +128,7 @@ bool UK2Node_FunctionTerminator::HasExternalDependencies(TArray<class UStruct*>*
 	const UBlueprint* SourceBlueprint = GetBlueprint();
 
 	UClass* SourceClass = FunctionReference.GetMemberParentClass(GetBlueprintClassFromNode());
-	bool bResult = (SourceClass != nullptr) && (SourceClass->ClassGeneratedBy != SourceBlueprint);
+	bool bResult = (SourceClass != nullptr) && (SourceClass->ClassGeneratedBy.Get() != SourceBlueprint);
 	if (bResult && OptionalOutput)
 	{
 		OptionalOutput->AddUnique(SourceClass);
@@ -85,7 +140,7 @@ bool UK2Node_FunctionTerminator::HasExternalDependencies(TArray<class UStruct*>*
 		UStruct* DepStruct = Pin ? Cast<UStruct>(Pin->PinType.PinSubCategoryObject.Get()) : nullptr;
 
 		UClass* DepClass = Cast<UClass>(DepStruct);
-		if (DepClass && (DepClass->ClassGeneratedBy == SourceBlueprint))
+		if (DepClass && (DepClass->ClassGeneratedBy.Get() == SourceBlueprint))
 		{
 			//Don't include self
 			continue;

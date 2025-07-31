@@ -2,31 +2,53 @@
 
 #include "SoundSubmixEditor.h"
 
-#include "AssetRegistryModule.h"
 #include "AssetToolsModule.h"
 #include "AudioEditorModule.h"
+#include "Delegates/Delegate.h"
+#include "DetailsViewArgs.h"
 #include "EdGraph/EdGraph.h"
+#include "EdGraph/EdGraphNode.h"
 #include "Editor.h"
-#include "GraphEditor.h"
-#include "GraphEditAction.h"
-#include "Kismet2/BlueprintEditorUtils.h"
-#include "Editor/PropertyEditor/Public/PropertyEditorModule.h"
-#include "Editor/PropertyEditor/Public/IDetailsView.h"
-#include "Editor/WorkspaceMenuStructure/Public/WorkspaceMenuStructureModule.h"
-#include "Framework/Commands/GenericCommands.h"
-#include "Framework/Docking/TabManager.h"
+#include "Editor/EditorEngine.h"
+#include "EngineAnalytics.h"
 #include "Factories/SoundSubmixFactory.h"
+#include "Framework/Commands/GenericCommands.h"
+#include "Framework/Commands/UIAction.h"
+#include "Framework/Commands/UICommandList.h"
+#include "Framework/Docking/TabManager.h"
+#include "GraphEditAction.h"
+#include "GraphEditor.h"
+#include "HAL/PlatformCrt.h"
+#include "IAnalyticsProviderET.h"
 #include "IAssetTools.h"
+#include "IDetailsView.h"
+#include "Internationalization/Internationalization.h"
+#include "Kismet2/BlueprintEditorUtils.h"
+#include "Logging/LogMacros.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/Attribute.h"
+#include "Modules/ModuleManager.h"
+#include "PropertyEditorModule.h"
+#include "SSoundSubmixActionMenu.h"
 #include "ScopedTransaction.h"
 #include "Sound/SoundSubmix.h"
 #include "SoundSubmixGraph/SoundSubmixGraph.h"
 #include "SoundSubmixGraph/SoundSubmixGraphNode.h"
 #include "SoundSubmixGraph/SoundSubmixGraphSchema.h"
-#include "SSoundSubmixActionMenu.h"
-#include "Toolkits/IToolkitHost.h"
-#include "UObject/Package.h"
+#include "Styling/AppStyle.h"
+#include "Templates/Casts.h"
+#include "Textures/SlateIcon.h"
+#include "Toolkits/AssetEditorToolkit.h"
+#include "Types/SlateEnums.h"
+#include "UObject/Object.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/UObjectGlobals.h"
+#include "UObject/UnrealNames.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
 #include "Widgets/Docking/SDockTab.h"
 
+class IToolkitHost;
 
 #define LOCTEXT_NAMESPACE "SoundSubmixEditor"
 DEFINE_LOG_CATEGORY_STATIC(LogSoundSubmixEditor, Log, All);
@@ -77,12 +99,12 @@ void FSoundSubmixEditor::RegisterTabSpawners(const TSharedRef<FTabManager>& InTa
 	InTabManager->RegisterTabSpawner(GraphCanvasTabId, FOnSpawnTab::CreateSP(this, &FSoundSubmixEditor::SpawnTab_GraphCanvas))
 		.SetDisplayName(LOCTEXT("GraphCanvasTab", "Graph"))
 		.SetGroup(WorkspaceMenuCategoryRef)
-		.SetIcon(FSlateIcon(FEditorStyle::GetStyleSetName(), "GraphEditor.EventGraph_16x"));
+		.SetIcon(FSlateIcon(FAppStyle::GetAppStyleSetName(), "GraphEditor.EventGraph_16x"));
 
 	InTabManager->RegisterTabSpawner(PropertiesTabId, FOnSpawnTab::CreateSP(this, &FSoundSubmixEditor::SpawnTab_Properties))
 		.SetDisplayName(LOCTEXT("PropertiesTab", "Details"))
 		.SetGroup(WorkspaceMenuCategoryRef)
-		.SetIcon(FSlateIcon(FEditorStyle::GetStyleSetName(), "LevelEditor.Tabs.Details"));
+		.SetIcon(FSlateIcon(FAppStyle::GetAppStyleSetName(), "LevelEditor.Tabs.Details"));
 }
 
 void FSoundSubmixEditor::UnregisterTabSpawners(const TSharedRef<FTabManager>& InTabManager)
@@ -145,18 +167,11 @@ void FSoundSubmixEditor::Init(const EToolkitMode::Type Mode, const TSharedPtr<IT
 
 	CreateInternalWidgets(SoundSubmix);
 
-	TSharedRef<FTabManager::FLayout> StandaloneDefaultLayout = FTabManager::NewLayout("Standalone_SoundSubmixEditor_Layout_v3")
+	TSharedRef<FTabManager::FLayout> StandaloneDefaultLayout = FTabManager::NewLayout("Standalone_SoundSubmixEditor_Layout_v4")
 		->AddArea
 		(
 			FTabManager::NewPrimaryArea()
 			->SetOrientation(Orient_Vertical)
-			->Split
-			(
-				FTabManager::NewStack()
-				->SetSizeCoefficient(0.1f)
-				->SetHideTabWell(true)
-				->AddTab(GetToolbarTabId(), ETabState::OpenedTab)
-			)
 			->Split
 			(
 				FTabManager::NewSplitter()
@@ -210,10 +225,7 @@ FSoundSubmixEditor::~FSoundSubmixEditor()
 
 void FSoundSubmixEditor::AddReferencedObjects(FReferenceCollector& Collector)
 {
-	for (UObject* Obj : GetEditingObjects())
-	{
-		Collector.AddReferencedObject(Obj);
-	}
+	Collector.AddReferencedObjects(GetEditingObjectPtrs());
 }
 
 TSharedRef<SDockTab> FSoundSubmixEditor::SpawnTab_GraphCanvas(const FSpawnTabArgs& Args)
@@ -234,7 +246,6 @@ TSharedRef<SDockTab> FSoundSubmixEditor::SpawnTab_Properties(const FSpawnTabArgs
 	check(Args.GetTabId() == PropertiesTabId);
 
 	TSharedRef<SDockTab> SpawnedTab = SNew(SDockTab)
-		.Icon(FEditorStyle::GetBrush("LevelEditor.Tabs.Details"))
 		.Label(LOCTEXT("SoundSubmixPropertiesTitle", "Details"))
 		[
 			DetailsView.ToSharedRef()
@@ -273,7 +284,8 @@ void FSoundSubmixEditor::CreateInternalWidgets(USoundSubmixBase* InSoundSubmix)
 	GraphEditor = CreateGraphEditorWidget(InSoundSubmix);
 
 	FPropertyEditorModule& PropertyEditorModule = FModuleManager::GetModuleChecked<FPropertyEditorModule>("PropertyEditor");
-	const FDetailsViewArgs DetailsViewArgs(false, false, true, FDetailsViewArgs::HideNameArea, false);
+	FDetailsViewArgs DetailsViewArgs;
+	DetailsViewArgs.NameAreaSettings = FDetailsViewArgs::HideNameArea;
 	DetailsView = PropertyEditorModule.CreateDetailView(DetailsViewArgs);
 	DetailsView->SetObject(InSoundSubmix);
 }

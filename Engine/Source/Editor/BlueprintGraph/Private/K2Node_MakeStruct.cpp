@@ -1,21 +1,38 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "K2Node_MakeStruct.h"
-#include "UObject/StructOnScope.h"
-#include "UObject/TextProperty.h"
-#include "Engine/UserDefinedStruct.h"
+
+#include "Containers/Array.h"
+#include "Containers/EnumAsByte.h"
+#include "Containers/Map.h"
+#include "Containers/UnrealString.h"
+#include "Delegates/Delegate.h"
+#include "EdGraph/EdGraphPin.h"
 #include "EdGraphSchema_K2.h"
+#include "EditorCategoryUtils.h"
+#include "Engine/Blueprint.h"
+#include "Internationalization/Internationalization.h"
+#include "Kismet/KismetMathLibrary.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Kismet2/CompilerResultsLog.h"
+#include "KismetCompilerMisc.h"
 #include "MakeStructHandler.h"
-#include "BlueprintNodeBinder.h"
-#include "BlueprintActionFilter.h"
-#include "BlueprintFieldNodeSpawner.h"
-#include "EditorCategoryUtils.h"
-#include "Internationalization/TextPackageNamespaceUtil.h"
-#include "BlueprintActionDatabaseRegistrar.h"
+#include "Math/Rotator.h"
+#include "Math/UnrealMathSSE.h"
+#include "Math/Vector2D.h"
+#include "Misc/AssertionMacros.h"
 #include "PropertyCustomizationHelpers.h"
-#include "Kismet/KismetMathLibrary.h"
+#include "Serialization/Archive.h"
+#include "Styling/AppStyle.h"
+#include "UObject/Class.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/ObjectSaveContext.h"
+#include "UObject/StructOnScope.h"
+#include "UObject/TextProperty.h"
+#include "UObject/UnrealType.h"
+#include "UObject/WeakObjectPtrTemplates.h"
+
+class FKismetCompilerContext;
 
 #define LOCTEXT_NAMESPACE "K2Node_MakeStruct"
 
@@ -90,6 +107,18 @@ static bool CanBeExposed(const FProperty* Property, UBlueprint* BP)
 	{
 		const UEdGraphSchema_K2* Schema = GetDefault<UEdGraphSchema_K2>();
 		check(Schema);
+
+		// Treat all inline edit condition properties as override flags; that is, don't allow
+		// these to be exposed as part of the optional input pin set. Their value will be set
+		// implicitly at runtime based on whether or not any bound members are exposed, rather
+		// than explicitly via an exposed input pin. This emulates how the Property Editor
+		// handles setting these values at edit time (they appear as an inline checkbox that
+		// the user ticks on to set the flag and enable/override a bound property's value).
+		static const FName MD_InlineEditConditionToggle(TEXT("InlineEditConditionToggle"));
+		if (Property->HasMetaData(MD_InlineEditConditionToggle))
+		{
+			return false;
+		}
 
 		const bool bIsEditorBP = IsEditorOnlyObject(BP);
 		const bool bIsEditAnywhereProperty = Property->HasAllPropertyFlags(CPF_Edit) &&
@@ -239,7 +268,7 @@ FText UK2Node_MakeStruct::GetTooltipText() const
 
 FSlateIcon UK2Node_MakeStruct::GetIconAndTint(FLinearColor& OutColor) const
 {
-	static FSlateIcon Icon("EditorStyle", "GraphEditor.MakeStruct_16x");
+	static FSlateIcon Icon(FAppStyle::GetAppStyleSetName(), "GraphEditor.MakeStruct_16x");
 	return Icon;
 }
 
@@ -292,48 +321,22 @@ UK2Node::ERedirectType UK2Node_MakeStruct::DoPinsMatchForReconstruction(const UE
 
 void UK2Node_MakeStruct::GetMenuActions(FBlueprintActionDatabaseRegistrar& ActionRegistrar) const
 {
-	struct GetMenuActions_Utils
-	{
-		static void SetNodeStruct(UEdGraphNode* NewNode, FFieldVariant /*StructField*/, TWeakObjectPtr<UScriptStruct> NonConstStructPtr)
-		{
-			UK2Node_MakeStruct* MakeNode = CastChecked<UK2Node_MakeStruct>(NewNode);
-			MakeNode->StructType = NonConstStructPtr.Get();
-		}
-
-		static void OverrideCategory(FBlueprintActionContext const& Context, IBlueprintNodeBinder::FBindingSet const& /*Bindings*/, FBlueprintActionUiSpec* UiSpecOut, TWeakObjectPtr<UScriptStruct> StructPtr)
-		{
-			for (UEdGraphPin* Pin : Context.Pins)
-			{
-				UScriptStruct* PinStruct = Cast<UScriptStruct>(Pin->PinType.PinSubCategoryObject.Get());
-				if ((PinStruct != nullptr) && (StructPtr.Get() == PinStruct) && (Pin->Direction == EGPD_Input))
-				{
-					UiSpecOut->Category = LOCTEXT("EmptyCategory", "|");
-					break;
-				}
-			}
-		}
-	};
-
-	UClass* NodeClass = GetClass();
-	ActionRegistrar.RegisterStructActions( FBlueprintActionDatabaseRegistrar::FMakeStructSpawnerDelegate::CreateLambda([NodeClass](const UScriptStruct* Struct)->UBlueprintNodeSpawner*
-	{
-		UBlueprintFieldNodeSpawner* NodeSpawner = nullptr;
-		
-		if (UK2Node_MakeStruct::CanBeMade(Struct))
-		{
-			NodeSpawner = UBlueprintFieldNodeSpawner::Create(NodeClass, const_cast<UScriptStruct*>(Struct));
-			check(NodeSpawner != nullptr);
-			TWeakObjectPtr<UScriptStruct> NonConstStructPtr = MakeWeakObjectPtr(const_cast<UScriptStruct*>(Struct));
-			NodeSpawner->SetNodeFieldDelegate     = UBlueprintFieldNodeSpawner::FSetNodeFieldDelegate::CreateStatic(GetMenuActions_Utils::SetNodeStruct, NonConstStructPtr);
-			NodeSpawner->DynamicUiSignatureGetter = UBlueprintFieldNodeSpawner::FUiSpecOverrideDelegate::CreateStatic(GetMenuActions_Utils::OverrideCategory, NonConstStructPtr);
-		}
-		return NodeSpawner;
-	}) );
+	Super::SetupMenuActions(ActionRegistrar, FMakeStructSpawnerAllowedDelegate::CreateStatic(&UK2Node_MakeStruct::CanBeMade), EGPD_Input);
 }
 
 FText UK2Node_MakeStruct::GetMenuCategory() const
 {
 	return FEditorCategoryUtils::GetCommonCategory(FCommonEditorCategory::Struct);
+}
+
+void UK2Node_MakeStruct::PreSave(FObjectPreSaveContext SaveContext)
+{
+	Super::PreSave(SaveContext);
+	UBlueprint* Blueprint = FBlueprintEditorUtils::FindBlueprintForNode(this);
+	if (Blueprint && !Blueprint->bBeingCompiled)
+	{
+		bMadeAfterOverridePinRemoval = true;
+	}
 }
 
 void UK2Node_MakeStruct::PostPlacedNewNode()
@@ -348,11 +351,10 @@ void UK2Node_MakeStruct::Serialize(FArchive& Ar)
 {
 	Super::Serialize(Ar);
 
-	UBlueprint* Blueprint = FBlueprintEditorUtils::FindBlueprintForNode(this);
-
-	if (Blueprint && !Ar.IsTransacting() && !HasAllFlags(RF_Transient))
+	if (Ar.IsLoading() && !Ar.IsTransacting() && !HasAllFlags(RF_Transient))
 	{
-		if (Ar.IsLoading() && !bMadeAfterOverridePinRemoval)
+		UBlueprint* Blueprint = FBlueprintEditorUtils::FindBlueprintForNode(this);
+		if (Blueprint && !bMadeAfterOverridePinRemoval)
 		{
 			// Check if this node actually requires warning the user that functionality has changed.
 			bMadeAfterOverridePinRemoval = true;
@@ -416,13 +418,6 @@ void UK2Node_MakeStruct::Serialize(FArchive& Ar)
 				}
 			}
 		}
-		else if (Ar.IsSaving())
-		{
-			if (!Blueprint->bBeingCompiled)
-			{
-				bMadeAfterOverridePinRemoval = true;
-			}
-		}
 	}
 }
 
@@ -447,17 +442,17 @@ void UK2Node_MakeStruct::ConvertDeprecatedNode(UEdGraph* Graph, bool bOnlySafeCh
 		if (StructType == TBaseStructure<FRotator>::Get())
 		{
 			MakeNodeFunction = UKismetMathLibrary::StaticClass()->FindFunctionByName(GET_FUNCTION_NAME_CHECKED(UKismetMathLibrary, MakeRotator));
-			OldPinToNewPinMap.Add(TEXT("Rotator"), TEXT("ReturnValue"));
+			OldPinToNewPinMap.Add(TEXT("Rotator"), UEdGraphSchema_K2::PN_ReturnValue);
 		}
 		else if (StructType == TBaseStructure<FVector>::Get())
 		{
-			MakeNodeFunction = UKismetMathLibrary::StaticClass()->FindFunctionByName(GET_FUNCTION_NAME_CHECKED(UKismetMathLibrary, MakeVector));
-			OldPinToNewPinMap.Add(TEXT("Vector"), TEXT("ReturnValue"));
+			MakeNodeFunction = UKismetMathLibrary::StaticClass()->FindFunctionByName(GET_FUNCTION_NAME_CHECKED_ThreeParams(UKismetMathLibrary, MakeVector, double, double, double));
+			OldPinToNewPinMap.Add(TEXT("Vector"), UEdGraphSchema_K2::PN_ReturnValue);
 		}
 		else if (StructType == TBaseStructure<FVector2D>::Get())
 		{
-			MakeNodeFunction = UKismetMathLibrary::StaticClass()->FindFunctionByName(GET_FUNCTION_NAME_CHECKED(UKismetMathLibrary, MakeVector2D));
-			OldPinToNewPinMap.Add(TEXT("Vector2D"), TEXT("ReturnValue"));
+			MakeNodeFunction = UKismetMathLibrary::StaticClass()->FindFunctionByName(GET_FUNCTION_NAME_CHECKED_TwoParams(UKismetMathLibrary, MakeVector2D, double, double));
+			OldPinToNewPinMap.Add(TEXT("Vector2D"), UEdGraphSchema_K2::PN_ReturnValue);
 		}
 		else
 		{
@@ -466,7 +461,7 @@ void UK2Node_MakeStruct::ConvertDeprecatedNode(UEdGraph* Graph, bool bOnlySafeCh
 
 			if (MakeNodeFunction)
 			{
-				OldPinToNewPinMap.Add(*StructType->GetName(), TEXT("ReturnValue"));
+				OldPinToNewPinMap.Add(*StructType->GetName(), UEdGraphSchema_K2::PN_ReturnValue);
 			}
 		}
 

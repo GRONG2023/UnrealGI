@@ -30,12 +30,19 @@
 #include "IDocumentation.h"
 #include "Widgets/Text/SInlineEditableTextBlock.h"
 #include "SLevelOfDetailBranchNode.h"
+#include "BehaviorTree/Decorators/BTDecorator_Blackboard.h"
 
 #define LOCTEXT_NAMESPACE "BehaviorTreeEditor"
 
-namespace
+#define ALWAYS_SHOW_BT_EXECUTION_INDEX 1
+
+bool ShouldShowExecutionIndex()
 {
-	static const bool bShowExecutionIndexInEditorMode = true;
+#ifdef ALWAYS_SHOW_BT_EXECUTION_INDEX
+	return true;
+#else
+	return GEditor && (GEditor->bIsSimulatingInEditor || GEditor->PlayWorld != NULL);
+#endif // ALWAYS_SHOW_BT_EXECUTION_INDEX
 }
 
 /////////////////////////////////////////////////////
@@ -61,7 +68,7 @@ void SBehaviorTreePin::Construct(const FArguments& InArgs, UEdGraphPin* InPin)
 FSlateColor SBehaviorTreePin::GetPinColor() const
 {
 	return 
-		GraphPinObj->bIsDiffing ? BehaviorTreeColors::Pin::Diff :
+		bIsDiffHighlighted ? BehaviorTreeColors::Pin::Diff :
 		IsHovered() ? BehaviorTreeColors::Pin::Hover :
 		(GraphPinObj->PinType.PinCategory == UBehaviorTreeEditorTypes::PinCategory_SingleComposite) ? BehaviorTreeColors::Pin::CompositeOnly :
 		(GraphPinObj->PinType.PinCategory == UBehaviorTreeEditorTypes::PinCategory_SingleTask) ? BehaviorTreeColors::Pin::TaskOnly :
@@ -90,7 +97,7 @@ public:
 		OnHoverStateChangedEvent = InArgs._OnHoverStateChanged;
 		OnGetIndexColorEvent = InArgs._OnGetIndexColor;
 
-		const FSlateBrush* IndexBrush = FEditorStyle::GetBrush(TEXT("BTEditor.Graph.BTNode.Index"));
+		const FSlateBrush* IndexBrush = FAppStyle::GetBrush(TEXT("BTEditor.Graph.BTNode.Index"));
 
 		ChildSlot
 		[
@@ -117,7 +124,7 @@ public:
 				[
 					SNew(STextBlock)
 					.Text(InArgs._Text)
-					.Font(FEditorStyle::GetFontStyle("BTEditor.Graph.BTNode.IndexText"))
+					.Font(FAppStyle::GetFontStyle("BTEditor.Graph.BTNode.IndexText"))
 				]
 			]
 		];
@@ -234,7 +241,6 @@ FSlateColor SGraphNode_BehaviorTree::GetBorderBackgroundColor() const
 FSlateColor SGraphNode_BehaviorTree::GetBackgroundColor() const
 {
 	UBehaviorTreeGraphNode* BTGraphNode = Cast<UBehaviorTreeGraphNode>(GraphNode);
-	UBehaviorTreeGraphNode_Decorator* BTGraph_Decorator = Cast<UBehaviorTreeGraphNode_Decorator>(GraphNode);
 	const bool bIsActiveForDebugger = BTGraphNode ?
 		!bSuppressDebuggerColor && (BTGraphNode->bDebuggerMarkCurrentlyActive || BTGraphNode->bDebuggerMarkPreviouslyActive) :
 		false;
@@ -244,36 +250,9 @@ FSlateColor SGraphNode_BehaviorTree::GetBackgroundColor() const
 	{
 		NodeColor = BehaviorTreeColors::NodeBody::Error;
 	}
-	else if (BTGraphNode && BTGraphNode->bInjectedNode)
+	else if (BTGraphNode)
 	{
-		NodeColor = bIsActiveForDebugger ? BehaviorTreeColors::Debugger::ActiveDecorator : BehaviorTreeColors::NodeBody::InjectedSubNode;
-	}
-	else if (BTGraph_Decorator || Cast<UBehaviorTreeGraphNode_CompositeDecorator>(GraphNode))
-	{
-		check(BTGraphNode);
-		NodeColor = bIsActiveForDebugger ? BehaviorTreeColors::Debugger::ActiveDecorator : 
-			BTGraphNode->bRootLevel ? BehaviorTreeColors::NodeBody::InjectedSubNode : BehaviorTreeColors::NodeBody::Decorator;
-	}
-	else if (Cast<UBehaviorTreeGraphNode_Task>(GraphNode))
-	{
-		check(BTGraphNode);
-		const bool bIsSpecialTask = Cast<UBTTask_RunBehavior>(BTGraphNode->NodeInstance) != nullptr;
-		NodeColor = bIsSpecialTask ? BehaviorTreeColors::NodeBody::TaskSpecial : BehaviorTreeColors::NodeBody::Task;
-	}
-	else if (Cast<UBehaviorTreeGraphNode_Composite>(GraphNode))
-	{
-		check(BTGraphNode);
-		UBTCompositeNode* CompositeNodeInstance = Cast<UBTCompositeNode>(BTGraphNode->NodeInstance);
-		const bool bIsScoped = CompositeNodeInstance && CompositeNodeInstance->IsApplyingDecoratorScope();
-		NodeColor = bIsScoped ? BehaviorTreeColors::NodeBody::CompositeScoped : BehaviorTreeColors::NodeBody::Composite;
-	}
-	else if (Cast<UBehaviorTreeGraphNode_Service>(GraphNode))
-	{
-		NodeColor = bIsActiveForDebugger ? BehaviorTreeColors::Debugger::ActiveService : BehaviorTreeColors::NodeBody::Service;
-	}
-	else if (Cast<UBehaviorTreeGraphNode_Root>(GraphNode) && GraphNode->Pins.IsValidIndex(0) && GraphNode->Pins[0]->LinkedTo.Num() > 0)
-	{
-		NodeColor = BehaviorTreeColors::NodeBody::Root;
+		NodeColor = BTGraphNode->GetBackgroundColor(bIsActiveForDebugger);
 	}
 
 	return (FlashAlpha > 0.0f) ? FMath::Lerp(NodeColor, FlashColor, FlashAlpha) : NodeColor;
@@ -381,7 +360,7 @@ void SGraphNode_BehaviorTree::UpdateGraphNode()
 		.VAlign(VAlign_Center)
 		[
 			SNew(SBorder)
-			.BorderImage( FEditorStyle::GetBrush( "Graph.StateNode.Body" ) )
+			.BorderImage( FAppStyle::GetBrush( "Graph.StateNode.Body" ) )
 			.Padding(0.0f)
 			.BorderBackgroundColor( this, &SGraphNode_BehaviorTree::GetBorderBackgroundColor )
 			.OnMouseButtonDown(this, &SGraphNode_BehaviorTree::OnMouseDown)
@@ -420,7 +399,7 @@ void SGraphNode_BehaviorTree::UpdateGraphNode()
 						.AutoHeight()
 						[
 							SAssignNew(NodeBody, SBorder)
-							.BorderImage( FEditorStyle::GetBrush("BTEditor.Graph.BTNode.Body") )
+							.BorderImage( FAppStyle::GetBrush("BTEditor.Graph.BTNode.Body") )
 							.BorderBackgroundColor( this, &SGraphNode_BehaviorTree::GetBackgroundColor )
 							.HAlign(HAlign_Fill)
 							.VAlign(VAlign_Center)
@@ -474,7 +453,7 @@ void SGraphNode_BehaviorTree::UpdateGraphNode()
 													.AutoHeight()
 													[
 														SAssignNew(InlineEditableText, SInlineEditableTextBlock)
-														.Style( FEditorStyle::Get(), "Graph.StateNode.NodeTitleInlineEditableText" )
+														.Style( FAppStyle::Get(), "Graph.StateNode.NodeTitleInlineEditableText" )
 														.Text( NodeTitle.Get(), &SNodeTitle::GetHeadTitle )
 														.OnVerifyTextChanged(this, &SGraphNode_BehaviorTree::OnVerifyNameTextChanged)
 														.OnTextCommitted(this, &SGraphNode_BehaviorTree::OnNameTextCommited)
@@ -504,7 +483,7 @@ void SGraphNode_BehaviorTree::UpdateGraphNode()
 								.VAlign(VAlign_Fill)
 								[
 									SNew(SBorder)
-									.BorderImage( FEditorStyle::GetBrush("BTEditor.Graph.BTNode.Body") )
+									.BorderImage( FAppStyle::GetBrush("BTEditor.Graph.BTNode.Body") )
 									.BorderBackgroundColor(BehaviorTreeColors::Debugger::SearchFailed)
 									.Padding(FMargin(4.0f, 0.0f))
 									.Visibility(this, &SGraphNode_BehaviorTree::GetDebuggerSearchFailedMarkerVisibility)
@@ -547,11 +526,11 @@ void SGraphNode_BehaviorTree::UpdateGraphNode()
 					SNew(SBorder)
 					.BorderBackgroundColor(BehaviorTreeColors::Action::DragMarker)
 					.ColorAndOpacity(BehaviorTreeColors::Action::DragMarker)
-					.BorderImage(FEditorStyle::GetBrush("BTEditor.Graph.BTNode.Body"))
+					.BorderImage(FAppStyle::GetBrush("BTEditor.Graph.BTNode.Body"))
 					.Visibility(this, &SGraphNode_BehaviorTree::GetDragOverMarkerVisibility)
 					[
 						SNew(SBox)
-						.HeightOverride(4)
+						.HeightOverride(4.f)
 					]
 				]
 
@@ -561,7 +540,7 @@ void SGraphNode_BehaviorTree::UpdateGraphNode()
 				.VAlign(VAlign_Top)
 				[
 					SNew(SImage)
-					.Image(FEditorStyle::GetBrush(TEXT("BTEditor.Graph.BTNode.Blueprint")))
+					.Image(FAppStyle::GetBrush(TEXT("BTEditor.Graph.BTNode.Blueprint")))
 					.Visibility(this, &SGraphNode_BehaviorTree::GetBlueprintIconVisibility)
 				]
 			]
@@ -599,6 +578,27 @@ EVisibility SGraphNode_BehaviorTree::GetDebuggerSearchFailedMarkerVisibility() c
 {
 	UBehaviorTreeGraphNode_Decorator* MyNode = Cast<UBehaviorTreeGraphNode_Decorator>(GraphNode);
 	return MyNode && MyNode->bDebuggerMarkSearchFailed ? EVisibility::HitTestInvisible : EVisibility::Collapsed;
+}
+
+void SGraphNode_BehaviorTree::PreChange(const UUserDefinedEnum* Changed, FEnumEditorUtils::EEnumEditorChangeInfo ChangedType)
+{
+	// Implementing interface pure virtual method but nothing to do here
+}
+
+void SGraphNode_BehaviorTree::PostChange(const UUserDefinedEnum* Changed, FEnumEditorUtils::EEnumEditorChangeInfo ChangedType)
+{
+	if (const UBehaviorTreeGraphNode_Decorator* DecoratorNode = Cast<UBehaviorTreeGraphNode_Decorator>(GraphNode))
+	{
+		if (UBTDecorator_Blackboard* Decorator = Cast<UBTDecorator_Blackboard>(DecoratorNode->NodeInstance))
+		{
+			Decorator->BuildDescription();
+		}
+	}
+	
+	if (UBehaviorTreeGraphNode_CompositeDecorator* DecoratorNode = Cast<UBehaviorTreeGraphNode_CompositeDecorator>(GraphNode))
+	{
+		DecoratorNode->BuildDescription();
+	}
 }
 
 void SGraphNode_BehaviorTree::Tick( const FGeometry& AllottedGeometry, const double InCurrentTime, const float InDeltaTime )
@@ -682,7 +682,7 @@ void SGraphNode_BehaviorTree::Tick( const FGeometry& AllottedGeometry, const dou
 			// when it wasn't any of them, add node itself to triggers (e.g. parallel's main task)
 			if (DecoratorWidgets.Num() == 0)
 			{
-				TriggerOffsets.Add(FNodeBounds(FVector2D(0,0),GetDesiredSize()));
+				TriggerOffsets.Add(FNodeBounds(FVector2f(0.f,0.f),GetDesiredSize()));
 			}
 		}
 	}
@@ -783,35 +783,13 @@ void SGraphNode_BehaviorTree::AddPin(const TSharedRef<SGraphPin>& PinToAdd)
 
 TSharedPtr<SToolTip> SGraphNode_BehaviorTree::GetComplexTooltip()
 {
-	UBehaviorTreeGraphNode_CompositeDecorator* DecoratorNode = Cast<UBehaviorTreeGraphNode_CompositeDecorator>(GraphNode);
-	if (DecoratorNode && DecoratorNode->GetBoundGraph())
-	{
-		return SNew(SToolTip)
-			[
-				SNew(SOverlay)
-				+SOverlay::Slot()
-				[
-					// Create the tooltip graph preview, make sure to disable state overlays to
-					// prevent the PIE / read-only borders from obscuring the graph
-					SNew(SGraphPreviewer, DecoratorNode->GetBoundGraph())
-					.CornerOverlayText(LOCTEXT("CompositeDecoratorOverlayText", "Composite Decorator"))
-					.ShowGraphStateOverlay(false)
-				]
-				+SOverlay::Slot()
-				.Padding(2.0f)
-				[
-					SNew(STextBlock)
-					.Text(LOCTEXT("CompositeDecoratorTooltip", "Double-click to Open"))
-					.ColorAndOpacity(FSlateColor::UseSubduedForeground())
-				]
-			];
-	}
+	const UBehaviorTreeGraphNode* BTGraphNode = Cast<UBehaviorTreeGraphNode>(GraphNode);
+	const bool bHasErrors = BTGraphNode && BTGraphNode->HasErrors();
 
-	UBehaviorTreeGraphNode_Task* TaskNode = Cast<UBehaviorTreeGraphNode_Task>(GraphNode);
-	if(TaskNode && TaskNode->NodeInstance)
+	if (!bHasErrors)
 	{
-		UBTTask_RunBehavior* RunBehavior = Cast<UBTTask_RunBehavior>(TaskNode->NodeInstance);
-		if(RunBehavior && RunBehavior->GetSubtreeAsset() && RunBehavior->GetSubtreeAsset()->BTGraph)
+		UBehaviorTreeGraphNode_CompositeDecorator* DecoratorNode = Cast<UBehaviorTreeGraphNode_CompositeDecorator>(GraphNode);
+		if (DecoratorNode && DecoratorNode->GetBoundGraph())
 		{
 			return SNew(SToolTip)
 				[
@@ -820,18 +798,46 @@ TSharedPtr<SToolTip> SGraphNode_BehaviorTree::GetComplexTooltip()
 					[
 						// Create the tooltip graph preview, make sure to disable state overlays to
 						// prevent the PIE / read-only borders from obscuring the graph
-						SNew(SGraphPreviewer, RunBehavior->GetSubtreeAsset()->BTGraph)
-						.CornerOverlayText(LOCTEXT("RunBehaviorOverlayText", "Run Behavior"))
+						SNew(SGraphPreviewer, DecoratorNode->GetBoundGraph())
+						.CornerOverlayText(LOCTEXT("CompositeDecoratorOverlayText", "Composite Decorator"))
 						.ShowGraphStateOverlay(false)
 					]
 					+SOverlay::Slot()
 					.Padding(2.0f)
 					[
 						SNew(STextBlock)
-						.Text(LOCTEXT("RunBehaviorTooltip", "Double-click to Open"))
+						.Text(LOCTEXT("CompositeDecoratorTooltip", "Double-click to Open"))
 						.ColorAndOpacity(FSlateColor::UseSubduedForeground())
 					]
 				];
+		}
+
+		UBehaviorTreeGraphNode_Task* TaskNode = Cast<UBehaviorTreeGraphNode_Task>(GraphNode);
+		if(TaskNode && TaskNode->NodeInstance)
+		{
+			UBTTask_RunBehavior* RunBehavior = Cast<UBTTask_RunBehavior>(TaskNode->NodeInstance);
+			if(RunBehavior && RunBehavior->GetSubtreeAsset() && RunBehavior->GetSubtreeAsset()->BTGraph)
+			{
+				return SNew(SToolTip)
+					[
+						SNew(SOverlay)
+						+SOverlay::Slot()
+						[
+							// Create the tooltip graph preview, make sure to disable state overlays to
+							// prevent the PIE / read-only borders from obscuring the graph
+							SNew(SGraphPreviewer, RunBehavior->GetSubtreeAsset()->BTGraph)
+							.CornerOverlayText(LOCTEXT("RunBehaviorOverlayText", "Run Behavior"))
+							.ShowGraphStateOverlay(false)
+						]
+						+SOverlay::Slot()
+						.Padding(2.0f)
+						[
+							SNew(STextBlock)
+							.Text(LOCTEXT("RunBehaviorTooltip", "Double-click to Open"))
+							.ColorAndOpacity(FSlateColor::UseSubduedForeground())
+						]
+					];
+			}
 		}
 	}
 
@@ -841,7 +847,12 @@ TSharedPtr<SToolTip> SGraphNode_BehaviorTree::GetComplexTooltip()
 const FSlateBrush* SGraphNode_BehaviorTree::GetNameIcon() const
 {	
 	UBehaviorTreeGraphNode* BTGraphNode = Cast<UBehaviorTreeGraphNode>(GraphNode);
-	return BTGraphNode != nullptr ? FEditorStyle::GetBrush(BTGraphNode->GetNameIcon()) : FEditorStyle::GetBrush(TEXT("BTEditor.Graph.BTNode.Icon"));
+	if (BTGraphNode != nullptr)
+	{
+		return BTGraphNode->GetNameIconStyleSet().GetBrush(BTGraphNode->GetNameIcon());
+	}
+
+	return FAppStyle::GetBrush(TEXT("BTEditor.Graph.BTNode.Icon"));
 }
 
 static UBehaviorTreeGraphNode* GetParentNode(UEdGraphNode* GraphNode)
@@ -886,7 +897,7 @@ FSlateColor SGraphNode_BehaviorTree::GetIndexColor(bool bHovered) const
 	static const FName HoveredColor("BTEditor.Graph.BTNode.Index.HoveredColor");
 	static const FName DefaultColor("BTEditor.Graph.BTNode.Index.Color");
 
-	return bHighlightHover ? FEditorStyle::Get().GetSlateColor(HoveredColor) : FEditorStyle::Get().GetSlateColor(DefaultColor);
+	return bHighlightHover ? FAppStyle::Get().GetSlateColor(HoveredColor) : FAppStyle::Get().GetSlateColor(DefaultColor);
 }
 
 EVisibility SGraphNode_BehaviorTree::GetIndexVisibility() const
@@ -906,8 +917,7 @@ EVisibility SGraphNode_BehaviorTree::GetIndexVisibility() const
 	}
 
 	// Visible if we are in PIE or if we have siblings
-	CA_SUPPRESS(6235);
-	const bool bCanShowIndex = (bShowExecutionIndexInEditorMode || GEditor->bIsSimulatingInEditor || GEditor->PlayWorld != NULL) || (MyParentOutputPin && MyParentOutputPin->LinkedTo.Num() > 1);
+	const bool bCanShowIndex = ShouldShowExecutionIndex() || (MyParentOutputPin && MyParentOutputPin->LinkedTo.Num() > 1);
 
 	// LOD this out once things get too small
 	TSharedPtr<SGraphPanel> MyOwnerPanel = GetOwnerPanel();
@@ -926,8 +936,7 @@ FText SGraphNode_BehaviorTree::GetIndexText() const
 
 	int32 Index = 0;
 
-	CA_SUPPRESS(6235);
-	if (bShowExecutionIndexInEditorMode || GEditor->bIsSimulatingInEditor || GEditor->PlayWorld != NULL)
+	if (ShouldShowExecutionIndex())
 	{
 		// special case: range of execution indices in composite decorator node
 		UBehaviorTreeGraphNode_CompositeDecorator* CompDecorator = Cast<UBehaviorTreeGraphNode_CompositeDecorator>(GraphNode);
@@ -960,8 +969,7 @@ FText SGraphNode_BehaviorTree::GetIndexText() const
 
 FText SGraphNode_BehaviorTree::GetIndexTooltipText() const
 {
-	CA_SUPPRESS(6235);
-	if (bShowExecutionIndexInEditorMode || GEditor->bIsSimulatingInEditor || GEditor->PlayWorld != NULL)
+	if (ShouldShowExecutionIndex())
 	{
 		return LOCTEXT("ExecutionIndexTooltip", "Execution index: this shows the order in which nodes are executed.");
 	}
@@ -993,8 +1001,8 @@ void SGraphNode_BehaviorTree::GetOverlayBrushes(bool bSelected, const FVector2D 
 	{
 		FOverlayBrushInfo BreakpointOverlayInfo;
 		BreakpointOverlayInfo.Brush = BTNode->bIsBreakpointEnabled ?
-			FEditorStyle::GetBrush(TEXT("BTEditor.DebuggerOverlay.Breakpoint.Enabled")) :
-			FEditorStyle::GetBrush(TEXT("BTEditor.DebuggerOverlay.Breakpoint.Disabled"));
+			FAppStyle::GetBrush(TEXT("BTEditor.DebuggerOverlay.Breakpoint.Enabled")) :
+			FAppStyle::GetBrush(TEXT("BTEditor.DebuggerOverlay.Breakpoint.Disabled"));
 
 		if (BreakpointOverlayInfo.Brush)
 		{
@@ -1010,8 +1018,8 @@ void SGraphNode_BehaviorTree::GetOverlayBrushes(bool bSelected, const FVector2D 
 		{
 			FOverlayBrushInfo IPOverlayInfo;
 
-			IPOverlayInfo.Brush = BTNode->bDebuggerMarkBreakpointTrigger ? FEditorStyle::GetBrush(TEXT("BTEditor.DebuggerOverlay.BreakOnBreakpointPointer")) : 
-				FEditorStyle::GetBrush(TEXT("BTEditor.DebuggerOverlay.ActiveNodePointer"));
+			IPOverlayInfo.Brush = BTNode->bDebuggerMarkBreakpointTrigger ? FAppStyle::GetBrush(TEXT("BTEditor.DebuggerOverlay.BreakOnBreakpointPointer")) : 
+				FAppStyle::GetBrush(TEXT("BTEditor.DebuggerOverlay.ActiveNodePointer"));
 			if (IPOverlayInfo.Brush)
 			{
 				float Overlap = 10.f;
@@ -1027,7 +1035,7 @@ void SGraphNode_BehaviorTree::GetOverlayBrushes(bool bSelected, const FVector2D 
 		{
 			FOverlayBrushInfo IPOverlayInfo;
 
-			IPOverlayInfo.Brush = FEditorStyle::GetBrush(BTNode->bDebuggerMarkSearchTrigger ?
+			IPOverlayInfo.Brush = FAppStyle::GetBrush(BTNode->bDebuggerMarkSearchTrigger ?
 				TEXT("BTEditor.DebuggerOverlay.SearchTriggerPointer") :
 				TEXT("BTEditor.DebuggerOverlay.FailedTriggerPointer") );
 
@@ -1036,7 +1044,7 @@ void SGraphNode_BehaviorTree::GetOverlayBrushes(bool bSelected, const FVector2D 
 				for (int32 i = 0; i < TriggerOffsets.Num(); i++)
 				{
 					IPOverlayInfo.OverlayOffset.X = -IPOverlayInfo.Brush->ImageSize.X;
-					IPOverlayInfo.OverlayOffset.Y = TriggerOffsets[i].Position.Y + TriggerOffsets[i].Size.Y / 2 - IPOverlayInfo.Brush->ImageSize.Y / 2;
+					IPOverlayInfo.OverlayOffset.Y = TriggerOffsets[i].Position.Y + TriggerOffsets[i].Size.Y / 2.f - IPOverlayInfo.Brush->ImageSize.Y / 2.f;
 
 					IPOverlayInfo.AnimationEnvelope = FVector2D(10.f, 0.f);
 					Brushes.Add(IPOverlayInfo);
@@ -1103,7 +1111,7 @@ void SGraphNode_BehaviorTree::MoveTo(const FVector2D& NewPosition, FNodeSet& Nod
 	UBehaviorTreeGraphNode* BTGraphNode = Cast<UBehaviorTreeGraphNode>(GraphNode);
 	if (BTGraphNode && !BTGraphNode->IsSubNode())
 	{
-		UBehaviorTreeGraph* BTGraph = BTGraphNode->GetBehaviorTreeGraph();
+		UBehaviorTreeGraph* BTGraph = BTGraphNode->GetOwnerBehaviorTreeGraph();
 		if (BTGraph)
 		{
 			for (int32 Idx = 0; Idx < BTGraphNode->Pins.Num(); Idx++)

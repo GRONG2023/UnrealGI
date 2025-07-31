@@ -1,31 +1,58 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "SDistributionCurveEditor.h"
-#include "Engine/InterpCurveEdSetup.h"
-#include "SCurveEditorViewport.h"
+
+#include "Containers/StringConv.h"
+#include "Containers/UnrealString.h"
+#include "CoreGlobals.h"
+#include "CurveEditorActions.h"
 #include "CurveEditorSharedData.h"
-#include "Misc/MessageDialog.h"
-#include "Layout/WidgetPath.h"
+#include "CurveEditorViewportClient.h"
+#include "Delegates/Delegate.h"
+#include "Engine/Engine.h"
+#include "Engine/InterpCurveEdSetup.h"
+#include "Framework/Application/IMenu.h"
 #include "Framework/Application/MenuStack.h"
 #include "Framework/Application/SlateApplication.h"
+#include "Framework/Commands/UIAction.h"
 #include "Framework/Commands/UICommandList.h"
-#include "Widgets/Layout/SBorder.h"
-#include "Widgets/Text/STextBlock.h"
-#include "Widgets/Layout/SBox.h"
-#include "Framework/MultiBox/MultiBoxDefs.h"
 #include "Framework/MultiBox/MultiBoxBuilder.h"
-#include "EditorStyleSet.h"
-#include "Engine/Engine.h"
-#include "EngineGlobals.h"
-#include "CurveEditorViewportClient.h"
-#include "CurveEditorActions.h"
-#include "Slate/SceneViewport.h"
+#include "Framework/MultiBox/MultiBoxDefs.h"
+#include "Framework/Notifications/NotificationManager.h"
+#include "HAL/PlatformMisc.h"
+#include "Internationalization/Internationalization.h"
+#include "Internationalization/Text.h"
+#include "Layout/Children.h"
+#include "Layout/Margin.h"
+#include "Layout/WidgetPath.h"
+#include "Math/Color.h"
+#include "Math/CurveEdInterface.h"
+#include "Math/InterpCurvePoint.h"
+#include "Math/UnrealMathSSE.h"
+#include "Math/Vector2D.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/Attribute.h"
 #include "Misc/ConfigCacheIni.h"
+#include "Misc/MessageDialog.h"
+#include "SCurveEditorViewport.h"
+#include "Slate/SceneViewport.h"
+#include "SlotBase.h"
+#include "Styling/AppStyle.h"
+#include "Templates/Function.h"
+#include "Types/SlateStructs.h"
+#include "UObject/ObjectPtr.h"
 #include "Widgets/Colors/SColorPicker.h"
 #include "Widgets/Input/STextComboBox.h"
 #include "Widgets/Input/STextEntryPopup.h"
-#include "Framework/Notifications/NotificationManager.h"
+#include "Widgets/Layout/SBorder.h"
+#include "Widgets/Layout/SBox.h"
 #include "Widgets/Notifications/SNotificationList.h"
+#include "Widgets/SBoxPanel.h"
+#include "Widgets/SCompoundWidget.h"
+#include "Widgets/Text/STextBlock.h"
+
+class SWidget;
+class UObject;
 
 #define LOCTEXT_NAMESPACE "CurveEditor"
 
@@ -353,7 +380,7 @@ TSharedRef<SHorizontalBox> SDistributionCurveEditor::BuildToolBar()
 	[
 		SNew(SBorder)
 		.Padding(0)
-		.BorderImage(FEditorStyle::GetBrush("NoBorder"))
+		.BorderImage(FAppStyle::GetBrush("NoBorder"))
 		.IsEnabled(FSlateApplication::Get().GetNormalExecutionAttribute())
 		[
 			ToolbarBuilder.MakeWidget()
@@ -608,29 +635,25 @@ void SDistributionCurveEditor::OnSetColor()
 	{
 		float Value;
 
-		Value	= EdInterface->GetKeyOut(0, SelKey.KeyIndex) * 255.9f;
-		InputColor.R = FMath::TruncToInt(Value);
-		Value	= EdInterface->GetKeyOut(1, SelKey.KeyIndex) * 255.9f;
-		InputColor.G = FMath::TruncToInt(Value);
-		Value	= EdInterface->GetKeyOut(2, SelKey.KeyIndex) * 255.9f;
-		InputColor.B = FMath::TruncToInt(Value);
+		Value	= EdInterface->GetKeyOut(0, SelKey.KeyIndex) * 255.f;
+		InputColor.R = FMath::RoundToInt(Value);
+		Value	= EdInterface->GetKeyOut(1, SelKey.KeyIndex) * 255.f;
+		InputColor.G = FMath::RoundToInt(Value);
+		Value	= EdInterface->GetKeyOut(2, SelKey.KeyIndex) * 255.f;
+		InputColor.B = FMath::RoundToInt(Value);
 	}
 	else
 	{
-		InputColor.R = FMath::TruncToInt(FMath::Clamp<float>(EdInterface->GetKeyOut(0, SelKey.KeyIndex), 0.f, 255.9f));
-		InputColor.G = FMath::TruncToInt(FMath::Clamp<float>(EdInterface->GetKeyOut(1, SelKey.KeyIndex), 0.f, 255.9f));
-		InputColor.B = FMath::TruncToInt(FMath::Clamp<float>(EdInterface->GetKeyOut(2, SelKey.KeyIndex), 0.f, 255.9f));
+		InputColor.R = FMath::RoundToInt(FMath::Clamp<float>(EdInterface->GetKeyOut(0, SelKey.KeyIndex), 0.f, 255.f));
+		InputColor.G = FMath::RoundToInt(FMath::Clamp<float>(EdInterface->GetKeyOut(1, SelKey.KeyIndex), 0.f, 255.f));
+		InputColor.B = FMath::RoundToInt(FMath::Clamp<float>(EdInterface->GetKeyOut(2, SelKey.KeyIndex), 0.f, 255.f));
 	}
 
 	//since the data isn't stored in standard colors, a temp color is used
-	FColor TempColor = InputColor;
-
-	TArray<FColor*> FColorArray;
-	FColorArray.Add(&TempColor);
-
-	FColorPickerArgs PickerArgs;
+	FLinearColor TempColor = InputColor;
+	FColorPickerArgs PickerArgs = FColorPickerArgs(InputColor, FOnLinearColorValueChanged::CreateLambda([&TempColor](FLinearColor NewValue){ TempColor = NewValue.ToFColorSRGB(); }));
 	PickerArgs.bIsModal = true;
-	PickerArgs.ColorArray = &FColorArray;
+	PickerArgs.bClampValue = true;
 	PickerArgs.DisplayGamma = TAttribute<float>::Create( TAttribute<float>::FGetter::CreateUObject(GEngine, &UEngine::GetDisplayGamma) );
 
 	if (OpenColorPicker(PickerArgs))
@@ -638,19 +661,19 @@ void SDistributionCurveEditor::OnSetColor()
 		float Value;
 		if (Entry.bFloatingPointColorCurve)
 		{
-			Value	= (float)TempColor.R / 255.9f;
+			Value	= (float)TempColor.R / 255.f;
 			if (Entry.bClamp)
 			{
 				Value = FMath::Clamp<float>(Value, Entry.ClampLow, Entry.ClampHigh);
 			}
 			EdInterface->SetKeyOut(0, SelKey.KeyIndex, Value);
-			Value	= (float)TempColor.G / 255.9f;
+			Value	= (float)TempColor.G / 255.f;
 			if (Entry.bClamp)
 			{
 				Value = FMath::Clamp<float>(Value, Entry.ClampLow, Entry.ClampHigh);
 			}
 			EdInterface->SetKeyOut(1, SelKey.KeyIndex, Value);
-			Value	= (float)TempColor.B / 255.9f;
+			Value	= (float)TempColor.B / 255.f;
 			if (Entry.bClamp)
 			{
 				Value = FMath::Clamp<float>(Value, Entry.ClampLow, Entry.ClampHigh);

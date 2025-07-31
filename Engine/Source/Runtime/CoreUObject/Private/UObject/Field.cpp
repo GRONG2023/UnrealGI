@@ -10,11 +10,11 @@ Field.cpp: Defines FField property system fundamentals
 #include "Misc/ScopeLock.h"
 #include "Misc/StringBuilder.h"
 #include "Serialization/MemoryWriter.h"
+#include "Misc/AutomationTest.h"
 #include "Misc/ConfigCacheIni.h"
 #include "Misc/OutputDeviceHelper.h"
 #include "Misc/FeedbackContext.h"
 #include "Misc/OutputDeviceConsole.h"
-#include "UObject/ErrorException.h"
 #include "Modules/ModuleManager.h"
 #include "UObject/UObjectAllocator.h"
 #include "UObject/UObjectHash.h"
@@ -29,9 +29,8 @@ Field.cpp: Defines FField property system fundamentals
 #include "UObject/Stack.h"
 #include "Misc/PackageName.h"
 #include "UObject/ObjectResource.h"
-#include "UObject/LinkerSave.h"
 #include "UObject/Interface.h"
-#include "Misc/HotReloadInterface.h"
+#include "UObject/LinkerLoad.h"
 #include "UObject/LinkerPlaceholderClass.h"
 #include "UObject/LinkerPlaceholderFunction.h"
 #include "UObject/StructScriptLoader.h"
@@ -43,9 +42,6 @@ Field.cpp: Defines FField property system fundamentals
 #include "Templates/SubclassOf.h"
 #include "UObject/TextProperty.h"
 #include "UObject/EnumProperty.h"
-
-// WARNING: This should always be the last include in any file that needs it (except .generated.h)
-#include "UObject/UndefineUPropertyMacros.h"
 
 FFieldClass::FFieldClass(const TCHAR* InCPPName, uint64 InId, uint64 InCastFlags, FFieldClass* InSuperClass, FField* (*ConstructFnPtr)(const FFieldVariant&, const FName&, EObjectFlags))
 	: Id(InId)
@@ -117,9 +113,9 @@ FArchive& operator << (FArchive& Ar, FFieldClass*& InOutFieldClass)
 
 FFieldVariant FFieldVariant::GetOwnerVariant() const
 {
-	if (bIsUObject)
+	if (IsUObject())
 	{
-		return Container.Object->GetOuter();
+		return ToUObjectUnsafe()->GetOuter();
 	}
 	else
 	{
@@ -129,19 +125,19 @@ FFieldVariant FFieldVariant::GetOwnerVariant() const
 
 bool FFieldVariant::IsA(const UClass* InClass) const
 {
-	return bIsUObject && Container.Object && Container.Object->IsA(InClass);
+	return IsUObject() && ToUObjectUnsafe() && ToUObjectUnsafe()->IsA(InClass);
 }
 bool FFieldVariant::IsA(const FFieldClass* InClass) const
 {
-	return !bIsUObject && Container.Field && Container.Field->IsA(InClass);
+	return !IsUObject() && Container.Field && Container.Field->IsA(InClass);
 }
 
 UClass* FFieldVariant::GetOwnerClass() const
 {
 	check(Container.Object);
-	if (bIsUObject)
+	if (IsUObject())
 	{
-		return CastChecked<UField>(Container.Object)->GetOwnerClass();
+		return CastChecked<UField>(ToUObjectUnsafe())->GetOwnerClass();
 	}
 	else
 	{
@@ -151,9 +147,9 @@ UClass* FFieldVariant::GetOwnerClass() const
 
 FString FFieldVariant::GetFullName() const
 {
-	if (bIsUObject)
+	if (IsUObject())
 	{
-		return Container.Object->GetFullName();
+		return ToUObjectUnsafe()->GetFullName();
 	}
 	else
 	{
@@ -163,9 +159,9 @@ FString FFieldVariant::GetFullName() const
 
 FString FFieldVariant::GetPathName() const
 {
-	if (bIsUObject)
+	if (IsUObject())
 	{
-		return Container.Object->GetPathName();
+		return ToUObjectUnsafe()->GetPathName();
 	}
 	else
 	{
@@ -175,9 +171,9 @@ FString FFieldVariant::GetPathName() const
 
 FString FFieldVariant::GetName() const
 {
-	if (bIsUObject)
+	if (IsUObject())
 	{
-		return Container.Object->GetName();
+		return ToUObjectUnsafe()->GetName();
 	}
 	else
 	{
@@ -187,9 +183,9 @@ FString FFieldVariant::GetName() const
 
 FName FFieldVariant::GetFName() const
 {
-	if (bIsUObject)
+	if (IsUObject())
 	{
-		return Container.Object->GetFName();
+		return ToUObjectUnsafe()->GetFName();
 	}
 	else
 	{
@@ -200,9 +196,9 @@ FName FFieldVariant::GetFName() const
 FString FFieldVariant::GetClassName() const
 {
 	check(Container.Object);
-	if (bIsUObject)
+	if (IsUObject())
 	{
-		return Container.Object->GetClass()->GetName();
+		return ToUObjectUnsafe()->GetClass()->GetName();
 	}
 	else
 	{
@@ -213,9 +209,9 @@ FString FFieldVariant::GetClassName() const
 bool FFieldVariant::IsNative() const
 {
 	check(Container.Object);
-	if (bIsUObject)
+	if (IsUObject())
 	{
-		return Container.Object->IsNative();
+		return ToUObjectUnsafe()->IsNative();
 	}
 	else
 	{
@@ -226,9 +222,9 @@ bool FFieldVariant::IsNative() const
 UPackage* FFieldVariant::GetOutermost() const
 {
 	check(Container.Object);
-	if (bIsUObject)
+	if (IsUObject())
 	{
-		return Container.Object->GetOutermost();
+		return ToUObjectUnsafe()->GetOutermost();
 	}
 	else
 	{
@@ -239,9 +235,9 @@ UPackage* FFieldVariant::GetOutermost() const
 bool FFieldVariant::IsValidLowLevel() const
 {
 	check(Container.Object);
-	if (bIsUObject)
+	if (IsUObject())
 	{
-		return Container.Object->IsValidLowLevel();
+		return ToUObjectUnsafe()->IsValidLowLevel();
 	}
 	else
 	{
@@ -253,9 +249,9 @@ bool FFieldVariant::IsValidLowLevel() const
 bool FFieldVariant::HasMetaData(const FName& Key) const
 {
 	check(Container.Object);
-	if (bIsUObject)
+	if (IsUObject())
 	{
-		return CastChecked<UField>(Container.Object)->HasMetaData(Key);
+		return CastChecked<UField>(ToUObjectUnsafe())->HasMetaData(Key);
 	}
 	else
 	{
@@ -263,25 +259,6 @@ bool FFieldVariant::HasMetaData(const FName& Key) const
 	}
 }
 #endif // WITH_EDITORONLY_DATA
-
-FArchive& operator << (FArchive& Ar, FFieldVariant& InOutField)
-{
-	Ar << InOutField.bIsUObject;
-	if (InOutField.bIsUObject)
-	{
-		Ar << InOutField.Container.Object;
-	}
-	else
-	{
-		TFieldPath<FField> FieldRef(InOutField.Container.Field);
-		Ar << FieldRef;
-		if (Ar.IsLoading())
-		{
-			InOutField.Container.Field = FieldRef.Get();
-		}
-	}
-	return Ar;
-}
 
 /*-----------------------------------------------------------------------------
 FField implementation.
@@ -366,10 +343,10 @@ FField::FField(UField* InField)
 		Owner = OriginalOuter;
 	}
 
-	TMap<FName, FString>* FeldMetaDataMap = UMetaData::GetMapForObject(InField);
-	if (FeldMetaDataMap && FeldMetaDataMap->Num())
+	TMap<FName, FString>* FieldMetaDataMap = UMetaData::GetMapForObject(InField);
+	if (FieldMetaDataMap && FieldMetaDataMap->Num())
 	{
-		MetaDataMap = new TMap<FName, FString>(*FeldMetaDataMap);
+		MetaDataMap = new TMap<FName, FString>(*FieldMetaDataMap);
 	}
 }
 #endif // WITH_EDITORONLY_DATA
@@ -441,7 +418,7 @@ void FField::Serialize(FArchive& Ar)
 	if (!Ar.IsCooking())
 	{
 		UPackage* Package = GetOutermost();
-		if (!Package || !Package->bIsCookedForEditor)
+		if (!Package || !Package->HasAnyPackageFlags(PKG_Cooked))
 		{
 			bool bHasMetaData = false;
 			if (Ar.IsLoading())
@@ -478,10 +455,14 @@ void FField::BeginDestroy()
 
 void FField::AddReferencedObjects(FReferenceCollector& Collector)
 {
-	UObject* UObjectOwner = GetOwnerUObject();
-	if (UObjectOwner)
+	TObjectPtr<UObject> OwnerUObject = ObjectPtrWrap(Owner.ToUObject());
+	if (OwnerUObject)
 	{
-		Collector.AddReferencedObject(UObjectOwner);
+		Collector.AddReferencedObject(OwnerUObject);
+		if (!OwnerUObject)
+		{
+			Owner = FFieldVariant{};
+		}
 	}
 }
 
@@ -754,11 +735,7 @@ FText FField::GetToolTipText(bool bShortTooltip) const
 	const FString Key = GetFullGroupName(false);
 	if (!FText::FindText(Namespace, Key, /*OUT*/LocalizedToolTip, &NativeToolTip))
 	{
-		if (NativeToolTip.IsEmpty())
-		{
-			NativeToolTip = FName::NameToDisplayString(FFieldDisplayNameHelper::Get(*this), IsA<FBoolProperty>());
-		}
-		else
+		if (!NativeToolTip.IsEmpty())
 		{
 			static const FString DoxygenSee(TEXT("@see"));
 			static const FString TooltipSee(TEXT("See:"));
@@ -908,15 +885,15 @@ void FField::SetMetaData(const FName& Key, FString&& InValue)
 UClass* FField::GetClassMetaData(const TCHAR* Key) const
 {
 	const FString& ClassName = GetMetaData(Key);
-	UClass* const FoundObject = FindObject<UClass>(ANY_PACKAGE, *ClassName);
-	return FoundObject;
+	UClass* FoundClass = UClass::TryFindTypeSlow<UClass>(ClassName);
+	return FoundClass;
 }
 
 UClass* FField::GetClassMetaData(const FName& Key) const
 {
 	const FString& ClassName = GetMetaData(Key);
-	UClass* const FoundObject = FindObject<UClass>(ANY_PACKAGE, *ClassName);
-	return FoundObject;
+	UClass* FoundClass = UClass::TryFindTypeSlow<UClass>(ClassName);;
+	return FoundClass;
 }
 
 void FField::RemoveMetaData(const TCHAR* Key)
@@ -936,6 +913,21 @@ void FField::RemoveMetaData(const FName& Key)
 const TMap<FName, FString>* FField::GetMetaDataMap() const
 {
 	return MetaDataMap;
+}
+
+void FField::AppendMetaData(const TMap<FName, FString>& MetaDataMapToAppend)
+{
+	if (MetaDataMapToAppend.Num() > 0)
+	{
+		if (MetaDataMap)
+		{
+			MetaDataMap->Append(MetaDataMapToAppend);
+		}
+		else
+		{
+			MetaDataMap = new TMap<FName, FString>(MetaDataMapToAppend);
+		}
+	}
 }
 
 void FField::CopyMetaData(const FField* InSourceField, FField* InDestField)
@@ -967,7 +959,7 @@ void FField::PostDuplicate(const FField& InField)
 FField* FField::Duplicate(const FField* InField, FFieldVariant DestOwner, const FName DestName, EObjectFlags FlagMask, EInternalObjectFlags InternalFlagsMask)
 {
 	check(InField);
-	FField* NewField = InField->GetClass()->Construct(DestOwner, DestName == NAME_None ? InField->GetFName() : DestName, InField->GetFlags() & FlagMask);
+	FField* NewField = InField->GetClass()->Construct(DestOwner, (DestName == NAME_None) ? InField->GetFName() : DestName, InField->GetFlags() & FlagMask);
 	NewField->PostDuplicate(*InField);
 	return NewField;
 }
@@ -978,6 +970,15 @@ FField* FField::Construct(const FName& FieldTypeName, const FFieldVariant& InOwn
 	checkf(FieldClassPtr, TEXT("Field type %s does not exist"), *FieldTypeName.ToString());
 	FField* Instance = (*FieldClassPtr)->Construct(InOwner, InName, InFlags);
 	return Instance;
+}
+
+FField* FField::TryConstruct(const FName& FieldTypeName, const FFieldVariant& InOwner, const FName& InName, EObjectFlags InFlags)
+{
+	if (FFieldClass* FieldClassPtr = FFieldClass::GetNameToFieldClassMap().FindRef(FieldTypeName))
+	{
+		return FieldClassPtr->Construct(InOwner, InName, InFlags);
+	}
+	return nullptr;
 }
 
 FName FField::GenerateFFieldName(FFieldVariant InOwner /** Unused yet */, FFieldClass* InClass)
@@ -1045,7 +1046,12 @@ FField* FField::CreateFromUField(UField* InField)
 	}
 	else if (UFieldClass == UObjectProperty::StaticClass())
 	{
-		NewField = new FObjectProperty(InField);
+		FObjectProperty* ObjectProperty = new FObjectProperty(InField);
+		NewField = ObjectProperty;
+		if (FLinkerLoad::IsImportLazyLoadEnabled())
+		{
+			ObjectProperty->SetPropertyFlags(CPF_TObjectPtrWrapper);
+		}
 	}
 	else if (UFieldClass == UWeakObjectProperty::StaticClass())
 	{
@@ -1173,7 +1179,7 @@ FField* FindFPropertyByPath(const TCHAR* InFieldPath)
 		// And the FField part
 		InFieldPath += (LastSubobjectDelimiterIndex + 1);
 
-		UStruct* Owner = FindObject<UStruct>(ANY_PACKAGE, PathBuffer);
+		UStruct* Owner = FindObject<UStruct>(nullptr, PathBuffer);
 		if (Owner)
 		{
 #if DO_CHECK
@@ -1188,4 +1194,37 @@ FField* FindFPropertyByPath(const TCHAR* InFieldPath)
 	return FoundField;
 }
 
-#include "UObject/DefineUPropertyMacros.h"
+#if WITH_DEV_AUTOMATION_TESTS
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFieldCastTest, "UObject.Field Cast", EAutomationTestFlags::EditorContext | EAutomationTestFlags::ApplicationContextMask | EAutomationTestFlags::ServerContext | EAutomationTestFlags::SmokeFilter)
+
+bool FFieldCastTest::RunTest(const FString& Parameters)
+{
+	FBoolProperty* DefaultBoolProperty = static_cast<FBoolProperty*>(FBoolProperty::StaticClass()->GetDefaultObject());
+	FIntProperty* DefaultIntProperty = static_cast<FIntProperty*>(FIntProperty::StaticClass()->GetDefaultObject());
+	FNumericProperty* DefaultNumericProperty = static_cast<FNumericProperty*>(FNumericProperty::StaticClass()->GetDefaultObject());
+	FProperty* BaseProperty = nullptr;
+
+	AddErrorIfFalse(CastField<FBoolProperty>(DefaultBoolProperty) == DefaultBoolProperty, TEXT("DefaultBoolProperty could not be CastField to a FBoolProperty."));
+	BaseProperty = DefaultBoolProperty;
+	AddErrorIfFalse(CastField<FBoolProperty>(BaseProperty) == DefaultBoolProperty, TEXT("Property could not be CastField to a FBoolProperty."));
+
+	AddErrorIfFalse(CastField<FBoolProperty>(DefaultIntProperty) == nullptr, TEXT("DefaultIntProperty was CastField to a FBoolProperty."));
+	BaseProperty = DefaultIntProperty;
+	AddErrorIfFalse(CastField<FBoolProperty>(BaseProperty) == nullptr, TEXT("DefaultIntProperty was CastField to a FBoolProperty."));
+
+	AddErrorIfFalse(CastField<FBoolProperty>(DefaultNumericProperty) == nullptr, TEXT("DefaultNumericProperty was CastField to a FBoolProperty."));
+	BaseProperty = DefaultNumericProperty;
+	AddErrorIfFalse(CastField<FBoolProperty>(BaseProperty) == nullptr, TEXT("BaseProperty was CastField to a FBoolProperty."));
+
+	AddErrorIfFalse(CastField<FNumericProperty>(DefaultIntProperty) == DefaultIntProperty, TEXT("DefaultIntProperty could not be CastField to a FNumericProperty."));
+	BaseProperty = DefaultIntProperty;
+	AddErrorIfFalse(CastField<FNumericProperty>(BaseProperty) == DefaultIntProperty, TEXT("BaseProperty could not be CastField to a FNumericProperty."));
+
+	BaseProperty = nullptr;
+	AddErrorIfFalse(CastField<FNumericProperty>(BaseProperty) == nullptr, TEXT("nullptr was CastField to a FNumericProperty."));
+
+	return true;
+}
+
+#endif

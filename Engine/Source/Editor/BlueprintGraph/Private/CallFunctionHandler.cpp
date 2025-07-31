@@ -15,6 +15,7 @@
 
 #include "EdGraphUtilities.h"
 #include "Engine/BlueprintGeneratedClass.h"
+#include "KismetCastingUtils.h"
 #include "KismetCompiler.h"
 #include "Net/Core/PushModel/PushModelMacros.h"
 #include "PushModelHelpers.h"
@@ -74,6 +75,8 @@ public:
  */
 void FKCHandler_CallFunction::CreateFunctionCallStatement(FKismetFunctionContext& Context, UEdGraphNode* Node, UEdGraphPin* SelfPin)
 {
+	using namespace UE::KismetCompiler;
+
 	int32 NumErrorsAtStart = CompilerContext.MessageLog.NumErrors;
 
 	// Find the function, starting at the parent class
@@ -147,8 +150,22 @@ void FKCHandler_CallFunction::CreateFunctionCallStatement(FKismetFunctionContext
 
 		// Grab the special case structs that use their own literal path
 		UScriptStruct* VectorStruct = TBaseStructure<FVector>::Get();
+		UScriptStruct* Vector3fStruct = TVariantStructure<FVector3f>::Get();
 		UScriptStruct* RotatorStruct = TBaseStructure<FRotator>::Get();
 		UScriptStruct* TransformStruct = TBaseStructure<FTransform>::Get();
+
+		// If a function parameter needs an implicit double<->float cast *and* it's a non-const reference,
+		// then we need to copy the value of the casted temporary *back* to its source.
+		// 
+		// Just to illustrate the scenario, take the following example in pseudocode:
+		// 
+		//     double Input = 2.0
+		//     float CastedInput = (float)Input					; Narrowing conversion needed for function input
+		//     NativeFunctionWithReferenceParam(CastedInput)	; CastedInput has possibly changed since this function takes a float&
+		//     Input = (double)CastedInput						; Now we need to propagate that change back to Input
+		//
+		using CastEntryT = TPair<FBPTerminal*, CastingUtils::FImplicitCastParams>;
+		TArray<CastEntryT> ModifiedCastInputs;
 
 		// Check each property
 		bool bMatchedAllParams = true;
@@ -178,6 +195,7 @@ void FKCHandler_CallFunction::CreateFunctionCallStatement(FKismetFunctionContext
 								{
 									UScriptStruct* Struct = StructProperty->Struct;
 									if( Struct != VectorStruct
+										&& Struct != Vector3fStruct
 										&& Struct != RotatorStruct
 										&& Struct != TransformStruct )
 									{
@@ -195,7 +213,7 @@ void FKCHandler_CallFunction::CreateFunctionCallStatement(FKismetFunctionContext
 
 											// Import the literal text to a dummy struct to verify it's well-formed
 											FImportTextErrorContext ErrorPipe(CompilerContext.MessageLog, Node);
-											StructProperty->ImportText(*((*Term)->Name), StructData, 0, nullptr, &ErrorPipe);
+											StructProperty->ImportText_Direct(*((*Term)->Name), StructData, nullptr, 0, &ErrorPipe);
 											if(ErrorPipe.NumErrors > 0)
 											{
 												bMatchedAllParams = false;
@@ -235,6 +253,42 @@ void FKCHandler_CallFunction::CreateFunctionCallStatement(FKismetFunctionContext
 									CastStatement.RHS.Add(*Term);
 
 									RHSTerm = *InterfaceTerm;
+								}
+
+								{
+									const CastingUtils::FImplicitCastParams* CastParams =
+										Context.ImplicitCastMap.Find(PinMatch);
+
+									if (CastParams)
+									{
+										FBPTerminal* ImplicitCastTerm =
+											CastingUtils::InsertImplicitCastStatement(Context, PinMatch, RHSTerm);
+										check(ImplicitCastTerm);
+
+										bool bIsNonConstReference =
+											Property->HasAllPropertyFlags(CPF_OutParm | CPF_ReferenceParm) &&
+											!Property->HasAllPropertyFlags(CPF_ConstParm);
+
+										if (bIsNonConstReference)
+										{
+											CastingUtils::FImplicitCastParams InverseCastParams = *CastParams;
+
+											if (CastParams->Conversion.Type == CastingUtils::FloatingPointCastType::FloatToDouble)
+											{
+												InverseCastParams.Conversion.Type = CastingUtils::FloatingPointCastType::DoubleToFloat;
+											}
+											else if (CastParams->Conversion.Type == CastingUtils::FloatingPointCastType::DoubleToFloat)
+											{
+												InverseCastParams.Conversion.Type = CastingUtils::FloatingPointCastType::FloatToDouble;
+											}
+
+											InverseCastParams.TargetTerminal = RHSTerm;
+
+											ModifiedCastInputs.Add(CastEntryT{ImplicitCastTerm, InverseCastParams});
+										}
+
+										RHSTerm = ImplicitCastTerm;
+									}
 								}
 
 								int32 ParameterIndex = RHSTerms.Add(RHSTerm);
@@ -410,20 +464,23 @@ void FKCHandler_CallFunction::CreateFunctionCallStatement(FKismetFunctionContext
 				pSrcEventNode = CompilerContext.CallsIntoUbergraph.Find(Node);
 			}
 
-			bool bInlineEventCall = false;
-			bool bEmitInstrumentPushState = false;
-			FName EventName = NAME_None;
-
 			// Iterate over all the contexts this functions needs to be called on, and emit a call function statement for each
 			FBlueprintCompiledStatement* LatentStatement = nullptr;
 			for (FBPTerminal* Target : ContextTerms)
 			{
+				// Currently, call site nodes will (incorrectly) expose the target pin as an interface type for calls to
+				// interface functions that are implemented by the owning class, so in that case we need to flag that the
+				// calling context is an interface if the target pin is also linked to an interface pin type (e.g. result
+				// of a cast node). Otherwise, we'll infer the wrong context type at runtime and corrupt the stack by
+				// reading an interface ptr (16 bytes) into an object ptr (8 bytes) when we process the context opcode.
+				const bool bIsInterfaceContextTerm = Target && Target->AssociatedVarProperty && Target->AssociatedVarProperty->IsA<FInterfaceProperty>();
+
 				FBlueprintCompiledStatement& Statement = Context.AppendStatementForNode(Node);
 				Statement.FunctionToCall = Function;
 				Statement.FunctionContext = Target;
 				Statement.Type = KCST_CallFunction;
-				Statement.bIsInterfaceContext = IsCalledFunctionFromInterface(Node);
-				Statement.bIsParentContext = IsCalledFunctionFinal(Node);
+				Statement.bIsInterfaceContext = IsCalledFunctionFromInterface(Node) || bIsInterfaceContextTerm;
+				Statement.bIsParentContext = Node->IsA<UK2Node_CallParentFunction>();
 
 				Statement.LHS = LHSTerm;
 				Statement.RHS = RHSTerms;
@@ -464,6 +521,16 @@ void FKCHandler_CallFunction::CreateFunctionCallStatement(FKismetFunctionContext
 				}
 			}
 
+			{
+				for (const auto& It : ModifiedCastInputs)
+				{
+					FBPTerminal* LocalRHSTerm = It.Get<0>();
+					CastingUtils::FImplicitCastParams LocalInverseCastParams = It.Get<1>();
+
+					CastingUtils::InsertImplicitCastStatement(Context, LocalInverseCastParams, LocalRHSTerm);
+				}
+			}
+
 			// Create the exit from this node if there is one
 			if (bIsLatent)
 			{
@@ -492,28 +559,20 @@ UClass* FKCHandler_CallFunction::GetCallingContext(FKismetFunctionContext& Conte
 {
 	// Find the calling scope
 	UClass* SearchScope = Context.NewClass;
-	UK2Node_CallFunction* CallFuncNode = Cast<UK2Node_CallFunction>(Node);
-	if (CallFuncNode && CallFuncNode->bIsFinalFunction)
+	
+	if (UK2Node_CallParentFunction* ParentCall = Cast<UK2Node_CallParentFunction>(Node))
 	{
-		if (UK2Node_CallParentFunction* ParentCall = Cast<UK2Node_CallParentFunction>(Node))
-		{
-			// Special Case:  super call functions should search up their class hierarchy, and find the first legitimate implementation of the function
-			const FName FuncName = CallFuncNode->FunctionReference.GetMemberName();
-			UClass* SearchContext = Context.NewClass->GetSuperClass();
+		// Special Case: super call functions should search up their class hierarchy, and find the first legitimate implementation of the function
+		const FName FuncName = ParentCall->FunctionReference.GetMemberName();
+		UClass* SearchContext = Context.NewClass->GetSuperClass();
 
-			UFunction* ParentFunc = nullptr;
-			if (SearchContext)
-			{
-				ParentFunc = SearchContext->FindFunctionByName(FuncName);
-			}
-
-			return ParentFunc ? ParentFunc->GetOuterUClass() : nullptr;
-		}
-		else
+		UFunction* ParentFunc = nullptr;
+		if (SearchContext)
 		{
-			// Final functions need the call context to be the specified class, so don't bother checking for the self pin.   The schema should enforce this.
-			return CallFuncNode->FunctionReference.GetMemberParentClass(CallFuncNode->GetBlueprintClassFromNode());
+			ParentFunc = SearchContext->FindFunctionByName(FuncName);
 		}
+
+		return ParentFunc ? ParentFunc->GetOuterUClass() : nullptr;
 	}
 	else
 	{
@@ -546,6 +605,8 @@ UClass* FKCHandler_CallFunction::GetTrueCallingClass(FKismetFunctionContext& Con
 
 void FKCHandler_CallFunction::RegisterNets(FKismetFunctionContext& Context, UEdGraphNode* Node)
 {
+	check(Node);
+
 	if (UFunction* Function = FindFunction(Context, Node))
 	{
 		TArray<FName> DefaultToSelfParamNames;
@@ -600,6 +661,8 @@ void FKCHandler_CallFunction::RegisterNets(FKismetFunctionContext& Context, UEdG
 
 	for (UEdGraphPin* Pin : Node->Pins)
 	{
+		check(Pin);
+
 		if ((Pin->Direction != EGPD_Input) || (Pin->LinkedTo.Num() == 0))
 		{
 			continue;
@@ -635,9 +698,13 @@ UFunction* FKCHandler_CallFunction::FindFunction(FKismetFunctionContext& Context
 
 	if (CallingContext)
 	{
+		const UBlueprint* BlueprintContext = UBlueprint::GetBlueprintFromClass(CallingContext);
+
+		// Redirect the calling context to the most up-to-date class (when not up-to-date,
+		// this will redirect to the Blueprint's skeleton class)
 		// It may be advisable to always do this branch in GetMostUpToDateClass, but
 		// being conservative:
-		if (!FBlueprintCompilationManager::IsGeneratedClassLayoutReady())
+		if (!BlueprintContext || (BlueprintContext->bBeingCompiled && !FBlueprintCompilationManager::IsGeneratedClassLayoutReady()) || (!BlueprintContext->bBeingCompiled && !BlueprintContext->IsUpToDate()))
 		{
 			CallingContext = FBlueprintEditorUtils::GetMostUpToDateClass(CallingContext);
 		}
@@ -649,9 +716,12 @@ UFunction* FKCHandler_CallFunction::FindFunction(FKismetFunctionContext& Context
 	return nullptr;
 }
 
-static bool FindMatchingReferencedNetPropertyAndPin(TArray<UEdGraphPin*>& RemainingPins, FProperty* FunctionProperty, FProperty*& NetProperty, UEdGraphPin*& PropertyObjectPin)
+namespace UE::BlueprintGraph::Private
+{
+static bool FindMatchingReferencedNetOrFieldNotifyPropertyAndPin(TArray<UEdGraphPin*>& RemainingPins, FProperty* FunctionProperty, FProperty*& NetProperty, FProperty*& FieldNotifyProperty, UEdGraphPin*& PropertyObjectPin)
 {
 	NetProperty = nullptr;
+	FieldNotifyProperty = nullptr;
 	PropertyObjectPin = nullptr;
 
 	if (UNLIKELY(FunctionProperty->HasAllPropertyFlags(CPF_OutParm | CPF_ReferenceParm) && !FunctionProperty->HasAnyPropertyFlags(CPF_ReturnParm | CPF_ConstParm)))
@@ -660,6 +730,7 @@ static bool FindMatchingReferencedNetPropertyAndPin(TArray<UEdGraphPin*>& Remain
 		{
 			if (FunctionProperty->GetFName() == RemainingPins[i]->PinName)
 			{
+				bool bResult = false;
 				UEdGraphPin* ParamPin = RemainingPins[i];
 				RemainingPins.RemoveAtSwap(i);
 				if (UEdGraphPin* PinToTry = FEdGraphUtilities::GetNetFromPin(ParamPin))
@@ -670,22 +741,31 @@ static bool FindMatchingReferencedNetPropertyAndPin(TArray<UEdGraphPin*>& Remain
 
 					if (UK2Node_VariableGet* GetPropertyNode = Cast<UK2Node_VariableGet>(PinToTry->GetOwningNode()))
 					{
-						FProperty* ToCheck = GetPropertyNode->GetPropertyForVariable();
-						if (UNLIKELY(ToCheck && ToCheck->HasAnyPropertyFlags(CPF_Net)))
+						if (FProperty* ToCheck = GetPropertyNode->GetPropertyForVariable())
 						{
-							NetProperty = ToCheck;
-							PropertyObjectPin = GetPropertyNode->FindPinChecked(UEdGraphSchema_K2::PN_Self);
-							return true;
+							if (UNLIKELY(FKismetCompilerUtilities::IsPropertyUsesFieldNotificationSetValueAndBroadcast(ToCheck)))
+							{
+								FieldNotifyProperty = ToCheck;
+								PropertyObjectPin = GetPropertyNode->FindPinChecked(UEdGraphSchema_K2::PN_Self);
+								bResult = true;
+							}
+							if (UNLIKELY(ToCheck->HasAnyPropertyFlags(CPF_Net)))
+							{
+								NetProperty = ToCheck;
+								PropertyObjectPin = GetPropertyNode->FindPinChecked(UEdGraphSchema_K2::PN_Self);
+								bResult = true;
+							}
 						}
 					}
 				}
 
-				return false;
+				return bResult;
 			}
 		}
 	}
 
 	return false;
+}
 }
 
 void FKCHandler_CallFunction::Transform(FKismetFunctionContext& Context, UEdGraphNode* Node)
@@ -795,6 +875,7 @@ void FKCHandler_CallFunction::Transform(FKismetFunctionContext& Context, UEdGrap
 			if (RemainingPins.Num() > 0)
 			{
 				FProperty* NetProperty = nullptr;
+				FProperty* FieldNotifyProperty = nullptr;
 				UEdGraphPin* PropertyObjectPin = nullptr;
 				UEdGraphPin* OldThenPin = CallFuncNode->GetThenPin();
 
@@ -805,7 +886,7 @@ void FKCHandler_CallFunction::Transform(FKismetFunctionContext& Context, UEdGrap
 				// This is similar to the loop in CreateCallFunction
 				for (TFieldIterator<FProperty> It(Function); It; ++It)
 				{
-					if (FindMatchingReferencedNetPropertyAndPin(RemainingPins, *It, NetProperty, PropertyObjectPin))
+					if (UE::BlueprintGraph::Private::FindMatchingReferencedNetOrFieldNotifyPropertyAndPin(RemainingPins, *It, NetProperty, FieldNotifyProperty, PropertyObjectPin))
 					{
 						if (bIsPure)
 						{
@@ -815,56 +896,64 @@ void FKCHandler_CallFunction::Transform(FKismetFunctionContext& Context, UEdGrap
 							break;
 						}
 
-						if (UEdGraphNode* MarkPropertyDirtyNode = FKCPushModelHelpers::ConstructMarkDirtyNodeForProperty(Context, NetProperty, PropertyObjectPin))
+						if (FieldNotifyProperty)
 						{
-							// bool bWereNodesAdded = false;
-							UEdGraphPin* NewThenPin = MarkPropertyDirtyNode->FindPinChecked(UEdGraphSchema_K2::PN_Then);
-							UEdGraphPin* NewInPin = MarkPropertyDirtyNode->FindPinChecked(UEdGraphSchema_K2::PN_Execute);
+							CompilerContext.MessageLog.Warning(*NSLOCTEXT("KismetCompiler", "RefFieldNotifyProperty_Warning", "@@ references a Field Notify property. The property may not be Broadcast correctly. Consider using a temporary variable.").ToString(), Node);
+						}
 
-							if (ensure(NewThenPin) && ensure(NewInPin))
+						if (NetProperty)
+						{
+							if (UEdGraphNode* MarkPropertyDirtyNode = FKCPushModelHelpers::ConstructMarkDirtyNodeForProperty(Context, NetProperty, PropertyObjectPin))
 							{
-								if (OldThenPin)
+								// bool bWereNodesAdded = false;
+								UEdGraphPin* NewThenPin = MarkPropertyDirtyNode->FindPinChecked(UEdGraphSchema_K2::PN_Then);
+								UEdGraphPin* NewInPin = MarkPropertyDirtyNode->FindPinChecked(UEdGraphSchema_K2::PN_Execute);
+
+								if (ensure(NewThenPin) && ensure(NewInPin))
 								{
-									NewThenPin->CopyPersistentDataFromOldPin(*OldThenPin);
-									OldThenPin->BreakAllPinLinks();
-									OldThenPin->MakeLinkTo(NewInPin);
-
-									OldThenPin = NewThenPin;
-									// bWereNodesAdded = true;
-								}
-								else
-								{
-									// If there's no then pin, we'll instead insert the dirty nodes before the execution
-									// of function with the reference.
-									// This may do weird things with Latent Nodes, so warn about that.
-
-									if (bIsLatent)
+									if (OldThenPin)
 									{
-										CompilerContext.MessageLog.Warning(*NSLOCTEXT("KismetCompiler", "LatentPushModel_Warning", "@@ is a latent node with references to a net property. The property may not be marked dirty in the correct frame.").ToString(), Node);
-									}
+										NewThenPin->CopyPersistentDataFromOldPin(*OldThenPin);
+										OldThenPin->BreakAllPinLinks();
+										OldThenPin->MakeLinkTo(NewInPin);
 
-									UEdGraphPin* OldInPin = CallFuncNode->FindPin(UEdGraphSchema_K2::PN_Execute);
-									if (OldInPin)
-									{
-										NewInPin->CopyPersistentDataFromOldPin(*OldInPin);
-										OldInPin->BreakAllPinLinks();
-
-										NewThenPin->MakeLinkTo(OldInPin);
 										OldThenPin = NewThenPin;
 										// bWereNodesAdded = true;
 									}
-								}
-							}
+									else
+									{
+										// If there's no then pin, we'll instead insert the dirty nodes before the execution
+										// of function with the reference.
+										// This may do weird things with Latent Nodes, so warn about that.
 
-							/*
-							if (!bWereNodesAdded)
-							{
-								// TODO: JDN - Reenable this once we have other edge cases worked out.
-								// This warning is confusing / not necessarily actionable, and could contribute to spam,
-								// but no one currently relies on these features.
-								// CompilerContext.MessageLog.Warning(*NSLOCTEXT("KismetCompiler", "PushModelNoDirty_Warning", "@@ has reference to net properties, but we were unable to generate dirty nodes.").ToString(), Node);
+										if (bIsLatent)
+										{
+											CompilerContext.MessageLog.Warning(*NSLOCTEXT("KismetCompiler", "LatentPushModel_Warning", "@@ is a latent node with references to a net property. The property may not be marked dirty in the correct frame.").ToString(), Node);
+										}
+
+										UEdGraphPin* OldInPin = CallFuncNode->FindPin(UEdGraphSchema_K2::PN_Execute);
+										if (OldInPin)
+										{
+											NewInPin->CopyPersistentDataFromOldPin(*OldInPin);
+											OldInPin->BreakAllPinLinks();
+
+											NewThenPin->MakeLinkTo(OldInPin);
+											OldThenPin = NewThenPin;
+											// bWereNodesAdded = true;
+										}
+									}
+								}
+
+								/*
+								if (!bWereNodesAdded)
+								{
+									// TODO: JDN - Reenable this once we have other edge cases worked out.
+									// This warning is confusing / not necessarily actionable, and could contribute to spam,
+									// but no one currently relies on these features.
+									// CompilerContext.MessageLog.Warning(*NSLOCTEXT("KismetCompiler", "PushModelNoDirty_Warning", "@@ has reference to net properties, but we were unable to generate dirty nodes.").ToString(), Node);
+								}
+								*/
 							}
-							*/
 						}
 					}
 
@@ -922,7 +1011,8 @@ void FKCHandler_CallFunction::CheckIfFunctionIsCallable(UFunction* Function, FKi
 	// Verify that the function is a Blueprint callable function (in case a BlueprintCallable specifier got removed)
 	if (!Function->HasAnyFunctionFlags(FUNC_BlueprintCallable) && (Function->GetOuter() != Context.NewClass))
 	{
-		if (!IsCalledFunctionFinal(Node) && Function->GetName().Find(UEdGraphSchema_K2::FN_ExecuteUbergraphBase.ToString()))
+		const bool bIsParentFunction = Node && Node->IsA<UK2Node_CallParentFunction>();
+		if (!bIsParentFunction && Function->GetName().Find(UEdGraphSchema_K2::FN_ExecuteUbergraphBase.ToString()))
 		{
 			CompilerContext.MessageLog.Error(*FText::Format(NSLOCTEXT("KismetCompiler", "ShouldNotCallFromBlueprint_ErrorFmt", "Function '{0}' called from @@ should not be called from a Blueprint"), FText::FromString(Function->GetName())).ToString(), Node);
 		}

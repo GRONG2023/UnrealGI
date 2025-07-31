@@ -6,12 +6,15 @@
 #include "Misc/Attribute.h"
 #include "Layout/Visibility.h"
 #include "Layout/Clipping.h"
+#include "Widgets/WidgetPixelSnapping.h"
 #include "Layout/FlowDirection.h"
 #include "Rendering/SlateRenderTransform.h"
 #include "GenericPlatform/ICursor.h"
 #include "Types/ISlateMetaData.h"
+#include "Trace/SlateMemoryTags.h"
 #include "Widgets/SNullWidget.h"
 #include "Widgets/Accessibility/SlateWidgetAccessibleTypes.h"
+#include "Templates/Identity.h"
 
 class IToolTip;
 class SUserWidget;
@@ -21,7 +24,7 @@ template<typename WidgetType> struct TSlateBaseNamedArgs;
 /**
  * Slate widgets are constructed through SNew and SAssignNew.
  * e.g.
- *      
+ *
  *     TSharedRef<SButton> MyButton = SNew(SButton);
  *        or
  *     TSharedPtr<SButton> MyButton;
@@ -36,6 +39,9 @@ template<typename WidgetType> struct TSlateBaseNamedArgs;
 
 #define SAssignNew( ExposeAs, WidgetType, ... ) \
 	MakeTDecl<WidgetType>( #WidgetType, __FILE__, __LINE__, RequiredArgs::MakeRequiredArgs(__VA_ARGS__) ) . Expose( ExposeAs ) <<= TYPENAME_OUTSIDE_TEMPLATE WidgetType::FArguments()
+
+#define SArgumentNew( InArgs, WidgetType, ... ) \
+	MakeTDecl<WidgetType>( #WidgetType, __FILE__, __LINE__, RequiredArgs::MakeRequiredArgs(__VA_ARGS__) ) <<= InArgs
 
 
 /**
@@ -53,11 +59,12 @@ template<typename WidgetType> struct TSlateBaseNamedArgs;
  *    SLATE_END_ARGS()
  */
 
-#define SLATE_BEGIN_ARGS( WidgetType ) \
+#define SLATE_BEGIN_ARGS( InWidgetType ) \
 	public: \
-	struct FArguments : public TSlateBaseNamedArgs<WidgetType> \
+	struct FArguments : public TSlateBaseNamedArgs<InWidgetType> \
 	{ \
 		typedef FArguments WidgetArgsType; \
+		typedef InWidgetType WidgetType; \
 		FORCENOINLINE FArguments()
 
 /**
@@ -113,190 +120,70 @@ template<typename WidgetType> struct TSlateBaseNamedArgs;
 		TAttribute< AttrType > _##AttrName
 
 #define SLATE_PRIVATE_ATTRIBUTE_FUNCTION( AttrType, AttrName ) \
-		WidgetArgsType& AttrName( const TAttribute< AttrType >& InAttribute ) \
+		WidgetArgsType& AttrName( TAttribute< AttrType > InAttribute ) \
 		{ \
-			_##AttrName = InAttribute; \
-			return this->Me(); \
+			_##AttrName = MoveTemp(InAttribute); \
+			return static_cast<WidgetArgsType*>(this)->Me(); \
 		} \
-	\
+		\
 		/* Bind attribute with delegate to a global function
 		 * NOTE: We use a template here to avoid 'typename' issues when hosting attributes inside templated classes */ \
-		template< typename StaticFuncPtr > \
-		WidgetArgsType& AttrName##_Static( StaticFuncPtr InFunc )	\
+		template< typename... VarTypes > \
+		WidgetArgsType& AttrName##_Static( TIdentity_T< typename TAttribute< AttrType >::FGetter::template TFuncPtr<VarTypes...> > InFunc, VarTypes... Vars )	\
 		{ \
-			_##AttrName = TAttribute< AttrType >::Create( TAttribute< AttrType >::FGetter::CreateStatic( InFunc ) ); \
-			return this->Me(); \
+			_##AttrName = TAttribute< AttrType >::Create( TAttribute< AttrType >::FGetter::CreateStatic( InFunc, Vars... ) ); \
+			return static_cast<WidgetArgsType*>(this)->Me(); \
 		} \
-		template< typename Var1Type > \
-		WidgetArgsType& AttrName##_Static( typename TAttribute< AttrType >::FGetter::template TStaticDelegate_OneVar< Var1Type >::FFuncPtr InFunc, Var1Type Var1 )	\
-		{ \
-			_##AttrName = TAttribute< AttrType >::Create( TAttribute< AttrType >::FGetter::CreateStatic( InFunc, Var1 ) ); \
-			return this->Me(); \
-		} \
-		template< typename Var1Type, typename Var2Type > \
-		WidgetArgsType& AttrName##_Static( typename TAttribute< AttrType >::FGetter::template TStaticDelegate_TwoVars< Var1Type, Var2Type >::FFuncPtr InFunc, Var1Type Var1, Var2Type Var2 )	\
-		{ \
-			_##AttrName = TAttribute< AttrType >::Create( TAttribute< AttrType >::FGetter::CreateStatic( InFunc, Var1, Var2 ) ); \
-			return this->Me(); \
-		} \
-		template< typename Var1Type, typename Var2Type, typename Var3Type > \
-		WidgetArgsType& AttrName##_Static( typename TAttribute< AttrType >::FGetter::template TStaticDelegate_ThreeVars< Var1Type, Var2Type, Var3Type >::FFuncPtr InFunc, Var1Type Var1, Var2Type Var2, Var3Type Var3 )	\
-		{ \
-			_##AttrName = TAttribute< AttrType >::Create( TAttribute< AttrType >::FGetter::CreateStatic( InFunc, Var1, Var2, Var3 ) ); \
-			return this->Me(); \
-		} \
-		template< typename Var1Type, typename Var2Type, typename Var3Type, typename Var4Type > \
-		WidgetArgsType& AttrName##_Static( typename TAttribute< AttrType >::FGetter::template TStaticDelegate_FourVars< Var1Type, Var2Type, Var3Type, Var4Type >::FFuncPtr InFunc, Var1Type Var1, Var2Type Var2, Var3Type Var3, Var4Type Var4 )	\
-		{ \
-			_##AttrName = TAttribute< AttrType >::Create( TAttribute< AttrType >::FGetter::CreateStatic( InFunc, Var1, Var2, Var3, Var4 ) ); \
-			return this->Me(); \
-		} \
-	\
+		\
 		/* Bind attribute with delegate to a lambda
 		 * technically this works for any functor types, but lambdas are the primary use case */ \
 		WidgetArgsType& AttrName##_Lambda(TFunction< AttrType(void) >&& InFunctor) \
 		{ \
 			_##AttrName = TAttribute< AttrType >::Create(Forward<TFunction< AttrType(void) >>(InFunctor)); \
-			return this->Me(); \
+			return static_cast<WidgetArgsType*>(this)->Me(); \
 		} \
-	\
+		\
 		/* Bind attribute with delegate to a raw C++ class method */ \
-		template< class UserClass >	\
-		WidgetArgsType& AttrName##_Raw( UserClass* InUserObject, typename TAttribute< AttrType >::FGetter::template TRawMethodDelegate_Const< UserClass >::FMethodPtr InFunc )	\
+		template< class UserClass, typename... VarTypes >	\
+		WidgetArgsType& AttrName##_Raw( UserClass* InUserObject, typename TAttribute< AttrType >::FGetter::template TConstMethodPtr< UserClass, VarTypes... > InFunc, VarTypes... Vars )	\
 		{ \
-			_##AttrName = TAttribute< AttrType >::Create( TAttribute< AttrType >::FGetter::CreateRaw( InUserObject, InFunc ) ); \
-			return this->Me(); \
+			_##AttrName = TAttribute< AttrType >::Create( TAttribute< AttrType >::FGetter::CreateRaw( InUserObject, InFunc, Vars... ) ); \
+			return static_cast<WidgetArgsType*>(this)->Me(); \
 		} \
-		template< class UserClass, typename Var1Type >	\
-		WidgetArgsType& AttrName##_Raw( UserClass* InUserObject, typename TAttribute< AttrType >::FGetter::template TRawMethodDelegate_OneVar_Const< UserClass, Var1Type  >::FMethodPtr InFunc, Var1Type Var1 )	\
-		{ \
-			_##AttrName = TAttribute< AttrType >::Create( TAttribute< AttrType >::FGetter::CreateRaw( InUserObject, InFunc, Var1 ) ); \
-			return this->Me(); \
-		} \
-		template< class UserClass, typename Var1Type, typename Var2Type >	\
-		WidgetArgsType& AttrName##_Raw( UserClass* InUserObject, typename TAttribute< AttrType >::FGetter::template TRawMethodDelegate_TwoVars_Const< UserClass, Var1Type, Var2Type >::FMethodPtr InFunc, Var1Type Var1, Var2Type Var2 )	\
-		{ \
-			_##AttrName = TAttribute< AttrType >::Create( TAttribute< AttrType >::FGetter::CreateRaw( InUserObject, InFunc, Var1, Var2 ) ); \
-			return this->Me(); \
-		} \
-		template< class UserClass, typename Var1Type, typename Var2Type, typename Var3Type >	\
-		WidgetArgsType& AttrName##_Raw( UserClass* InUserObject, typename TAttribute< AttrType >::FGetter::template TRawMethodDelegate_ThreeVars_Const< UserClass, Var1Type, Var2Type, Var3Type >::FMethodPtr InFunc, Var1Type Var1, Var2Type Var2, Var3Type Var3 )	\
-		{ \
-			_##AttrName = TAttribute< AttrType >::Create( TAttribute< AttrType >::FGetter::CreateRaw( InUserObject, InFunc, Var1, Var2, Var3 ) ); \
-			return this->Me(); \
-		} \
-		template< class UserClass, typename Var1Type, typename Var2Type, typename Var3Type, typename Var4Type >	\
-		WidgetArgsType& AttrName##_Raw( UserClass* InUserObject, typename TAttribute< AttrType >::FGetter::template TRawMethodDelegate_FourVars_Const< UserClass, Var1Type, Var2Type, Var3Type, Var4Type >::FMethodPtr InFunc, Var1Type Var1, Var2Type Var2, Var3Type Var3, Var4Type Var4 )	\
-		{ \
-			_##AttrName = TAttribute< AttrType >::Create( TAttribute< AttrType >::FGetter::CreateRaw( InUserObject, InFunc, Var1, Var2, Var3, Var4 ) ); \
-			return this->Me(); \
-		} \
-	\
+		\
 		/* Bind attribute with delegate to a shared pointer-based class method.  Slate mostly uses shared pointers so we use an overload for this type of binding. */ \
-		template< class UserClass >	\
-		WidgetArgsType& AttrName( TSharedRef< UserClass > InUserObjectRef, typename TAttribute< AttrType >::FGetter::template TSPMethodDelegate_Const< UserClass >::FMethodPtr InFunc )	\
+		template< class UserClass, typename... VarTypes >	\
+		WidgetArgsType& AttrName( TSharedRef< UserClass > InUserObjectRef, typename TAttribute< AttrType >::FGetter::template TConstMethodPtr< UserClass, VarTypes... > InFunc, VarTypes... Vars )	\
 		{ \
-			_##AttrName = TAttribute< AttrType >( InUserObjectRef, InFunc ); \
-			return this->Me(); \
+			_##AttrName = TAttribute< AttrType >::Create( TAttribute< AttrType >::FGetter::CreateSP( InUserObjectRef, InFunc, Vars... ) ); \
+			return static_cast<WidgetArgsType*>(this)->Me(); \
 		} \
-		template< class UserClass, typename Var1Type >	\
-		WidgetArgsType& AttrName( TSharedRef< UserClass > InUserObjectRef, typename TAttribute< AttrType >::FGetter::template TSPMethodDelegate_OneVar_Const< UserClass, Var1Type >::FMethodPtr InFunc, Var1Type Var1 )	\
-		{ \
-			_##AttrName = TAttribute< AttrType >::Create( TAttribute< AttrType >::FGetter::CreateSP( InUserObjectRef, InFunc, Var1 ) ); \
-			return this->Me(); \
-		} \
-		template< class UserClass, typename Var1Type, typename Var2Type >	\
-		WidgetArgsType& AttrName( TSharedRef< UserClass > InUserObjectRef, typename TAttribute< AttrType >::FGetter::template TSPMethodDelegate_TwoVars_Const< UserClass, Var1Type, Var2Type >::FMethodPtr InFunc, Var1Type Var1, Var2Type Var2 )	\
-		{ \
-			_##AttrName = TAttribute< AttrType >::Create( TAttribute< AttrType >::FGetter::CreateSP( InUserObjectRef, InFunc, Var1, Var2 ) ); \
-			return this->Me(); \
-		} \
-		template< class UserClass, typename Var1Type, typename Var2Type, typename Var3Type >	\
-		WidgetArgsType& AttrName( TSharedRef< UserClass > InUserObjectRef, typename TAttribute< AttrType >::FGetter::template TSPMethodDelegate_ThreeVars_Const< UserClass, Var1Type, Var2Type, Var3Type >::FMethodPtr InFunc, Var1Type Var1, Var2Type Var2, Var3Type Var3 )	\
-		{ \
-			_##AttrName = TAttribute< AttrType >::Create( TAttribute< AttrType >::FGetter::CreateSP( InUserObjectRef, InFunc, Var1, Var2, Var3 ) ); \
-			return this->Me(); \
-		} \
-		template< class UserClass, typename Var1Type, typename Var2Type, typename Var3Type, typename Var4Type >	\
-		WidgetArgsType& AttrName( TSharedRef< UserClass > InUserObjectRef, typename TAttribute< AttrType >::FGetter::template TSPMethodDelegate_FourVars_Const< UserClass, Var1Type, Var2Type, Var3Type, Var4Type >::FMethodPtr InFunc, Var1Type Var1, Var2Type Var2, Var3Type Var3, Var4Type Var4 )	\
-		{ \
-			_##AttrName = TAttribute< AttrType >::Create( TAttribute< AttrType >::FGetter::CreateSP( InUserObjectRef, InFunc, Var1, Var2, Var3, Var4 ) ); \
-			return this->Me(); \
-		} \
-	\
+		\
 		/* Bind attribute with delegate to a shared pointer-based class method.  Slate mostly uses shared pointers so we use an overload for this type of binding. */ \
-		template< class UserClass >	\
-		WidgetArgsType& AttrName( UserClass* InUserObject, typename TAttribute< AttrType >::FGetter::template TSPMethodDelegate_Const< UserClass >::FMethodPtr InFunc )	\
+		template< class UserClass, typename... VarTypes >	\
+		WidgetArgsType& AttrName( UserClass* InUserObject, typename TAttribute< AttrType >::FGetter::template TConstMethodPtr< UserClass, VarTypes... > InFunc, VarTypes... Vars )	\
 		{ \
-			_##AttrName = TAttribute< AttrType >::Create( TAttribute< AttrType >::FGetter::CreateSP( InUserObject, InFunc ) ); \
-			return this->Me(); \
+			_##AttrName = TAttribute< AttrType >::Create( TAttribute< AttrType >::FGetter::CreateSP( InUserObject, InFunc, Vars... ) ); \
+			return static_cast<WidgetArgsType*>(this)->Me(); \
 		} \
-		template< class UserClass, typename Var1Type >	\
-		WidgetArgsType& AttrName( UserClass* InUserObject, typename TAttribute< AttrType >::FGetter::template TSPMethodDelegate_OneVar_Const< UserClass, Var1Type >::FMethodPtr InFunc, Var1Type Var1 )	\
-		{ \
-			_##AttrName = TAttribute< AttrType >::Create( TAttribute< AttrType >::FGetter::CreateSP( InUserObject, InFunc, Var1 ) ); \
-			return this->Me(); \
-		} \
-		template< class UserClass, typename Var1Type, typename Var2Type >	\
-		WidgetArgsType& AttrName( UserClass* InUserObject, typename TAttribute< AttrType >::FGetter::template TSPMethodDelegate_TwoVars_Const< UserClass, Var1Type, Var2Type >::FMethodPtr InFunc, Var1Type Var1, Var2Type Var2 )	\
-		{ \
-			_##AttrName = TAttribute< AttrType >::Create( TAttribute< AttrType >::FGetter::CreateSP( InUserObject, InFunc, Var1, Var2 ) ); \
-			return this->Me(); \
-		} \
-		template< class UserClass, typename Var1Type, typename Var2Type, typename Var3Type >	\
-		WidgetArgsType& AttrName( UserClass* InUserObject, typename TAttribute< AttrType >::FGetter::template TSPMethodDelegate_ThreeVars_Const< UserClass, Var1Type, Var2Type, Var3Type >::FMethodPtr InFunc, Var1Type Var1, Var2Type Var2, Var3Type Var3 )	\
-		{ \
-			_##AttrName = TAttribute< AttrType >::Create( TAttribute< AttrType >::FGetter::CreateSP( InUserObject, InFunc, Var1, Var2, Var3 ) ); \
-			return this->Me(); \
-		} \
-		template< class UserClass, typename Var1Type, typename Var2Type, typename Var3Type, typename Var4Type >	\
-		WidgetArgsType& AttrName( UserClass* InUserObject, typename TAttribute< AttrType >::FGetter::template TSPMethodDelegate_FourVars_Const< UserClass, Var1Type, Var2Type, Var3Type, Var4Type >::FMethodPtr InFunc, Var1Type Var1, Var2Type Var2, Var3Type Var3, Var4Type Var4 )	\
-		{ \
-			_##AttrName = TAttribute< AttrType >::Create( TAttribute< AttrType >::FGetter::CreateSP( InUserObject, InFunc, Var1, Var2, Var3, Var4 ) ); \
-			return this->Me(); \
-		} \
-	\
+		\
 		/* Bind attribute with delegate to a UObject-based class method */ \
-		template< class UserClass >	\
-		WidgetArgsType& AttrName##_UObject( UserClass* InUserObject, typename TAttribute< AttrType >::FGetter::template TUObjectMethodDelegate_Const< UserClass >::FMethodPtr InFunc )	\
+		template< class UserClass, typename... VarTypes >	\
+		WidgetArgsType& AttrName##_UObject( UserClass* InUserObject, typename TAttribute< AttrType >::FGetter::template TConstMethodPtr< UserClass, VarTypes... > InFunc, VarTypes... Vars )	\
 		{ \
-			_##AttrName = TAttribute< AttrType >::Create( TAttribute< AttrType >::FGetter::CreateUObject( InUserObject, InFunc ) ); \
-			return this->Me(); \
+			_##AttrName = TAttribute< AttrType >::Create( TAttribute< AttrType >::FGetter::CreateUObject( InUserObject, InFunc, Vars... ) ); \
+			return static_cast<WidgetArgsType*>(this)->Me(); \
 		} \
-		template< class UserClass, typename Var1Type >	\
-		WidgetArgsType& AttrName##_UObject( UserClass* InUserObject, typename TAttribute< AttrType >::FGetter::template TUObjectMethodDelegate_OneVar_Const< UserClass, Var1Type >::FMethodPtr InFunc, Var1Type Var1 )	\
-		{ \
-			_##AttrName = TAttribute< AttrType >::Create( TAttribute< AttrType >::FGetter::CreateUObject( InUserObject, InFunc, Var1 ) ); \
-			return this->Me(); \
-		} \
-		template< class UserClass, typename Var1Type, typename Var2Type  >	\
-		WidgetArgsType& AttrName##_UObject( UserClass* InUserObject, typename TAttribute< AttrType >::FGetter::template TUObjectMethodDelegate_TwoVars_Const< UserClass, Var1Type, Var2Type >::FMethodPtr InFunc, Var1Type Var1, Var2Type Var2 )	\
-		{ \
-			_##AttrName = TAttribute< AttrType >::Create( TAttribute< AttrType >::FGetter::CreateUObject( InUserObject, InFunc, Var1, Var2 ) ); \
-			return this->Me(); \
-		} \
-		template< class UserClass, typename Var1Type, typename Var2Type, typename Var3Type >	\
-		WidgetArgsType& AttrName##_UObject( UserClass* InUserObject, typename TAttribute< AttrType >::FGetter::template TUObjectMethodDelegate_ThreeVars_Const< UserClass, Var1Type, Var2Type, Var3Type >::FMethodPtr InFunc, Var1Type Var1, Var2Type Var2, Var3Type Var3 )	\
-		{ \
-			_##AttrName = TAttribute< AttrType >::Create( TAttribute< AttrType >::FGetter::CreateUObject( InUserObject, InFunc, Var1, Var2, Var3 ) ); \
-			return this->Me(); \
-		} \
-		template< class UserClass, typename Var1Type, typename Var2Type, typename Var3Type, typename Var4Type >	\
-		WidgetArgsType& AttrName##_UObject( UserClass* InUserObject, typename TAttribute< AttrType >::FGetter::template TUObjectMethodDelegate_FourVars_Const< UserClass, Var1Type, Var2Type, Var3Type, Var4Type >::FMethodPtr InFunc, Var1Type Var1, Var2Type Var2, Var3Type Var3, Var4Type Var4 )	\
-		{ \
-			_##AttrName = TAttribute< AttrType >::Create( TAttribute< AttrType >::FGetter::CreateUObject( InUserObject, InFunc, Var1, Var2, Var3, Var4 ) ); \
-			return this->Me(); \
-		}
 
 #define SLATE_PRIVATE_ARGUMENT_VARIABLE( ArgType, ArgName ) \
 		ArgType _##ArgName
-		
+
 
 #define SLATE_PRIVATE_ARGUMENT_FUNCTION( ArgType, ArgName ) \
 		WidgetArgsType& ArgName( ArgType InArg ) \
 		{ \
 			_##ArgName = InArg; \
-			return this->Me(); \
+			return static_cast<WidgetArgsType*>(this)->Me(); \
 		}
 
 /**
@@ -308,12 +195,28 @@ template<typename WidgetType> struct TSlateBaseNamedArgs;
 		SLATE_PRIVATE_ATTRIBUTE_FUNCTION( AttrType, AttrName )
 
 /**
+ * Use when an argument used to be declared SLATE_ATTRIBUTE and it should no longer be used
+ */
+#define SLATE_ATTRIBUTE_DEPRECATED( AttrType, AttrName, DeprecationVersion, DeprecationMessage) \
+		SLATE_PRIVATE_ATTRIBUTE_VARIABLE( AttrType, AttrName ); \
+		UE_DEPRECATED(DeprecationVersion, DeprecationMessage) \
+		SLATE_PRIVATE_ATTRIBUTE_FUNCTION( AttrType, AttrName )
+
+/**
  * Use this macro to declare a slate argument.
  * Arguments differ from attributes in that they can only be values
  */
 #define SLATE_ARGUMENT( ArgType, ArgName ) \
 		SLATE_PRIVATE_ARGUMENT_VARIABLE( ArgType, ArgName ); \
 		SLATE_PRIVATE_ARGUMENT_FUNCTION ( ArgType, ArgName )
+
+/**
+ * Use when an argument used to be declared SLATE_ARGUMENT and it should no longer be used
+ */
+#define SLATE_ARGUMENT_DEPRECATED( ArgType, ArgName, DeprecationVersion, DeprecationMessage) \
+	SLATE_PRIVATE_ARGUMENT_VARIABLE( ArgType, ArgName ); \
+	UE_DEPRECATED(DeprecationVersion, DeprecationMessage) \
+	SLATE_PRIVATE_ARGUMENT_FUNCTION ( ArgType, ArgName )
 
 /**
  * Like SLATE_ARGUMENT, but support a default value. e.g.
@@ -324,66 +227,100 @@ template<typename WidgetType> struct TSlateBaseNamedArgs;
 	SLATE_PRIVATE_ARGUMENT_FUNCTION(ArgType, ArgName) \
 	SLATE_PRIVATE_ARGUMENT_VARIABLE(ArgType, ArgName)
 
-/**
- * Use this macro to declare a slate argument.
- * Arguments differ from attributes in that they can only be values
- */
-#define SLATE_STYLE_ARGUMENT( ArgType, ArgName ) \
+#define SLATE_PRIVATE_STYLE_ARGUMENT_VARIABLE( ArgType, ArgName ) \
 		const ArgType* _##ArgName; \
+
+#define SLATE_PRIVATE_STYLE_ARGUMENT_FUNCTION_ARGTYPE_PTR( ArgType, ArgName ) \
 		WidgetArgsType& ArgName( const ArgType* InArg ) \
 		{ \
 			_##ArgName = InArg; \
-			return this->Me(); \
-		}\
-		\
+			return static_cast<WidgetArgsType*>(this)->Me(); \
+		}
+#define SLATE_PRIVATE_STYLE_ARGUMENT_FUNCTION_WIDGETSTYLE_PTR( ArgType, ArgName ) \
 		WidgetArgsType& ArgName( const class USlateWidgetStyleAsset* const InSlateStyleAsset ) \
 		{ \
 			_##ArgName = InSlateStyleAsset->GetStyleChecked< ArgType >(); \
-			return this->Me(); \
-		}\
-		\
+			return static_cast<WidgetArgsType*>(this)->Me(); \
+		}
+#define SLATE_PRIVATE_STYLE_ARGUMENT_FUNCTION_WIDGETSTYLE_WEAKPTR( ArgType, ArgName ) \
 		WidgetArgsType& ArgName( const TWeakObjectPtr< const class USlateWidgetStyleAsset >& InSlateStyleAsset ) \
 		{ \
 			_##ArgName = InSlateStyleAsset.Get()->GetStyleChecked< ArgType >(); \
-			return this->Me(); \
-		}\
-		\
+			return static_cast<WidgetArgsType*>(this)->Me(); \
+		}
+#define SLATE_PRIVATE_STYLE_ARGUMENT_FUNCTION_SLATESTYLE_PTR( ArgType, ArgName ) \
 		WidgetArgsType& ArgName( const class ISlateStyle* InSlateStyle, const FName& StyleName, const ANSICHAR* Specifier = nullptr ) \
 		{ \
 			check( InSlateStyle != nullptr ); \
 			_##ArgName = &InSlateStyle->GetWidgetStyle< ArgType >( StyleName, Specifier ); \
-			return this->Me(); \
-		}\
-		\
+			return static_cast<WidgetArgsType*>(this)->Me(); \
+		}
+#define SLATE_PRIVATE_STYLE_ARGUMENT_FUNCTION_SLATESTYLE_REF( ArgType, ArgName ) \
 		WidgetArgsType& ArgName( const class ISlateStyle& InSlateStyle, const FName& StyleName, const ANSICHAR* Specifier = nullptr ) \
 		{ \
 			_##ArgName = &InSlateStyle.GetWidgetStyle< ArgType >( StyleName, Specifier ); \
-			return this->Me(); \
-		}\
-		\
+			return static_cast<WidgetArgsType*>(this)->Me(); \
+		}
+#define SLATE_PRIVATE_STYLE_ARGUMENT_FUNCTION_SLATESTYLE_WEAKPTR( ArgType, ArgName ) \
 		WidgetArgsType& ArgName( const TWeakObjectPtr< const class ISlateStyle >& InSlateStyle, const FName& StyleName, const ANSICHAR* Specifier = nullptr ) \
 		{ \
 			_##ArgName = &InSlateStyle.Get()->GetWidgetStyle< ArgType >( StyleName, Specifier ); \
-			return this->Me(); \
-		} \
-		\
+			return static_cast<WidgetArgsType*>(this)->Me(); \
+		}
+#define SLATE_PRIVATE_STYLE_ARGUMENT_FUNCTION_SLATESTYLE_SHAREDPTR( ArgType, ArgName ) \
 		WidgetArgsType& ArgName( const TSharedPtr< const class ISlateStyle >& InSlateStyle, const FName& StyleName, const ANSICHAR* Specifier = nullptr ) \
 		{ \
 			_##ArgName = &InSlateStyle->GetWidgetStyle< ArgType >( StyleName, Specifier ); \
-			return this->Me(); \
+			return static_cast<WidgetArgsType*>(this)->Me(); \
 		} 
 
+ /**
+  * Use this macro to declare a slate style argument.
+  * Arguments differ from attributes in that they can only be values
+  */
+#define SLATE_STYLE_ARGUMENT( ArgType, ArgName ) \
+	SLATE_PRIVATE_STYLE_ARGUMENT_VARIABLE( ArgType, ArgName ); \
+	SLATE_PRIVATE_STYLE_ARGUMENT_FUNCTION_ARGTYPE_PTR( ArgType, ArgName ) \
+	SLATE_PRIVATE_STYLE_ARGUMENT_FUNCTION_WIDGETSTYLE_PTR( ArgType, ArgName ) \
+	SLATE_PRIVATE_STYLE_ARGUMENT_FUNCTION_WIDGETSTYLE_WEAKPTR( ArgType, ArgName ) \
+	SLATE_PRIVATE_STYLE_ARGUMENT_FUNCTION_SLATESTYLE_PTR( ArgType, ArgName ) \
+	SLATE_PRIVATE_STYLE_ARGUMENT_FUNCTION_SLATESTYLE_REF( ArgType, ArgName ) \
+	SLATE_PRIVATE_STYLE_ARGUMENT_FUNCTION_SLATESTYLE_WEAKPTR( ArgType, ArgName ) \
+	SLATE_PRIVATE_STYLE_ARGUMENT_FUNCTION_SLATESTYLE_SHAREDPTR( ArgType, ArgName )
+
+ /**
+  * Use when a style argument used to be declared SLATE_STYLE_ARGUMENT and it should no longer be used
+  */
+#define SLATE_STYLE_ARGUMENT_DEPRECATED( ArgType, ArgName, DeprecationVersion, DeprecationMessage) \
+	SLATE_PRIVATE_STYLE_ARGUMENT_VARIABLE( ArgType, ArgName ); \
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS\
+	UE_DEPRECATED(DeprecationVersion, DeprecationMessage) \
+	SLATE_PRIVATE_STYLE_ARGUMENT_FUNCTION_ARGTYPE_PTR( ArgType, ArgName ) \
+	UE_DEPRECATED(DeprecationVersion, DeprecationMessage) \
+	SLATE_PRIVATE_STYLE_ARGUMENT_FUNCTION_WIDGETSTYLE_PTR( ArgType, ArgName ) \
+	UE_DEPRECATED(DeprecationVersion, DeprecationMessage) \
+	SLATE_PRIVATE_STYLE_ARGUMENT_FUNCTION_WIDGETSTYLE_WEAKPTR( ArgType, ArgName ) \
+	UE_DEPRECATED(DeprecationVersion, DeprecationMessage) \
+	SLATE_PRIVATE_STYLE_ARGUMENT_FUNCTION_SLATESTYLE_PTR( ArgType, ArgName ) \
+	UE_DEPRECATED(DeprecationVersion, DeprecationMessage) \
+	SLATE_PRIVATE_STYLE_ARGUMENT_FUNCTION_SLATESTYLE_REF( ArgType, ArgName ) \
+	UE_DEPRECATED(DeprecationVersion, DeprecationMessage) \
+	SLATE_PRIVATE_STYLE_ARGUMENT_FUNCTION_SLATESTYLE_WEAKPTR( ArgType, ArgName ) \
+	UE_DEPRECATED(DeprecationVersion, DeprecationMessage) \
+	SLATE_PRIVATE_STYLE_ARGUMENT_FUNCTION_SLATESTYLE_SHAREDPTR( ArgType, ArgName )\
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 /**
  * Use this macro between SLATE_BEGIN_ARGS and SLATE_END_ARGS
  * in order to add support for slots.
  */
 #define SLATE_SUPPORTS_SLOT( SlotType ) \
+		UE_DEPRECATED(5.0, "SLATE_SUPPORTS_SLOT is deprecated. Use SLATE_SLOT_ARGUMENT") \
 		TArray< SlotType* > Slots; \
 		WidgetArgsType& operator + (SlotType& SlotToAdd) \
 		{ \
 			Slots.Add( &SlotToAdd ); \
-			return *this; \
+			return static_cast<WidgetArgsType*>(this)->Me(); \
 		}
 
 
@@ -396,8 +333,59 @@ template<typename WidgetType> struct TSlateBaseNamedArgs;
 	WidgetArgsType& operator + (const typename SlotType::FArguments& ArgumentsForNewSlot) \
 		{ \
 			Slots.Add( new SlotType( ArgumentsForNewSlot ) ); \
-			return *this; \
+			return static_cast<WidgetArgsType*>(this)->Me(); \
 		}
+
+
+#define SLATE_PRIVATE_SLOT_BEGIN_ARGS( SlotType, SlotParentType ) \
+	{ \
+		using WidgetArgsType = SlotType::FSlotArguments; \
+		using SlotParentType::FSlotArguments::FSlotArguments;
+
+/**
+ * Use this macro between SLATE_BEGIN_ARGS and SLATE_END_ARGS
+ * in order to add support for slots with the construct pattern.
+ */
+#define SLATE_SLOT_ARGUMENT( SlotType, SlotName ) \
+		TArray<typename SlotType::FSlotArguments> _##SlotName; \
+		WidgetArgsType& operator + (typename SlotType::FSlotArguments& SlotToAdd) \
+		{ \
+			_##SlotName.Add( MoveTemp(SlotToAdd) ); \
+			return static_cast<WidgetArgsType*>(this)->Me(); \
+		} \
+		WidgetArgsType& operator + (typename SlotType::FSlotArguments&& SlotToAdd) \
+		{ \
+			_##SlotName.Add( MoveTemp(SlotToAdd) ); \
+			return static_cast<WidgetArgsType*>(this)->Me(); \
+		}
+
+#define SLATE_SLOT_BEGIN_ARGS( SlotType, SlotParentType ) \
+	public: \
+	struct FSlotArguments : public SlotParentType::FSlotArguments \
+	SLATE_PRIVATE_SLOT_BEGIN_ARGS( SlotType, SlotParentType )
+
+#define SLATE_SLOT_BEGIN_ARGS_OneMixin( SlotType, SlotParentType, Mixin1 ) \
+	public: \
+	struct FSlotArguments : public SlotParentType::FSlotArguments, public Mixin1::FSlotArgumentsMixin \
+	SLATE_PRIVATE_SLOT_BEGIN_ARGS( SlotType, SlotParentType )
+
+#define SLATE_SLOT_BEGIN_ARGS_TwoMixins( SlotType, SlotParentType, Mixin1, Mixin2 ) \
+	public: \
+	struct FSlotArguments : public SlotParentType::FSlotArguments, public Mixin1::FSlotArgumentsMixin, public Mixin2::FSlotArgumentsMixin \
+	SLATE_PRIVATE_SLOT_BEGIN_ARGS( SlotType, SlotParentType )
+
+#define SLATE_SLOT_BEGIN_ARGS_ThreeMixins( SlotType, SlotParentType, Mixin1, Mixin2, Mixin3 ) \
+	public: \
+	struct FSlotArguments : public SlotParentType::FSlotArguments, public Mixin1::FSlotArgumentsMixin, public Mixin2::FSlotArgumentsMixin, public Mixin3::FSlotArgumentsMixin \
+	SLATE_PRIVATE_SLOT_BEGIN_ARGS( SlotType, SlotParentType )
+
+#define SLATE_SLOT_BEGIN_ARGS_FourMixins( SlotType, SlotParentType, Mixin1, Mixin2, Mixin3, Mixin4 ) \
+	public: \
+	struct FSlotArguments : public SlotParentType::FSlotArguments, public Mixin1::FSlotArgumentsMixin, public Mixin2::FSlotArgumentsMixin, public Mixin3::FSlotArgumentsMixin, public Mixin4::FSlotArgumentsMixin \
+	SLATE_PRIVATE_SLOT_BEGIN_ARGS( SlotType, SlotParentType )
+
+#define SLATE_SLOT_END_ARGS() \
+	};
 
 
 /** A widget reference that is always a valid pointer; defaults to SNullWidget */
@@ -456,10 +444,10 @@ struct NamedSlotProperty
 
 #define SLATE_DEFAULT_SLOT( DeclarationType, SlotName ) \
 		SLATE_NAMED_SLOT(DeclarationType, SlotName) ; \
-		DeclarationType & operator[]( const TSharedRef<SWidget> InChild ) \
+		DeclarationType & operator[]( const TSharedRef<SWidget>& InChild ) \
 		{ \
 			_##SlotName.Widget = InChild; \
-			return *this; \
+			return static_cast<WidgetArgsType*>(this)->Me(); \
 		}
 
 
@@ -472,46 +460,22 @@ struct NamedSlotProperty
 		WidgetArgsType& EventName( const DelegateName& InDelegate ) \
 		{ \
 			_##EventName = InDelegate; \
-			return *this; \
+			return static_cast<WidgetArgsType*>(this)->Me(); \
 		} \
 		\
 		WidgetArgsType& EventName( DelegateName&& InDelegate ) \
 		{ \
 			_##EventName = MoveTemp(InDelegate); \
-			return *this; \
+			return static_cast<WidgetArgsType*>(this)->Me(); \
 		} \
 		\
 		/* Set event delegate to a global function */ \
 		/* NOTE: We use a template here to avoid 'typename' issues when hosting attributes inside templated classes */ \
-		template< typename StaticFuncPtr > \
-		WidgetArgsType& EventName##_Static( StaticFuncPtr InFunc )	\
+		template< typename StaticFuncPtr, typename... VarTypes > \
+		WidgetArgsType& EventName##_Static( StaticFuncPtr InFunc, VarTypes... Vars )	\
 		{ \
-			_##EventName = DelegateName::CreateStatic( InFunc ); \
-			return *this; \
-		} \
-		template< typename StaticFuncPtr, typename Var1Type > \
-		WidgetArgsType& EventName##_Static( StaticFuncPtr InFunc, Var1Type Var1 )	\
-		{ \
-			_##EventName = DelegateName::CreateStatic( InFunc, Var1 ); \
-			return *this; \
-		} \
-		template< typename StaticFuncPtr, typename Var1Type, typename Var2Type > \
-		WidgetArgsType& EventName##_Static( StaticFuncPtr InFunc, Var1Type Var1, Var2Type Var2 )	\
-		{ \
-			_##EventName = DelegateName::CreateStatic( InFunc, Var1, Var2 ); \
-			return *this; \
-		} \
-		template< typename StaticFuncPtr, typename Var1Type, typename Var2Type, typename Var3Type > \
-		WidgetArgsType& EventName##_Static( StaticFuncPtr InFunc, Var1Type Var1, Var2Type Var2, Var3Type Var3 )	\
-		{ \
-			_##EventName = DelegateName::CreateStatic( InFunc, Var1, Var2, Var3 ); \
-			return *this; \
-		} \
-		template< typename StaticFuncPtr, typename Var1Type, typename Var2Type, typename Var3Type, typename Var4Type > \
-		WidgetArgsType& EventName##_Static( StaticFuncPtr InFunc, Var1Type Var1, Var2Type Var2, Var3Type Var3, Var4Type Var4 )	\
-		{ \
-			_##EventName = DelegateName::CreateStatic( InFunc, Var1, Var2, Var3, Var4 ); \
-			return *this; \
+			_##EventName = DelegateName::CreateStatic( InFunc, Vars... ); \
+			return static_cast<WidgetArgsType*>(this)->Me(); \
 		} \
 		\
 		/* Set event delegate to a lambda
@@ -519,259 +483,172 @@ struct NamedSlotProperty
 		template<typename FunctorType, typename... VarTypes> \
 		WidgetArgsType& EventName##_Lambda(FunctorType&& InFunctor, VarTypes... Vars) \
 		{ \
-			_##EventName = DelegateName::CreateLambda(Forward<FunctorType>(InFunctor), Vars... ); \
-			return this->Me(); \
+			_##EventName = DelegateName::CreateLambda( Forward<FunctorType>(InFunctor), Vars... ); \
+			return static_cast<WidgetArgsType*>(this)->Me(); \
 		} \
 		\
 		/* Set event delegate to a raw C++ class method */ \
-		template< class UserClass >	\
-		WidgetArgsType& EventName##_Raw( UserClass* InUserObject, typename DelegateName::template TRawMethodDelegate< UserClass >::FMethodPtr InFunc )	\
+		template< class UserClass, typename... VarTypes >	\
+		WidgetArgsType& EventName##_Raw( UserClass* InUserObject, typename DelegateName::template TMethodPtr< UserClass, VarTypes... > InFunc, VarTypes... Vars )	\
 		{ \
-			_##EventName = DelegateName::CreateRaw( InUserObject, InFunc ); \
-			return *this; \
+			_##EventName = DelegateName::CreateRaw( InUserObject, InFunc, Vars... ); \
+			return static_cast<WidgetArgsType*>(this)->Me(); \
 		} \
-		template< class UserClass >	\
-		WidgetArgsType& EventName##_Raw( UserClass* InUserObject, typename DelegateName::template TRawMethodDelegate_Const< UserClass >::FMethodPtr InFunc )	\
+		template< class UserClass, typename... VarTypes >	\
+		WidgetArgsType& EventName##_Raw( UserClass* InUserObject, typename DelegateName::template TConstMethodPtr< UserClass, VarTypes... > InFunc, VarTypes... Vars )	\
 		{ \
-			_##EventName = DelegateName::CreateRaw( InUserObject, InFunc ); \
-			return *this; \
-		} \
-		template< class UserClass, typename Var1Type >	\
-		WidgetArgsType& EventName##_Raw( UserClass* InUserObject, typename DelegateName::template TRawMethodDelegate_OneVar< UserClass, Var1Type >::FMethodPtr InFunc, Var1Type Var1 )	\
-		{ \
-			_##EventName = DelegateName::CreateRaw( InUserObject, InFunc, Var1 ); \
-			return *this; \
-		} \
-		template< class UserClass, typename Var1Type >	\
-		WidgetArgsType& EventName##_Raw( UserClass* InUserObject, typename DelegateName::template TRawMethodDelegate_OneVar_Const< UserClass, Var1Type >::FMethodPtr InFunc, Var1Type Var1 )	\
-		{ \
-			_##EventName = DelegateName::CreateRaw( InUserObject, InFunc, Var1 ); \
-			return *this; \
-		} \
-		template< class UserClass, typename Var1Type, typename Var2Type >	\
-		WidgetArgsType& EventName##_Raw( UserClass* InUserObject, typename DelegateName::template TRawMethodDelegate_TwoVars< UserClass, Var1Type, Var2Type >::FMethodPtr InFunc, Var1Type Var1, Var2Type Var2 )	\
-		{ \
-			_##EventName = DelegateName::CreateRaw( InUserObject, InFunc, Var1, Var2 ); \
-			return *this; \
-		} \
-		template< class UserClass, typename Var1Type, typename Var2Type >	\
-		WidgetArgsType& EventName##_Raw( UserClass* InUserObject, typename DelegateName::template TRawMethodDelegate_TwoVars_Const< UserClass, Var1Type, Var2Type >::FMethodPtr InFunc, Var1Type Var1, Var2Type Var2 )	\
-		{ \
-			_##EventName = DelegateName::CreateRaw( InUserObject, InFunc, Var1, Var2 ); \
-			return *this; \
-		} \
-		template< class UserClass, typename Var1Type, typename Var2Type, typename Var3Type >	\
-		WidgetArgsType& EventName##_Raw( UserClass* InUserObject, typename DelegateName::template TRawMethodDelegate_ThreeVars< UserClass, Var1Type, Var2Type, Var3Type >::FMethodPtr InFunc, Var1Type Var1, Var2Type Var2, Var3Type Var3 )	\
-		{ \
-			_##EventName = DelegateName::CreateRaw( InUserObject, InFunc, Var1, Var2, Var3 ); \
-			return *this; \
-		} \
-		template< class UserClass, typename Var1Type, typename Var2Type, typename Var3Type >	\
-		WidgetArgsType& EventName##_Raw( UserClass* InUserObject, typename DelegateName::template TRawMethodDelegate_ThreeVars_Const< UserClass, Var1Type, Var2Type, Var3Type >::FMethodPtr InFunc, Var1Type Var1, Var2Type Var2, Var3Type Var3 )	\
-		{ \
-			_##EventName = DelegateName::CreateRaw( InUserObject, InFunc, Var1, Var2, Var3 ); \
-			return *this; \
-		} \
-		template< class UserClass, typename Var1Type, typename Var2Type, typename Var3Type, typename Var4Type >	\
-		WidgetArgsType& EventName##_Raw( UserClass* InUserObject, typename DelegateName::template TRawMethodDelegate_FourVars< UserClass, Var1Type, Var2Type, Var3Type, Var4Type >::FMethodPtr InFunc, Var1Type Var1, Var2Type Var2, Var3Type Var3, Var4Type Var4 )	\
-		{ \
-			_##EventName = DelegateName::CreateRaw( InUserObject, InFunc, Var1, Var2, Var3, Var4 ); \
-			return *this; \
-		} \
-		template< class UserClass, typename Var1Type, typename Var2Type, typename Var3Type, typename Var4Type >	\
-		WidgetArgsType& EventName##_Raw( UserClass* InUserObject, typename DelegateName::template TRawMethodDelegate_FourVars_Const< UserClass, Var1Type, Var2Type, Var3Type, Var4Type >::FMethodPtr InFunc, Var1Type Var1, Var2Type Var2, Var3Type Var3, Var4Type Var4 )	\
-		{ \
-			_##EventName = DelegateName::CreateRaw( InUserObject, InFunc, Var1, Var2, Var3, Var4 ); \
-			return *this; \
+			_##EventName = DelegateName::CreateRaw( InUserObject, InFunc, Vars... ); \
+			return static_cast<WidgetArgsType*>(this)->Me(); \
 		} \
 		\
 		/* Set event delegate to a shared pointer-based class method.  Slate mostly uses shared pointers so we use an overload for this type of binding. */ \
-		template< class UserClass >	\
-		WidgetArgsType& EventName( TSharedRef< UserClass > InUserObjectRef, typename DelegateName::template TSPMethodDelegate< UserClass >::FMethodPtr InFunc )	\
+		template< class UserClass, typename... VarTypes >	\
+		WidgetArgsType& EventName( TSharedRef< UserClass > InUserObjectRef, typename DelegateName::template TMethodPtr< UserClass, VarTypes... > InFunc, VarTypes... Vars )	\
 		{ \
-			_##EventName = DelegateName::CreateSP( InUserObjectRef, InFunc ); \
-			return *this; \
+			_##EventName = DelegateName::CreateSP( InUserObjectRef, InFunc, Vars... ); \
+			return static_cast<WidgetArgsType*>(this)->Me(); \
 		} \
-		template< class UserClass >	\
-		WidgetArgsType& EventName( TSharedRef< UserClass > InUserObjectRef, typename DelegateName::template TSPMethodDelegate_Const< UserClass >::FMethodPtr InFunc )	\
+		template< class UserClass, typename... VarTypes >	\
+		WidgetArgsType& EventName( TSharedRef< UserClass > InUserObjectRef, typename DelegateName::template TConstMethodPtr< UserClass, VarTypes... > InFunc, VarTypes... Vars )	\
 		{ \
-			_##EventName = DelegateName::CreateSP( InUserObjectRef, InFunc ); \
-			return *this; \
-		} \
-		template< class UserClass, typename Var1Type >	\
-		WidgetArgsType& EventName( TSharedRef< UserClass > InUserObjectRef, typename DelegateName::template TSPMethodDelegate_OneVar< UserClass, Var1Type >::FMethodPtr InFunc, Var1Type Var1 )	\
-		{ \
-			_##EventName = DelegateName::CreateSP( InUserObjectRef, InFunc, Var1 ); \
-			return *this; \
-		} \
-		template< class UserClass, typename Var1Type >	\
-		WidgetArgsType& EventName( TSharedRef< UserClass > InUserObjectRef, typename DelegateName::template TSPMethodDelegate_OneVar_Const< UserClass, Var1Type >::FMethodPtr InFunc, Var1Type Var1 )	\
-		{ \
-			_##EventName = DelegateName::CreateSP( InUserObjectRef, InFunc, Var1 ); \
-			return *this; \
-		} \
-		template< class UserClass, typename Var1Type, typename Var2Type >	\
-		WidgetArgsType& EventName( TSharedRef< UserClass > InUserObjectRef, typename DelegateName::template TSPMethodDelegate_TwoVars< UserClass, Var1Type, Var2Type >::FMethodPtr InFunc, Var1Type Var1, Var2Type Var2 )	\
-		{ \
-			_##EventName = DelegateName::CreateSP( InUserObjectRef, InFunc, Var1, Var2 ); \
-			return *this; \
-		} \
-		template< class UserClass, typename Var1Type, typename Var2Type >	\
-		WidgetArgsType& EventName( TSharedRef< UserClass > InUserObjectRef, typename DelegateName::template TSPMethodDelegate_TwoVars_Const< UserClass, Var1Type, Var2Type >::FMethodPtr InFunc, Var1Type Var1, Var2Type Var2 )	\
-		{ \
-			_##EventName = DelegateName::CreateSP( InUserObjectRef, InFunc, Var1, Var2 ); \
-			return *this; \
-		} \
-		template< class UserClass, typename Var1Type, typename Var2Type, typename Var3Type >	\
-		WidgetArgsType& EventName( TSharedRef< UserClass > InUserObjectRef, typename DelegateName::template TSPMethodDelegate_ThreeVars< UserClass, Var1Type, Var2Type, Var3Type >::FMethodPtr InFunc, Var1Type Var1, Var2Type Var2, Var3Type Var3 )	\
-		{ \
-			_##EventName = DelegateName::CreateSP( InUserObjectRef, InFunc, Var1, Var2, Var3 ); \
-			return *this; \
-		} \
-		template< class UserClass, typename Var1Type, typename Var2Type, typename Var3Type >	\
-		WidgetArgsType& EventName( TSharedRef< UserClass > InUserObjectRef, typename DelegateName::template TSPMethodDelegate_ThreeVars_Const< UserClass, Var1Type, Var2Type, Var3Type >::FMethodPtr InFunc, Var1Type Var1, Var2Type Var2, Var3Type Var3 )	\
-		{ \
-			_##EventName = DelegateName::CreateSP( InUserObjectRef, InFunc, Var1, Var2, Var3 ); \
-			return *this; \
-		} \
-		template< class UserClass, typename Var1Type, typename Var2Type, typename Var3Type, typename Var4Type >	\
-		WidgetArgsType& EventName( TSharedRef< UserClass > InUserObjectRef, typename DelegateName::template TSPMethodDelegate_FourVars< UserClass, Var1Type, Var2Type, Var3Type, Var4Type >::FMethodPtr InFunc, Var1Type Var1, Var2Type Var2, Var3Type Var3, Var4Type Var4 )	\
-		{ \
-			_##EventName = DelegateName::CreateSP( InUserObjectRef, InFunc, Var1, Var2, Var3, Var4 ); \
-			return *this; \
-		} \
-		template< class UserClass, typename Var1Type, typename Var2Type, typename Var3Type, typename Var4Type >	\
-		WidgetArgsType& EventName( TSharedRef< UserClass > InUserObjectRef, typename DelegateName::template TSPMethodDelegate_FourVars_Const< UserClass, Var1Type, Var2Type, Var3Type, Var4Type >::FMethodPtr InFunc, Var1Type Var1, Var2Type Var2, Var3Type Var3, Var4Type Var4 )	\
-		{ \
-			_##EventName = DelegateName::CreateSP( InUserObjectRef, InFunc, Var1, Var2, Var3, Var4 ); \
-			return *this; \
+			_##EventName = DelegateName::CreateSP( InUserObjectRef, InFunc, Vars... ); \
+			return static_cast<WidgetArgsType*>(this)->Me(); \
 		} \
 		\
 		/* Set event delegate to a shared pointer-based class method.  Slate mostly uses shared pointers so we use an overload for this type of binding. */ \
-		template< class UserClass >	\
-		WidgetArgsType& EventName( UserClass* InUserObject, typename DelegateName::template TSPMethodDelegate< UserClass >::FMethodPtr InFunc )	\
+		template< class UserClass, typename... VarTypes >	\
+		WidgetArgsType& EventName( UserClass* InUserObject, typename DelegateName::template TMethodPtr< UserClass, VarTypes... > InFunc, VarTypes... Vars )	\
 		{ \
-			_##EventName = DelegateName::CreateSP( InUserObject, InFunc ); \
-			return *this; \
+			_##EventName = DelegateName::CreateSP( InUserObject, InFunc, Vars... ); \
+			return static_cast<WidgetArgsType*>(this)->Me(); \
 		} \
-		template< class UserClass >	\
-		WidgetArgsType& EventName( UserClass* InUserObject, typename DelegateName::template TSPMethodDelegate_Const< UserClass >::FMethodPtr InFunc )	\
+		template< class UserClass, typename... VarTypes >	\
+		WidgetArgsType& EventName( UserClass* InUserObject, typename DelegateName::template TConstMethodPtr< UserClass, VarTypes... > InFunc, VarTypes... Vars )	\
 		{ \
-			_##EventName = DelegateName::CreateSP( InUserObject, InFunc ); \
-			return *this; \
-		} \
-		template< class UserClass, typename Var1Type >	\
-		WidgetArgsType& EventName( UserClass* InUserObject, typename DelegateName::template TSPMethodDelegate_OneVar< UserClass, Var1Type >::FMethodPtr InFunc, Var1Type Var1 )	\
-		{ \
-			_##EventName = DelegateName::CreateSP( InUserObject, InFunc, Var1 ); \
-			return *this; \
-		} \
-		template< class UserClass, typename Var1Type >	\
-		WidgetArgsType& EventName( UserClass* InUserObject, typename DelegateName::template TSPMethodDelegate_OneVar_Const< UserClass, Var1Type >::FMethodPtr InFunc, Var1Type Var1 )	\
-		{ \
-			_##EventName = DelegateName::CreateSP( InUserObject, InFunc, Var1 ); \
-			return *this; \
-		} \
-		template< class UserClass, typename Var1Type, typename Var2Type >	\
-		WidgetArgsType& EventName( UserClass* InUserObject, typename DelegateName::template TSPMethodDelegate_TwoVars< UserClass, Var1Type, Var2Type >::FMethodPtr InFunc, Var1Type Var1, Var2Type Var2 )	\
-		{ \
-			_##EventName = DelegateName::CreateSP( InUserObject, InFunc, Var1, Var2 ); \
-			return *this; \
-		} \
-		template< class UserClass, typename Var1Type, typename Var2Type >	\
-		WidgetArgsType& EventName( UserClass* InUserObject, typename DelegateName::template TSPMethodDelegate_TwoVars_Const< UserClass, Var1Type, Var2Type >::FMethodPtr InFunc, Var1Type Var1, Var2Type Var2 )	\
-		{ \
-			_##EventName = DelegateName::CreateSP( InUserObject, InFunc, Var1, Var2 ); \
-			return *this; \
-		} \
-		template< class UserClass, typename Var1Type, typename Var2Type, typename Var3Type >	\
-		WidgetArgsType& EventName( UserClass* InUserObject, typename DelegateName::template TSPMethodDelegate_ThreeVars< UserClass, Var1Type, Var2Type, Var3Type >::FMethodPtr InFunc, Var1Type Var1, Var2Type Var2, Var3Type Var3 )	\
-		{ \
-			_##EventName = DelegateName::CreateSP( InUserObject, InFunc, Var1, Var2, Var3 ); \
-			return *this; \
-		} \
-		template< class UserClass, typename Var1Type, typename Var2Type, typename Var3Type >	\
-		WidgetArgsType& EventName( UserClass* InUserObject, typename DelegateName::template TSPMethodDelegate_ThreeVars_Const< UserClass, Var1Type, Var2Type, Var3Type >::FMethodPtr InFunc, Var1Type Var1, Var2Type Var2, Var3Type Var3 )	\
-		{ \
-			_##EventName = DelegateName::CreateSP( InUserObject, InFunc, Var1, Var2, Var3 ); \
-			return *this; \
-		} \
-		template< class UserClass, typename Var1Type, typename Var2Type, typename Var3Type, typename Var4Type >	\
-		WidgetArgsType& EventName( UserClass* InUserObject, typename DelegateName::template TSPMethodDelegate_FourVars< UserClass, Var1Type, Var2Type, Var3Type, Var4Type >::FMethodPtr InFunc, Var1Type Var1, Var2Type Var2, Var3Type Var3, Var4Type Var4 )	\
-		{ \
-			_##EventName = DelegateName::CreateSP( InUserObject, InFunc, Var1, Var2, Var3, Var4 ); \
-			return *this; \
-		} \
-		template< class UserClass, typename Var1Type, typename Var2Type, typename Var3Type, typename Var4Type >	\
-		WidgetArgsType& EventName( UserClass* InUserObject, typename DelegateName::template TSPMethodDelegate_FourVars_Const< UserClass, Var1Type, Var2Type, Var3Type, Var4Type >::FMethodPtr InFunc, Var1Type Var1, Var2Type Var2, Var3Type Var3, Var4Type Var4 )	\
-		{ \
-			_##EventName = DelegateName::CreateSP( InUserObject, InFunc, Var1, Var2, Var3, Var4 ); \
-			return *this; \
+			_##EventName = DelegateName::CreateSP( InUserObject, InFunc, Vars... ); \
+			return static_cast<WidgetArgsType*>(this)->Me(); \
 		} \
 		\
 		/* Set event delegate to a UObject-based class method */ \
-		template< class UserClass >	\
-		WidgetArgsType& EventName##_UObject( UserClass* InUserObject, typename DelegateName::template TUObjectMethodDelegate< UserClass >::FMethodPtr InFunc )	\
+		template< class UserClass, typename... VarTypes >	\
+		WidgetArgsType& EventName##_UObject( UserClass* InUserObject, typename DelegateName::template TMethodPtr< UserClass, VarTypes... > InFunc, VarTypes... Vars )	\
 		{ \
-			_##EventName = DelegateName::CreateUObject( InUserObject, InFunc ); \
-			return *this; \
+			_##EventName = DelegateName::CreateUObject( InUserObject, InFunc, Vars... ); \
+			return static_cast<WidgetArgsType*>(this)->Me(); \
 		} \
-		template< class UserClass >	\
-		WidgetArgsType& EventName##_UObject( UserClass* InUserObject, typename DelegateName::template TUObjectMethodDelegate_Const< UserClass >::FMethodPtr InFunc )	\
+		template< class UserClass, typename... VarTypes >	\
+		WidgetArgsType& EventName##_UObject( UserClass* InUserObject, typename DelegateName::template TConstMethodPtr< UserClass, VarTypes... > InFunc, VarTypes... Vars )	\
 		{ \
-			_##EventName = DelegateName::CreateUObject( InUserObject, InFunc ); \
-			return *this; \
-		} \
-		template< class UserClass, typename Var1Type >	\
-		WidgetArgsType& EventName##_UObject( UserClass* InUserObject, typename DelegateName::template TUObjectMethodDelegate_OneVar< UserClass, Var1Type >::FMethodPtr InFunc, Var1Type Var1 )	\
-		{ \
-			_##EventName = DelegateName::CreateUObject( InUserObject, InFunc, Var1 ); \
-			return *this; \
-		} \
-		template< class UserClass, typename Var1Type >	\
-		WidgetArgsType& EventName##_UObject( UserClass* InUserObject, typename DelegateName::template TUObjectMethodDelegate_OneVar_Const< UserClass, Var1Type >::FMethodPtr InFunc, Var1Type Var1 )	\
-		{ \
-			_##EventName = DelegateName::CreateUObject( InUserObject, InFunc, Var1 ); \
-			return *this; \
-		} \
-		template< class UserClass, typename Var1Type, typename Var2Type >	\
-		WidgetArgsType& EventName##_UObject( UserClass* InUserObject, typename DelegateName::template TUObjectMethodDelegate_TwoVars< UserClass, Var1Type, Var2Type >::FMethodPtr InFunc, Var1Type Var1, Var2Type Var2 )	\
-		{ \
-			_##EventName = DelegateName::CreateUObject( InUserObject, InFunc, Var1, Var2 ); \
-			return *this; \
-		} \
-		template< class UserClass, typename Var1Type, typename Var2Type >	\
-		WidgetArgsType& EventName##_UObject( UserClass* InUserObject, typename DelegateName::template TUObjectMethodDelegate_TwoVars_Const< UserClass, Var1Type, Var2Type >::FMethodPtr InFunc, Var1Type Var1, Var2Type Var2 )	\
-		{ \
-			_##EventName = DelegateName::CreateUObject( InUserObject, InFunc, Var1, Var2 ); \
-			return *this; \
-		} \
-		template< class UserClass, typename Var1Type, typename Var2Type, typename Var3Type >	\
-		WidgetArgsType& EventName##_UObject( UserClass* InUserObject, typename DelegateName::template TUObjectMethodDelegate_ThreeVars< UserClass, Var1Type, Var2Type, Var3Type >::FMethodPtr InFunc, Var1Type Var1, Var2Type Var2, Var3Type Var3 )	\
-		{ \
-			_##EventName = DelegateName::CreateUObject( InUserObject, InFunc, Var1, Var2, Var3 ); \
-			return *this; \
-		} \
-		template< class UserClass, typename Var1Type, typename Var2Type, typename Var3Type >	\
-		WidgetArgsType& EventName##_UObject( UserClass* InUserObject, typename DelegateName::template TUObjectMethodDelegate_ThreeVars_Const< UserClass, Var1Type, Var2Type, Var3Type >::FMethodPtr InFunc, Var1Type Var1, Var2Type Var2, Var3Type Var3 )	\
-		{ \
-			_##EventName = DelegateName::CreateUObject( InUserObject, InFunc, Var1, Var2, Var3 ); \
-			return *this; \
-		} \
-		template< class UserClass, typename Var1Type, typename Var2Type, typename Var3Type, typename Var4Type >	\
-		WidgetArgsType& EventName##_UObject( UserClass* InUserObject, typename DelegateName::template TUObjectMethodDelegate_FourVars< UserClass, Var1Type, Var2Type, Var3Type, Var4Type >::FMethodPtr InFunc, Var1Type Var1, Var2Type Var2, Var3Type Var3, Var4Type Var4 )	\
-		{ \
-			_##EventName = DelegateName::CreateUObject( InUserObject, InFunc, Var1, Var2, Var3, Var4 ); \
-			return *this; \
-		} \
-		template< class UserClass, typename Var1Type, typename Var2Type, typename Var3Type, typename Var4Type >	\
-		WidgetArgsType& EventName##_UObject( UserClass* InUserObject, typename DelegateName::template TUObjectMethodDelegate_FourVars_Const< UserClass, Var1Type, Var2Type, Var3Type, Var4Type >::FMethodPtr InFunc, Var1Type Var1, Var2Type Var2, Var3Type Var3, Var4Type Var4 )	\
-		{ \
-			_##EventName = DelegateName::CreateUObject( InUserObject, InFunc, Var1, Var2, Var3, Var4 ); \
-			return *this; \
+			_##EventName = DelegateName::CreateUObject( InUserObject, InFunc, Vars... ); \
+			return static_cast<WidgetArgsType*>(this)->Me(); \
 		} \
 		\
 		DelegateName _##EventName; \
+
+#define SLATE_EVENT_DEPRECATED( DeprecationVersion, DeprecationMessage, DelegateName, EventName, UpgradedEventName, UpgradeFuncName)	\
+		UE_DEPRECATED(DeprecationVersion, DeprecationMessage)	\
+		WidgetArgsType& EventName( const DelegateName& InDeprecatedDelegate ) \
+		{	\
+			if (InDeprecatedDelegate.IsBound())	\
+			{	\
+				_##UpgradedEventName = UpgradeFuncName(InDeprecatedDelegate);	\
+			}	\
+			return static_cast<WidgetArgsType*>(this)->Me(); \
+		}	\
+		\
+		template <typename StaticFuncPtr, typename... VarTypes>	\
+		UE_DEPRECATED(DeprecationVersion, DeprecationMessage)	\
+		WidgetArgsType& EventName##_Static( StaticFuncPtr InFunc, VarTypes... Vars )	\
+		{	\
+			if (InFunc)	\
+			{	\
+				DelegateName DeprecatedDelegate = DelegateName::CreateStatic(InFunc, Vars...);	\
+				_##UpgradedEventName = UpgradeFuncName(DeprecatedDelegate);	\
+			}	\
+			return static_cast<WidgetArgsType*>(this)->Me(); \
+		}	\
+		\
+		template <typename FunctorType, typename... VarTypes>	\
+		UE_DEPRECATED(DeprecationVersion, DeprecationMessage)	\
+		WidgetArgsType& EventName##_Lambda(FunctorType&& InFunctor, VarTypes... Vars) \
+		{	\
+			DelegateName DeprecatedDelegate = DelegateName::CreateLambda(Forward<FunctorType>(InFunctor), Vars...);	\
+			_##UpgradedEventName = UpgradeFuncName(DeprecatedDelegate);	\
+			return static_cast<WidgetArgsType*>(this)->Me(); \
+		}	\
+		\
+		template <typename UserClass, typename... VarTypes>	\
+		UE_DEPRECATED(DeprecationVersion, DeprecationMessage)	\
+		WidgetArgsType& EventName##_Raw( UserClass* InUserObject, typename DelegateName::template TMethodPtr< UserClass, VarTypes... > InFunc, VarTypes... Vars )	\
+		{	\
+			DelegateName DeprecatedDelegate = DelegateName::CreateRaw(InUserObject, InFunc, Vars...);	\
+			_##UpgradedEventName = UpgradeFuncName(DeprecatedDelegate);	\
+			return static_cast<WidgetArgsType*>(this)->Me(); \
+		}	\
+		\
+		template <typename UserClass, typename... VarTypes>	\
+		UE_DEPRECATED(DeprecationVersion, DeprecationMessage)	\
+		WidgetArgsType& EventName##_Raw( UserClass* InUserObject, typename DelegateName::template TConstMethodPtr< UserClass, VarTypes... > InFunc, VarTypes... Vars )	\
+		{	\
+			DelegateName DeprecatedDelegate = DelegateName::CreateRaw(InUserObject, InFunc, Vars...);	\
+			_##UpgradedEventName = UpgradeFuncName(DeprecatedDelegate);	\
+			return static_cast<WidgetArgsType*>(this)->Me(); \
+		}	\
+		\
+		template <typename UserClass, typename... VarTypes>	\
+		UE_DEPRECATED(DeprecationVersion, DeprecationMessage)	\
+		WidgetArgsType& EventName( TSharedRef< UserClass > InUserObjectRef, typename DelegateName::template TMethodPtr< UserClass, VarTypes... > InFunc, VarTypes... Vars )	\
+		{	\
+			DelegateName DeprecatedDelegate = DelegateName::CreateSP(InUserObjectRef, InFunc, Vars...);	\
+			_##UpgradedEventName = UpgradeFuncName(DeprecatedDelegate);	\
+			return static_cast<WidgetArgsType*>(this)->Me(); \
+		}	\
+		\
+		template <typename UserClass, typename... VarTypes>	\
+		UE_DEPRECATED(DeprecationVersion, DeprecationMessage)	\
+		WidgetArgsType& EventName( TSharedRef< UserClass > InUserObjectRef, typename DelegateName::template TConstMethodPtr< UserClass, VarTypes... > InFunc, VarTypes... Vars )	\
+		{	\
+			DelegateName DeprecatedDelegate = DelegateName::CreateSP(InUserObjectRef, InFunc, Vars...);	\
+			_##UpgradedEventName = UpgradeFuncName(DeprecatedDelegate);	\
+			return static_cast<WidgetArgsType*>(this)->Me(); \
+		}	\
+		\
+		template <typename UserClass, typename... VarTypes>	\
+		UE_DEPRECATED(DeprecationVersion, DeprecationMessage)	\
+		WidgetArgsType& EventName( UserClass* InUserObject, typename DelegateName::template TMethodPtr< UserClass, VarTypes... > InFunc, VarTypes... Vars )	\
+		{	\
+			DelegateName DeprecatedDelegate = DelegateName::CreateSP(InUserObject, InFunc, Vars...);	\
+			_##UpgradedEventName = UpgradeFuncName(DeprecatedDelegate);	\
+			return static_cast<WidgetArgsType*>(this)->Me(); \
+		}	\
+		\
+		template <typename UserClass, typename... VarTypes>	\
+		UE_DEPRECATED(DeprecationVersion, DeprecationMessage)	\
+		WidgetArgsType& EventName( UserClass* InUserObject, typename DelegateName::template TConstMethodPtr< UserClass, VarTypes... > InFunc, VarTypes... Vars )	\
+		{	\
+			DelegateName DeprecatedDelegate = DelegateName::CreateSP(InUserObject, InFunc, Vars...);	\
+			_##UpgradedEventName = UpgradeFuncName(DeprecatedDelegate);	\
+			return static_cast<WidgetArgsType*>(this)->Me(); \
+		}	\
+		\
+		template <typename UserClass, typename... VarTypes>	\
+		UE_DEPRECATED(DeprecationVersion, DeprecationMessage)	\
+		WidgetArgsType& EventName##_UObject( UserClass* InUserObject, typename DelegateName::template TMethodPtr< UserClass, VarTypes... > InFunc, VarTypes... Vars )	\
+		{	\
+			DelegateName DeprecatedDelegate = DelegateName::CreateUObject(InUserObject, InFunc, Vars...);	\
+			_##UpgradedEventName = UpgradeFuncName(DeprecatedDelegate);	\
+			return static_cast<WidgetArgsType*>(this)->Me(); \
+		}	\
+		\
+		template <typename UserClass, typename... VarTypes>	\
+		UE_DEPRECATED(DeprecationVersion, DeprecationMessage)	\
+		WidgetArgsType& EventName##_UObject( UserClass* InUserObject, typename DelegateName::template TConstMethodPtr< UserClass, VarTypes... > InFunc, VarTypes... Vars )	\
+		{	\
+			DelegateName DeprecatedDelegate = DelegateName::CreateUObject(InUserObject, InFunc, Vars...);	\
+			_##UpgradedEventName = UpgradeFuncName(DeprecatedDelegate);	\
+			return static_cast<WidgetArgsType*>(this)->Me(); \
+		}	\
+
 
 
 /** Base class for named arguments. Provides settings necessary for all widgets. */
@@ -782,12 +659,15 @@ struct FSlateBaseNamedArgs
 	SLATE_PRIVATE_ATTRIBUTE_VARIABLE(FText, ToolTipText);
 	SLATE_PRIVATE_ATTRIBUTE_VARIABLE(TSharedPtr<IToolTip>, ToolTip);
 	SLATE_PRIVATE_ATTRIBUTE_VARIABLE(TOptional<EMouseCursor::Type>, Cursor);
-	SLATE_PRIVATE_ATTRIBUTE_VARIABLE(bool, IsEnabled) = true;
 	SLATE_PRIVATE_ATTRIBUTE_VARIABLE(EVisibility, Visibility) = EVisibility::Visible;
-	SLATE_PRIVATE_ARGUMENT_VARIABLE(float, RenderOpacity) = 1.f;
+	SLATE_PRIVATE_ATTRIBUTE_VARIABLE(bool, IsEnabled) = true;
 	SLATE_PRIVATE_ARGUMENT_VARIABLE(bool, ForceVolatile) = false;
+	/** If true, bound Slate Attributes will be updated once per frame. */
+	SLATE_PRIVATE_ARGUMENT_VARIABLE(bool, EnabledAttributesUpdate) = true;
 	SLATE_PRIVATE_ARGUMENT_VARIABLE(EWidgetClipping, Clipping) = EWidgetClipping::Inherit;
+	SLATE_PRIVATE_ARGUMENT_VARIABLE(EWidgetPixelSnapping, PixelSnappingMethod) = EWidgetPixelSnapping::Inherit;
 	SLATE_PRIVATE_ARGUMENT_VARIABLE(EFlowDirectionPreference, FlowDirectionPreference) = EFlowDirectionPreference::Inherit;
+	SLATE_PRIVATE_ARGUMENT_VARIABLE(float, RenderOpacity) = 1.f;
 	SLATE_PRIVATE_ATTRIBUTE_VARIABLE(TOptional<FSlateRenderTransform>, RenderTransform);
 	SLATE_PRIVATE_ATTRIBUTE_VARIABLE(FVector2D, RenderTransformPivot) = FVector2D::ZeroVector;
 	SLATE_PRIVATE_ARGUMENT_VARIABLE(FName, Tag);
@@ -798,9 +678,10 @@ struct FSlateBaseNamedArgs
 
 
 /** Base class for named arguments. Provides settings necessary for all widgets. */
-template<typename WidgetType>
+template<typename InWidgetType>
 struct TSlateBaseNamedArgs : public FSlateBaseNamedArgs
 {
+	typedef InWidgetType WidgetType;
 	typedef typename WidgetType::FArguments WidgetArgsType;
 
 	SLATE_PRIVATE_ATTRIBUTE_FUNCTION(FText, ToolTipText)
@@ -808,10 +689,11 @@ struct TSlateBaseNamedArgs : public FSlateBaseNamedArgs
 	SLATE_PRIVATE_ATTRIBUTE_FUNCTION(TOptional<EMouseCursor::Type>, Cursor)
 	SLATE_PRIVATE_ATTRIBUTE_FUNCTION(bool, IsEnabled)
 	SLATE_PRIVATE_ATTRIBUTE_FUNCTION(EVisibility, Visibility)
-	SLATE_PRIVATE_ARGUMENT_FUNCTION(float, RenderOpacity)
 	SLATE_PRIVATE_ARGUMENT_FUNCTION(bool, ForceVolatile)
 	SLATE_PRIVATE_ARGUMENT_FUNCTION(EWidgetClipping, Clipping)
+	SLATE_PRIVATE_ARGUMENT_FUNCTION(EWidgetPixelSnapping, PixelSnappingMethod)
 	SLATE_PRIVATE_ARGUMENT_FUNCTION(EFlowDirectionPreference, FlowDirectionPreference)
+	SLATE_PRIVATE_ARGUMENT_FUNCTION(float, RenderOpacity)
 	SLATE_PRIVATE_ATTRIBUTE_FUNCTION(TOptional<FSlateRenderTransform>, RenderTransform)
 	SLATE_PRIVATE_ATTRIBUTE_FUNCTION(FVector2D, RenderTransformPivot)
 	SLATE_PRIVATE_ARGUMENT_FUNCTION(FName, Tag)
@@ -857,7 +739,7 @@ namespace RequiredArgs
 		}
 
 		template<class WidgetType>
-		void CallConstruct(const TSharedRef<WidgetType>& OnWidget, const typename WidgetType::FArguments& WithNamedArgs) const
+		void CallConstruct(WidgetType* OnWidget, const typename WidgetType::FArguments& WithNamedArgs) const
 		{
 			// YOUR WIDGET MUST IMPLEMENT void Construct(const FArguments& InArgs)
 			OnWidget->Construct(WithNamedArgs);
@@ -873,7 +755,7 @@ namespace RequiredArgs
 		}
 
 		template<class WidgetType>
-		void CallConstruct(const TSharedRef<WidgetType>& OnWidget, const typename WidgetType::FArguments& WithNamedArgs) const
+		void CallConstruct(WidgetType* OnWidget, const typename WidgetType::FArguments& WithNamedArgs) const
 		{
 			// YOUR WIDGET MUST IMPLEMENT void Construct(const FArguments& InArgs)
 			OnWidget->Construct(WithNamedArgs, Forward<Arg0Type>(Arg0));
@@ -892,7 +774,7 @@ namespace RequiredArgs
 		}
 
 		template<class WidgetType>
-		void CallConstruct(const TSharedRef<WidgetType>& OnWidget, const typename WidgetType::FArguments& WithNamedArgs) const
+		void CallConstruct(WidgetType* OnWidget, const typename WidgetType::FArguments& WithNamedArgs) const
 		{
 			// YOUR WIDGET MUST IMPLEMENT Construct(const FArguments& InArgs)
 			OnWidget->Construct(WithNamedArgs, Forward<Arg0Type>(Arg0), Forward<Arg1Type>(Arg1));
@@ -913,7 +795,7 @@ namespace RequiredArgs
 		}
 
 		template<class WidgetType>
-		void CallConstruct(const TSharedRef<WidgetType>& OnWidget, const typename WidgetType::FArguments& WithNamedArgs) const
+		void CallConstruct(WidgetType* OnWidget, const typename WidgetType::FArguments& WithNamedArgs) const
 		{
 			// YOUR WIDGET MUST IMPLEMENT Construct(const FArguments& InArgs)
 			OnWidget->Construct(WithNamedArgs, Forward<Arg0Type>(Arg0), Forward<Arg1Type>(Arg1), Forward<Arg2Type>(Arg2));
@@ -936,7 +818,7 @@ namespace RequiredArgs
 		}
 
 		template<class WidgetType>
-		void CallConstruct(const TSharedRef<WidgetType>& OnWidget, const typename WidgetType::FArguments& WithNamedArgs) const
+		void CallConstruct(WidgetType* OnWidget, const typename WidgetType::FArguments& WithNamedArgs) const
 		{
 			// YOUR WIDGET MUST IMPLEMENT Construct(const FArguments& InArgs)
 			OnWidget->Construct(WithNamedArgs, Forward<Arg0Type>(Arg0), Forward<Arg1Type>(Arg1), Forward<Arg2Type>(Arg2), Forward<Arg3Type>(Arg3));
@@ -961,7 +843,7 @@ namespace RequiredArgs
 		}
 
 		template<class WidgetType>
-		void CallConstruct(const TSharedRef<WidgetType>& OnWidget, const typename WidgetType::FArguments& WithNamedArgs) const
+		void CallConstruct(WidgetType* OnWidget, const typename WidgetType::FArguments& WithNamedArgs) const
 		{
 			// YOUR WIDGET MUST IMPLEMENT Construct(const FArguments& InArgs)
 			OnWidget->Construct(WithNamedArgs, Forward<Arg0Type>(Arg0), Forward<Arg1Type>(Arg1), Forward<Arg2Type>(Arg2), Forward<Arg3Type>(Arg3), Forward<Arg4Type>(Arg4));
@@ -1011,31 +893,6 @@ namespace RequiredArgs
 }
 
 
-/** Normal widgets are allocated directly by the TSlateDecl. */
-template<typename WidgetType, bool IsDerived>
-struct TWidgetAllocator
-{
-	static TSharedRef<WidgetType> PrivateAllocateWidget()
-	{
-		return MakeShared<WidgetType>();
-	}
-};
-
-/**
- * SUserWidgets are allocated in the corresponding CPP file, so that
- * the implementer can return an implementation that differs from the
- * public interface. @see SUserWidgetExample
- */
-template<typename WidgetType>
-struct TWidgetAllocator< WidgetType, true >
-{
-	static TSharedRef<WidgetType> PrivateAllocateWidget()
-	{
-		return WidgetType::New();
-	}
-};
-
-
 /**
  * Utility class used during widget instantiation.
  * Performs widget allocation and construction.
@@ -1049,10 +906,24 @@ template<class WidgetType, typename RequiredArgsPayloadType>
 struct TSlateDecl
 {
 	TSlateDecl( const ANSICHAR* InType, const ANSICHAR* InFile, int32 OnLine, RequiredArgsPayloadType&& InRequiredArgs )
-		: _Widget( TWidgetAllocator<WidgetType, TIsDerivedFrom<WidgetType, SUserWidget>::IsDerived >::PrivateAllocateWidget() )
-		, _RequiredArgs(InRequiredArgs)
+		: _RequiredArgs(InRequiredArgs)
 	{
-		_Widget->SetDebugInfo( InType, InFile, OnLine, sizeof(WidgetType) );
+		if constexpr (std::is_base_of_v<SUserWidget, WidgetType>)
+		{
+			/**
+			 * SUserWidgets are allocated in the corresponding CPP file, so that
+			 * the implementer can return an implementation that differs from the
+			 * public interface. @see SUserWidgetExample
+			 */
+			_Widget = WidgetType::New();
+		}
+		else
+		{
+			/** Normal widgets are allocated directly by the TSlateDecl. */
+			_Widget = MakeShared<WidgetType>();
+		}
+
+		_Widget->SetDebugInfo(InType, InFile, OnLine, sizeof(WidgetType));
 	}
 
 	/**
@@ -1060,10 +931,11 @@ struct TSlateDecl
 	 * @see SAssignNew
 	 */
 	template<class ExposeAsWidgetType>
-	TSlateDecl& Expose( TSharedPtr<ExposeAsWidgetType>& OutVarToInit )
+	TSlateDecl&& Expose( TSharedPtr<ExposeAsWidgetType>& OutVarToInit ) &&
 	{
+		// Can't move out _Widget here because operator<<= needs it
 		OutVarToInit = _Widget;
-		return *this;
+		return MoveTemp(*this);
 	}
 
 	/**
@@ -1071,10 +943,11 @@ struct TSlateDecl
 	 * @see SAssignNew
 	 */
 	template<class ExposeAsWidgetType>
-	TSlateDecl& Expose( TSharedRef<ExposeAsWidgetType>& OutVarToInit )
+	TSlateDecl&& Expose( TSharedRef<ExposeAsWidgetType>& OutVarToInit ) &&
 	{
-		OutVarToInit = _Widget;
-		return *this;
+		// Can't move out _Widget here because operator<<= needs it
+		OutVarToInit = _Widget.ToSharedRef();
+		return MoveTemp(*this);
 	}
 
 	/**
@@ -1082,10 +955,11 @@ struct TSlateDecl
 	 * @see SAssignNew
 	 */
 	template<class ExposeAsWidgetType>
-	TSlateDecl& Expose( TWeakPtr<ExposeAsWidgetType>& OutVarToInit )
+	TSlateDecl&& Expose( TWeakPtr<ExposeAsWidgetType>& OutVarToInit ) &&
 	{
-		OutVarToInit = _Widget;
-		return *this;
+		// Can't move out _Widget here because operator<<= needs it
+		OutVarToInit = _Widget.ToWeakPtr();
+		return MoveTemp(*this);
 	}
 
 	/**
@@ -1095,16 +969,17 @@ struct TSlateDecl
 	 *
 	 * @return A reference to the widget that we constructed.
 	 */
-	TSharedRef<WidgetType> operator<<=( const typename WidgetType::FArguments& InArgs ) const
+	TSharedRef<WidgetType> operator<<=( const typename WidgetType::FArguments& InArgs ) &&
 	{
 		_Widget->SWidgetConstruct(InArgs);
-		_RequiredArgs.CallConstruct(_Widget, InArgs);
+		_RequiredArgs.CallConstruct(_Widget.Get(), InArgs);
 		_Widget->CacheVolatility();
+		_Widget->bIsDeclarativeSyntaxConstructionCompleted = true;
 
-		return _Widget;
+		return MoveTemp(_Widget).ToSharedRef();
 	}
 
-	const TSharedRef<WidgetType> _Widget;
+	TSharedPtr<WidgetType> _Widget;
 	RequiredArgsPayloadType& _RequiredArgs;
 };
 
@@ -1112,5 +987,6 @@ struct TSlateDecl
 template<typename WidgetType, typename RequiredArgsPayloadType>
 TSlateDecl<WidgetType, RequiredArgsPayloadType> MakeTDecl( const ANSICHAR* InType, const ANSICHAR* InFile, int32 OnLine, RequiredArgsPayloadType&& InRequiredArgs )
 {
+	LLM_SCOPE_BYTAG(UI_Slate);
 	return TSlateDecl<WidgetType, RequiredArgsPayloadType>(InType, InFile, OnLine, Forward<RequiredArgsPayloadType>(InRequiredArgs));
 }

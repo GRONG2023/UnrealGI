@@ -5,22 +5,28 @@
 #include "Containers/Array.h"
 #include "Containers/Map.h"
 #include "Containers/UnrealString.h"
-#include "UObject/ObjectMacros.h"
-#include "UObject/Object.h"
-#include "UObject/ScriptMacros.h"
+#include "CoreTypes.h"
+#include "Misc/Timespan.h"
 #include "Overlays.h"
+#include "UObject/Object.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/ScriptMacros.h"
+#include "UObject/UObjectGlobals.h"
 
 #include "LocalizedOverlays.generated.h"
 
-class UBasicOverlays;
+class FString;
 class UAssetImportData;
+class UBasicOverlays;
+class UObject;
 
 /**
  * Implements an asset that contains a set of Basic Overlays that will be displayed in accordance with
  * the current locale, or a default set if an appropriate locale is not found
  */
-UCLASS(BlueprintType, hidecategories = (Object))
-class OVERLAY_API ULocalizedOverlays
+UCLASS(BlueprintType, hidecategories = (Object), MinimalAPI)
+class ULocalizedOverlays
 	: public UOverlays
 {
 	GENERATED_BODY()
@@ -29,7 +35,7 @@ public:
 
 	/** The overlays to use if no overlays are found for the current culture */
 	UPROPERTY(EditAnywhere, Category="Overlay Data")
-	UBasicOverlays* DefaultOverlays;
+	TObjectPtr<UBasicOverlays> DefaultOverlays;
 
 	/**
 	 * Maps a set of cultures to specific BasicOverlays assets.
@@ -39,13 +45,13 @@ public:
 	 *		An optional two-letter ISO 3166-1 country code  (e.g., "CN")
 	 */
 	UPROPERTY(EditAnywhere, Category="Overlay Data")
-	TMap<FString, UBasicOverlays*> LocaleToOverlaysMap;
+	TMap<FString, TObjectPtr<UBasicOverlays>> LocaleToOverlaysMap;
 
 #if WITH_EDITORONLY_DATA
 
 	/** The import data used to make this overlays asset */
 	UPROPERTY(VisibleAnywhere, Instanced, Category="Import Settings")
-	UAssetImportData* AssetImportData;
+	TObjectPtr<UAssetImportData> AssetImportData;
 
 #endif	// WITH_EDITORONLY_DATA
 
@@ -53,16 +59,18 @@ public:
 
 	//~ UOverlays interface
 
-	virtual TArray<FOverlayItem> GetAllOverlays() const override;
-	virtual void GetOverlaysForTime(const FTimespan& Time, TArray<FOverlayItem>& OutOverlays) const override;
+	OVERLAY_API virtual TArray<FOverlayItem> GetAllOverlays() const override;
+	OVERLAY_API virtual void GetOverlaysForTime(const FTimespan& Time, TArray<FOverlayItem>& OutOverlays) const override;
 
 
 public:
 
 	//~ UObject interface
 
-	virtual void PostInitProperties() override;
-	virtual void GetAssetRegistryTags(TArray<FAssetRegistryTag>& OutTags) const override;
+	OVERLAY_API virtual void PostInitProperties() override;
+	OVERLAY_API virtual void GetAssetRegistryTags(FAssetRegistryTagsContext Context) const override;
+	UE_DEPRECATED(5.4, "Implement the version that takes FAssetRegistryTagsContext instead.")
+	OVERLAY_API virtual void GetAssetRegistryTags(TArray<FAssetRegistryTag>& OutTags) const override;
 
 private:
 	

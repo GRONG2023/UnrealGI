@@ -3,17 +3,30 @@
 
 #pragma once
 
+#include "Containers/Array.h"
 #include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
+#include "EdGraph/EdGraphNode.h"
 #include "EdGraph/EdGraphPin.h"
-#include "Textures/SlateIcon.h"
+#include "HAL/Platform.h"
+#include "Internationalization/Text.h"
 #include "K2Node.h"
-#include "NodeDependingOnEnumInterface.h"
 #include "K2Node_AddPinInterface.h"
+#include "KismetCompilerMisc.h"
+#include "NodeDependingOnEnumInterface.h"
+#include "Textures/SlateIcon.h"
+#include "UObject/Class.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/UObjectGlobals.h"
+
 #include "K2Node_Select.generated.h"
 
 class FBlueprintActionDatabaseRegistrar;
+class FName;
+class FString;
 class UEdGraph;
+class UObject;
+struct FLinearColor;
 
 UCLASS(MinimalAPI, meta=(Keywords = "Ternary Select"))
 class UK2Node_Select : public UK2Node, public INodeDependingOnEnumInterface, public IK2Node_AddPinInterface
@@ -31,7 +44,7 @@ private:
 
 	/** Name of the enum being switched on */
 	UPROPERTY()
-	UEnum* Enum;
+	TObjectPtr<UEnum> Enum;
 
 	/** List of the current entries in the enum (Pin Names) */
 	UPROPERTY()
@@ -83,6 +96,7 @@ public:
 
 	// INodeDependingOnEnumInterface
 	virtual class UEnum* GetEnum() const override { return Enum; }
+	virtual void ReloadEnum(class UEnum* InEnum) override;
 	virtual bool ShouldBeReconstructedAfterEnumChanged() const override { return true; }
 	// End of INodeDependingOnEnumInterface
 

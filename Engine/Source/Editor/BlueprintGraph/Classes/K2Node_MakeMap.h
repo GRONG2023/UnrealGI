@@ -3,13 +3,24 @@
 
 #pragma once
 
+#include "Containers/Array.h"
+#include "EdGraph/EdGraphNode.h"
+#include "HAL/Platform.h"
+#include "Internationalization/Text.h"
 #include "K2Node_MakeContainer.h"
+#include "Textures/SlateIcon.h"
+#include "UObject/NameTypes.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/UObjectGlobals.h"
+
 #include "K2Node_MakeMap.generated.h"
 
 class UEdGraphPin;
+class UObject;
+struct FLinearColor;
 
-UCLASS(MinimalAPI)
-class UK2Node_MakeMap : public UK2Node_MakeContainer
+UCLASS()
+class BLUEPRINTGRAPH_API UK2Node_MakeMap : public UK2Node_MakeContainer
 {
 	GENERATED_UCLASS_BODY()
 
@@ -36,6 +47,6 @@ public:
 	// UK2Node_MakeContainer interface
 
 	// IK2Node_AddPinInterface interface
-	BLUEPRINTGRAPH_API virtual void AddInputPin() override;
+	virtual void AddInputPin() override;
 	// End of IK2Node_AddPinInterface interface
 };

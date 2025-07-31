@@ -1,20 +1,33 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 #pragma once
 
-#include "AudioEditorModule.h"
+#include "Containers/Array.h"
+#include "Containers/Set.h"
+#include "Containers/UnrealString.h"
 #include "EditorUndoClient.h"
-#include "Framework/Docking/TabManager.h"
 #include "GraphEditor.h"
+#include "HAL/Platform.h"
 #include "ISoundSubmixEditor.h"
-#include "Toolkits/IToolkitHost.h"
-#include "UObject/Object.h"
-#include "Widgets/Docking/SDockableTab.h"
+#include "Internationalization/Text.h"
+#include "Math/Color.h"
+#include "Math/Vector2D.h"
+#include "Templates/SharedPointer.h"
+#include "Toolkits/IToolkit.h"
+#include "UObject/GCObject.h"
+#include "UObject/NameTypes.h"
 
-
+class FReferenceCollector;
+class FSpawnTabArgs;
+class FTabManager;
+class FUICommandList;
+class IDetailsView;
+class IToolkitHost;
+class SDockTab;
+class UEdGraph;
 // Forward Declarations
 class UEdGraphPin;
+class UObject;
 class USoundSubmixBase;
-class UEdGraph;
 
 class FSoundSubmixEditor : public ISoundSubmixEditor, public FGCObject, public FEditorUndoClient
 {
@@ -35,6 +48,10 @@ public:
 
 	/** FGCObject interface */
 	virtual void AddReferencedObjects(FReferenceCollector& Collector) override;
+	virtual FString GetReferencerName() const override
+	{
+		return TEXT("FSoundSubmixEditor");
+	}
 
 	/** FAssetEditorToolkit interface */
 	virtual FText GetBaseToolkitName() const override;
@@ -100,9 +117,6 @@ private:
 	void RedoGraphAction();
 
 private:
-	/** List of open tool panels; used to ensure only one exists at any one time */
-	TMap<FName, TWeakPtr<SDockableTab>> SpawnedToolPanels;
-
 	/** Graph Editor */
 	TSharedPtr<SGraphEditor> GraphEditor;
 

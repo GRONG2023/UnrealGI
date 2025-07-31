@@ -11,6 +11,7 @@
 
 #if UE_TRACE_ENABLED
 
+namespace UE {
 namespace Trace {
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -24,14 +25,14 @@ static FTraceChannel	TraceLogChannelDetail;
 FChannel&				TraceLogChannel			= TraceLogChannelDetail;
 
 ///////////////////////////////////////////////////////////////////////////////
-UE_TRACE_EVENT_BEGIN(Trace, ChannelAnnounce, Important)
+UE_TRACE_EVENT_BEGIN(Trace, ChannelAnnounce, NoSync|Important)
 	UE_TRACE_EVENT_FIELD(uint32, Id)
 	UE_TRACE_EVENT_FIELD(bool, IsEnabled)
 	UE_TRACE_EVENT_FIELD(bool, ReadOnly)
-	UE_TRACE_EVENT_FIELD(Trace::AnsiString, Name)
+	UE_TRACE_EVENT_FIELD(AnsiString, Name)
 UE_TRACE_EVENT_END()
 
-UE_TRACE_EVENT_BEGIN(Trace, ChannelToggle, Important)
+UE_TRACE_EVENT_BEGIN(Trace, ChannelToggle, NoSync|Important)
 	UE_TRACE_EVENT_FIELD(uint32, Id)
 	UE_TRACE_EVENT_FIELD(bool, IsEnabled)
 UE_TRACE_EVENT_END()
@@ -39,7 +40,7 @@ UE_TRACE_EVENT_END()
 ///////////////////////////////////////////////////////////////////////////////
 static FChannel* volatile	GHeadChannel;			// = nullptr;
 static FChannel* volatile	GNewChannelList;		// = nullptr;
-static bool 				GInitialized;
+static bool 				GChannelsInitialized;
 
 ////////////////////////////////////////////////////////////////////////////////
 static uint32 GetChannelHash(const ANSICHAR* Input, int32 Length)
@@ -73,7 +74,7 @@ static uint32 GetChannelNameLength(const ANSICHAR* ChannelName)
 		}
 	}
 
-	return Len;
+	return uint32(Len);
 }
 
 
@@ -155,9 +156,9 @@ void FChannel::Setup(const ANSICHAR* InChannelName, const InitArgs& InArgs)
 		}
 	}
 
-	// If channel is initialized after the all channels are disabled (post static init) 
+	// If channel is initialized after the all channels are disabled (post static init)
 	// this channel needs to be disabled.
-	if (GInitialized)
+	if (GChannelsInitialized)
 	{
 		Enabled = -1;
 	}
@@ -166,7 +167,7 @@ void FChannel::Setup(const ANSICHAR* InChannelName, const InitArgs& InArgs)
 ///////////////////////////////////////////////////////////////////////////////
 void FChannel::Announce() const
 {
-	UE_TRACE_LOG(Trace, ChannelAnnounce, TraceLogChannel)
+	UE_TRACE_LOG(Trace, ChannelAnnounce, TraceLogChannel, Name.Len * sizeof(ANSICHAR))
 		<< ChannelAnnounce.Id(Name.Hash)
 		<< ChannelAnnounce.IsEnabled(IsEnabled())
 		<< ChannelAnnounce.ReadOnly(Args.bReadOnly)
@@ -179,7 +180,7 @@ void FChannel::Initialize()
 	// All channels are initialized as enabled (zero), and act like so during
 	// from process start until this method is called (i.e. when Trace is initalized).
 	ToggleAll(false);
-	GInitialized = true;
+	GChannelsInitialized = true;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -202,6 +203,25 @@ void FChannel::ToggleAll(bool bEnabled)
 }
 
 ///////////////////////////////////////////////////////////////////////////////
+void FChannel::PanicDisableAll()
+{
+	using namespace Private;
+
+	FChannel* ChannelLists[] =
+	{
+		AtomicLoadAcquire(&GNewChannelList),
+		AtomicLoadAcquire(&GHeadChannel),
+	};
+	for (FChannel* Channel : ChannelLists)
+	{
+		for (; Channel != nullptr; Channel = (FChannel*)(Channel->Next))
+		{
+			AtomicStoreRelaxed(&Channel->Enabled, -1);
+		}
+	}
+}
+
+///////////////////////////////////////////////////////////////////////////////
 FChannel* FChannel::FindChannel(const ANSICHAR* ChannelName)
 {
 	using namespace Private;
@@ -216,7 +236,7 @@ FChannel* FChannel::FindChannel(const ANSICHAR* ChannelName)
 	};
 	for (FChannel* Channel : ChannelLists)
 	{
-		for (; Channel != nullptr; Channel = (FChannel*)(Channel->Next))
+		for (; Channel != nullptr; Channel = Channel->Next)
 		{
 			if (Channel->Name.Hash == ChannelNameHash)
 			{
@@ -229,10 +249,56 @@ FChannel* FChannel::FindChannel(const ANSICHAR* ChannelName)
 }
 
 ///////////////////////////////////////////////////////////////////////////////
+void FChannel::EnumerateChannels(ChannelIterFunc Func, void* User) 
+{
+	using namespace Private;
+	FChannel* ChannelLists[] =
+	{
+		AtomicLoadAcquire(&GNewChannelList),
+		AtomicLoadAcquire(&GHeadChannel),
+	};
+	for (FChannel* Channel : ChannelLists)
+	{
+		for (; Channel != nullptr; Channel = Channel->Next)
+		{
+			Func(Channel->Name.Ptr, Channel->IsEnabled(), User);
+		}
+	}
+}
+
+///////////////////////////////////////////////////////////////////////////////
+void FChannel::EnumerateChannels(ChannelIterCallback Func, void* User)
+{
+	using namespace Private;
+	FChannel* ChannelLists[] =
+	{
+		AtomicLoadAcquire(&GNewChannelList),
+		AtomicLoadAcquire(&GHeadChannel),
+	};
+
+	FChannelInfo Info;
+	for (FChannel* Channel : ChannelLists)
+	{
+		for (; Channel != nullptr; Channel = Channel->Next)
+		{
+			Info.Name = Channel->Name.Ptr;
+			Info.Desc = Channel->Args.Desc;
+			Info.bIsEnabled = Channel->IsEnabled();
+			Info.bIsReadOnly = Channel->Args.bReadOnly;
+			bool Result = Func(Info, User);
+			if (!Result)
+			{
+				return;
+			}
+		}
+	}
+}
+
+///////////////////////////////////////////////////////////////////////////////
 bool FChannel::Toggle(bool bEnabled)
 {
 	using namespace Private;
-	int64 OldRefCnt = AtomicAddRelaxed(&Enabled, bEnabled ? 1 : -1);
+	AtomicStoreRelaxed(&Enabled, bEnabled ? 1 : -1);
 
 	UE_TRACE_LOG(Trace, ChannelToggle, TraceLogChannel)
 		<< ChannelToggle.Id(Name.Hash)
@@ -252,5 +318,6 @@ bool FChannel::Toggle(const ANSICHAR* ChannelName, bool bEnabled)
 }
 
 } // namespace Trace
+} // namespace UE
 
 #endif // UE_TRACE_ENABLED

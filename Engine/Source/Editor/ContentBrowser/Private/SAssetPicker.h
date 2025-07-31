@@ -2,23 +2,36 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "Input/Reply.h"
-#include "Widgets/DeclarativeSyntaxSupport.h"
-#include "Widgets/SWidget.h"
-#include "Widgets/SCompoundWidget.h"
-#include "AssetData.h"
-#include "ARFilter.h"
+#include "AssetRegistry/ARFilter.h"
+#include "AssetTypeCategories.h"
+#include "Containers/Array.h"
+#include "Containers/ArrayView.h"
+#include "Containers/UnrealString.h"
+#include "ContentBrowserDelegates.h"
+#include "HAL/Platform.h"
+#include "IAssetTypeActions.h"
 #include "IContentBrowserSingleton.h"
-#include "Editor/ContentBrowser/Private/SourcesData.h"
+#include "Input/Reply.h"
+#include "Internationalization/Text.h"
+#include "SourcesData.h"
+#include "Templates/SharedPointer.h"
+#include "Types/SlateEnums.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
+#include "Widgets/SCompoundWidget.h"
 
 class FFrontendFilter_ShowOtherDevelopers;
 class FFrontendFilter_Text;
 class FUICommandList;
 class SAssetSearchBox;
 class SAssetView;
-class SFilterList;
 class SComboButton;
+class SFilterList;
+class SWidget;
+struct FAssetData;
+struct FContentBrowserItem;
+struct FGeometry;
+struct FKeyEvent;
+
 enum class ECheckBoxState : uint8;
 
 /**
@@ -46,6 +59,11 @@ public:
 	/** Return the associated AssetView */
 	const TSharedPtr<SAssetView>& GetAssetView() const { return AssetViewPtr; }
 
+	/** Function that's called when someone wants to execute a Rename Command*/
+	void ExecuteRenameCommand();
+
+	TSharedPtr<SWidget> GetSearchBox() const;
+
 private:
 	/** Focuses the search box post-construct */
 	EActiveTimerReturnType SetFocusPostConstruct( double InCurrentTime, float InDeltaTime );
@@ -66,9 +84,6 @@ private:
 
 	/** Called from external code to set the filter after the widget was created */
 	void SetNewBackendFilter(const FARFilter& NewFilter);
-
-	/** Called to create the menu for the filter button */
-	TSharedRef<SWidget> MakeAddFilterMenu();
 
 	/** Called when the user changes filters */
 	void OnFilterChanged();
@@ -125,6 +140,9 @@ private:
 
 	/** Handler for the context menu for asset or folder items */
 	TSharedPtr<SWidget> GetItemContextMenu(TArrayView<const FContentBrowserItem> SelectedItems);
+
+	/** Converts an asset type category into an asset category path, if possible. This is done because the asset picker config still uses asset type categories. */
+	TOptional<FAssetCategoryPath> ConvertAssetTypeCategoryToAssetCategoryPath(EAssetTypeCategories::Type DefaultFilterMenuExpansion);
 
 private:
 
@@ -185,4 +203,7 @@ private:
 
 	/** If set, view settings will be saved and loaded for the asset view using this name in ini files */
 	FString SaveSettingsName;
+
+	/** Wether to allow renaming of items */
+	bool bAllowRename;
 };

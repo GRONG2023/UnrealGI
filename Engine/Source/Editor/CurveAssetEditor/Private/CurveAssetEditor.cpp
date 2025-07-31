@@ -1,30 +1,65 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "CurveAssetEditor.h"
-#include "Framework/MultiBox/MultiBoxDefs.h"
-#include "Framework/MultiBox/MultiBoxBuilder.h"
-#include "Widgets/Layout/SBorder.h"
-#include "Modules/ModuleManager.h"
-#include "EditorStyleSet.h"
-#include "Curves/CurveBase.h"
+
+#include "Containers/Array.h"
+#include "Containers/ArrayView.h"
+#include "CoreGlobals.h"
 #include "CurveAssetEditorModule.h"
 #include "CurveEditor.h"
-#include "SCurveEditorPanel.h"
-#include "RichCurveEditorModel.h"
 #include "CurveEditorCommands.h"
-#include "Widgets/Docking/SDockTab.h"
-#include "Widgets/Input/SNumericDropDown.h"
+#include "CurveEditorTypes.h"
+#include "CurveModel.h"
+#include "Curves/CurveBase.h"
 #include "Curves/CurveLinearColor.h"
+#include "Curves/RichCurve.h"
+#include "Delegates/Delegate.h"
+#include "DetailsViewArgs.h"
+#include "Framework/Docking/TabManager.h"
+#include "Framework/MultiBox/MultiBoxBuilder.h"
+#include "Framework/MultiBox/MultiBoxDefs.h"
+#include "HAL/Platform.h"
+#include "HAL/PlatformCrt.h"
+#include "ICurveEditorBounds.h"
+#include "ICurveEditorModule.h"
 #include "IDetailsView.h"
+#include "Internationalization/Internationalization.h"
+#include "Layout/Margin.h"
+#include "Logging/LogCategory.h"
+#include "Logging/LogMacros.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/Attribute.h"
+#include "Modules/ModuleManager.h"
 #include "PropertyEditorModule.h"
-#include "Widgets/SFrameRatePicker.h"
+#include "RichCurveEditorModel.h"
 #include "SColorGradientCurveEditorView.h"
 #include "SColorGradientEditor.h"
-#include "CommonFrameRates.h"
+#include "SCurveEditorPanel.h"
+#include "SlotBase.h"
+#include "Styling/AppStyle.h"
+#include "Styling/SlateColor.h"
+#include "Templates/Casts.h"
+#include "Templates/UniquePtr.h"
+#include "Templates/UnrealTemplate.h"
+#include "Textures/SlateIcon.h"
+#include "Toolkits/AssetEditorToolkit.h"
+#include "Trace/Detail/Channel.h"
+#include "Tree/CurveEditorTree.h"
 #include "Tree/ICurveEditorTreeItem.h"
 #include "Tree/SCurveEditorTree.h"
-#include "Tree/SCurveEditorTreeSelect.h"
 #include "Tree/SCurveEditorTreePin.h"
+#include "Tree/SCurveEditorTreeSelect.h"
+#include "UObject/WeakObjectPtr.h"
+#include "UObject/WeakObjectPtrTemplates.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
+#include "Widgets/Docking/SDockTab.h"
+#include "Widgets/Layout/SBorder.h"
+#include "Widgets/SBoxPanel.h"
+#include "Widgets/Text/STextBlock.h"
+
+class FExtender;
+class ITableRow;
+class SWidget;
 
 #define LOCTEXT_NAMESPACE "CurveAssetEditor"
 
@@ -82,7 +117,7 @@ struct FCurveAssetEditorTreeItem : public ICurveEditorTreeItem
 
 		TUniquePtr<FRichCurveEditorModelRaw> NewCurve = MakeUnique<FRichCurveEditorModelRaw>(static_cast<FRichCurve*>(EditInfo.CurveToEdit), CurveOwner.Get());
 		NewCurve->SetShortDisplayName(CurveName);
-		NewCurve->SetColor(CurveColor);
+		NewCurve->SetColor(CurveColor, false);
 		OutCurveModels.Add(MoveTemp(NewCurve));
 	}
 	
@@ -102,14 +137,14 @@ void FCurveAssetEditor::RegisterTabSpawners(const TSharedRef<class FTabManager>&
 	InTabManager->RegisterTabSpawner( CurveTabId, FOnSpawnTab::CreateSP(this, &FCurveAssetEditor::SpawnTab_CurveAsset) )
 		.SetDisplayName( LOCTEXT("CurveTab", "Curve") )
 		.SetGroup(WorkspaceMenuCategory.ToSharedRef())
-		.SetIcon(FSlateIcon(FEditorStyle::GetStyleSetName(), "ClassIcon.CurveBase"));
+		.SetIcon(FSlateIcon(FAppStyle::GetAppStyleSetName(), "ClassIcon.CurveBase"));
 
 	if (ColorCurveDetailsView)
 	{
 		InTabManager->RegisterTabSpawner(ColorCurveEditorTabId, FOnSpawnTab::CreateSP(this, &FCurveAssetEditor::SpawnTab_ColorCurveEditor))
 			.SetDisplayName(LOCTEXT("ColorCurveEditorTab", "Color Curve Editor"))
 			.SetGroup(WorkspaceMenuCategory.ToSharedRef())
-			.SetIcon(FSlateIcon(FEditorStyle::GetStyleSetName(), "ClassIcon.CurveBase"));
+			.SetIcon(FSlateIcon(FAppStyle::GetAppStyleSetName(), "ClassIcon.CurveBase"));
 	}
 }
 
@@ -122,18 +157,11 @@ void FCurveAssetEditor::UnregisterTabSpawners(const TSharedRef<class FTabManager
 void FCurveAssetEditor::InitCurveAssetEditor( const EToolkitMode::Type Mode, const TSharedPtr< class IToolkitHost >& InitToolkitHost, UCurveBase* CurveToEdit )
 {	
 
-	TSharedRef<FTabManager::FLayout> StandaloneDefaultLayout = FTabManager::NewLayout("Standalone_CurveAssetEditor_Layout_v1")
+	TSharedRef<FTabManager::FLayout> StandaloneDefaultLayout = FTabManager::NewLayout("Standalone_CurveAssetEditor_Layout_v2")
 		->AddArea
 		(
 			FTabManager::NewPrimaryArea()
 			->SetOrientation(Orient_Vertical)
-			->Split
-			(
-				FTabManager::NewStack()
-				->SetSizeCoefficient(0.1f)
-				->SetHideTabWell(true)
-				->AddTab(GetToolbarTabId(), ETabState::OpenedTab)
-			)
 			->Split
 			(
 				FTabManager::NewStack()
@@ -147,18 +175,11 @@ void FCurveAssetEditor::InitCurveAssetEditor( const EToolkitMode::Type Mode, con
 	if (ColorCurve)
 	{
 
-		StandaloneDefaultLayout = FTabManager::NewLayout("Standalone_CurveAssetEditor_Layout_ColorCurvev2")
+		StandaloneDefaultLayout = FTabManager::NewLayout("Standalone_CurveAssetEditor_Layout_ColorCurvev3")
 			->AddArea
 			(
 				FTabManager::NewPrimaryArea()
 				->SetOrientation(Orient_Vertical)
-				->Split
-				(
-					FTabManager::NewStack()
-					->SetSizeCoefficient(0.1f)
-					->SetHideTabWell(true)
-					->AddTab(GetToolbarTabId(), ETabState::OpenedTab)
-				)
 				->Split
 				(
 					FTabManager::NewSplitter()
@@ -182,7 +203,10 @@ void FCurveAssetEditor::InitCurveAssetEditor( const EToolkitMode::Type Mode, con
 			);
 
 		FPropertyEditorModule& PropertyEditorModule = FModuleManager::GetModuleChecked<FPropertyEditorModule>("PropertyEditor");
-		const FDetailsViewArgs DetailsViewArgs(false, false, false, FDetailsViewArgs::HideNameArea);
+		FDetailsViewArgs DetailsViewArgs;
+		DetailsViewArgs.bAllowSearch = false;
+		DetailsViewArgs.NameAreaSettings = FDetailsViewArgs::HideNameArea;
+
 		ColorCurveDetailsView = PropertyEditorModule.CreateDetailView(DetailsViewArgs);
 	}
 	const bool bCreateDefaultStandaloneMenu = true;
@@ -287,12 +311,11 @@ TSharedRef<SDockTab> FCurveAssetEditor::SpawnTab_CurveAsset( const FSpawnTabArgs
 	
 
 	TSharedRef<SDockTab> NewDockTab = SNew(SDockTab)
-		.Icon(FEditorStyle::GetBrush("CurveAssetEditor.Tabs.Properties"))
 		.Label(FText::Format(LOCTEXT("CurveAssetEditorTitle", "{0} Curve Asset"), FText::FromString(GetTabPrefix())))
 		.TabColorScale(GetTabColorScale())
 		[
 			SNew(SBorder)
-			.BorderImage(FEditorStyle::GetBrush("ToolPanel.GroupBorder"))
+			.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
 			.Padding(0.0f)
 			[
 				CurveEditorPanel.ToSharedRef()
@@ -322,7 +345,6 @@ TSharedRef<SDockTab> FCurveAssetEditor::SpawnTab_ColorCurveEditor(const FSpawnTa
 
 
 	TSharedRef<SDockTab> NewDockTab = SNew(SDockTab)
-		.Icon(FEditorStyle::GetBrush("CurveAssetEditor.Tabs.Properties"))
 		.Label(LOCTEXT("ColorCurveEditor", "Color Curve Editor"))
 		.TabColorScale(GetTabColorScale())
 		[

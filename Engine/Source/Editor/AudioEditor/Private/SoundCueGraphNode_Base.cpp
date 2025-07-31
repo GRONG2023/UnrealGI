@@ -5,8 +5,14 @@
 =============================================================================*/
 
 #include "SoundCueGraph/SoundCueGraphNode_Base.h"
+
+#include "Containers/EnumAsByte.h"
+#include "EdGraph/EdGraphPin.h"
 #include "EdGraph/EdGraphSchema.h"
+#include "HAL/PlatformCrt.h"
+#include "Misc/AssertionMacros.h"
 #include "SoundCueGraph/SoundCueGraphSchema.h"
+#include "Templates/Casts.h"
 
 /////////////////////////////////////////////////////
 // USoundCueGraphNode_Base
@@ -198,7 +204,7 @@ void USoundCueGraphNode_Base::AutowireNewNode(UEdGraphPin* FromPin)
 			UEdGraphPin* Pin = Pins[i];
 			check(Pin);
 			FPinConnectionResponse Response = Schema->CanCreateConnection(FromPin, Pin);
-			if (ECanCreateConnectionResponse::CONNECT_RESPONSE_MAKE == Response.Response)
+			if (ECanCreateConnectionResponse::CONNECT_RESPONSE_MAKE == Response.Response) //-V1051
 			{
 				if (Schema->TryCreateConnection(FromPin, Pin))
 				{

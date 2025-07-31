@@ -7,6 +7,10 @@
 #include "Templates/Casts.h"
 #include "Fonts/FontBulkData.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(CompositeFont)
+
+#include <limits>
+
 // The total true type memory we are using for resident font faces
 DECLARE_MEMORY_STAT(TEXT("Resident Font Memory (TTF/OTF)"), STAT_SlateRawFontDataMemory, STATGROUP_SlateMemory);
 
@@ -31,6 +35,7 @@ FFontData::FFontData()
 	, FontData_DEPRECATED()
 #endif // WITH_EDITORONLY_DATA
 {
+	FontFilenameHash = GetTypeHash(FontFilename);
 }
 
 FFontData::FFontData(const UObject* const InFontFaceAsset, const int32 InSubFaceIndex)
@@ -44,6 +49,7 @@ FFontData::FFontData(const UObject* const InFontFaceAsset, const int32 InSubFace
 	, FontData_DEPRECATED()
 #endif // WITH_EDITORONLY_DATA
 {
+	FontFilenameHash = GetTypeHash(FontFilename);
 	if (FontFaceAsset)
 	{
 		CastChecked<const IFontFaceInterface>(FontFaceAsset);
@@ -62,6 +68,7 @@ FFontData::FFontData(FString InFontFilename, const EFontHinting InHinting, const
 #endif // WITH_EDITORONLY_DATA
 {
 	check(InLoadingPolicy != EFontLoadingPolicy::Inline);
+	FontFilenameHash = GetTypeHash(FontFilename);
 }
 
 bool FFontData::HasFont() const
@@ -120,6 +127,46 @@ EFontLayoutMethod FFontData::GetLayoutMethod() const
 	return EFontLayoutMethod::Metrics;
 }
 
+bool FFontData::IsAscendOverridden() const
+{
+	if (FontFaceAsset)
+	{
+		const IFontFaceInterface* FontFace = CastChecked<const IFontFaceInterface>(FontFaceAsset);
+		return FontFace->IsAscendOverridden();
+	}
+	return false;
+}
+
+int32 FFontData::GetAscendOverriddenValue() const
+{
+	if (FontFaceAsset)
+	{
+		const IFontFaceInterface* FontFace = CastChecked<const IFontFaceInterface>(FontFaceAsset);
+		return FontFace->GetAscendOverriddenValue();
+	}
+	return 0;
+}
+
+bool FFontData::IsDescendOverridden() const
+{
+	if (FontFaceAsset)
+	{
+		const IFontFaceInterface* FontFace = CastChecked<const IFontFaceInterface>(FontFaceAsset);
+		return FontFace->IsDescendOverridden();
+	}
+	return false;
+}
+
+int32 FFontData::GetDescendOverriddenValue() const
+{
+	if (FontFaceAsset)
+	{
+		const IFontFaceInterface* FontFace = CastChecked<const IFontFaceInterface>(FontFaceAsset);
+		return FontFace->GetDescendOverriddenValue();
+	}
+	return 0;
+}
+
 FFontFaceDataConstPtr FFontData::GetFontFaceData() const
 {
 	if (FontFaceAsset)
@@ -157,7 +204,7 @@ void FFontData::ConditionalUpgradeBulkDataToFontFace(UObject* InOuter, UClass* I
 {
 	if (BulkDataPtr_DEPRECATED)
 	{
-		int32 RawBulkDataSizeBytes = 0;
+		int64 RawBulkDataSizeBytes = 0;
 		const void* RawBulkData = BulkDataPtr_DEPRECATED->Lock(RawBulkDataSizeBytes);
 		if (RawBulkDataSizeBytes > 0)
 		{
@@ -165,7 +212,8 @@ void FFontData::ConditionalUpgradeBulkDataToFontFace(UObject* InOuter, UClass* I
 			FontFaceAsset = NewFontFaceAsset;
 
 			IFontFaceInterface* NewFontFace = CastChecked<IFontFaceInterface>(NewFontFaceAsset);
-			NewFontFace->InitializeFromBulkData(FontFilename, Hinting, RawBulkData, RawBulkDataSizeBytes);
+			ensure(RawBulkDataSizeBytes >= 0 && RawBulkDataSizeBytes <= std::numeric_limits<int32>::max());
+			NewFontFace->InitializeFromBulkData(FontFilename, Hinting, RawBulkData, (int32)RawBulkDataSizeBytes);
 		}
 		BulkDataPtr_DEPRECATED->Unlock();
 		BulkDataPtr_DEPRECATED = nullptr;
@@ -175,11 +223,19 @@ void FFontData::ConditionalUpgradeBulkDataToFontFace(UObject* InOuter, UClass* I
 
 bool FFontData::operator==(const FFontData& Other) const
 {
+	// Skip the entire comparison if we are the same object
+	// This avoids costly stricmp on FontFilename when FontFaceAsset is null.
+	if (this == &Other)
+	{
+		return true;
+	}
+
 	if (FontFaceAsset != Other.FontFaceAsset)
 	{
 		// Using different assets
 		return false;
 	}
+
 	if (FontFaceAsset && FontFaceAsset == Other.FontFaceAsset)
 	{
 		// Using the same asset
@@ -187,10 +243,11 @@ bool FFontData::operator==(const FFontData& Other) const
 	}
 
 	// Compare inline properties
-	return FontFilename == Other.FontFilename
+	return FontFilenameHash == Other.FontFilenameHash 
 		&& Hinting == Other.Hinting
 		&& LoadingPolicy == Other.LoadingPolicy
-		&& SubFaceIndex == Other.SubFaceIndex;
+		&& SubFaceIndex == Other.SubFaceIndex
+		&& FontFilename == Other.FontFilename;
 }
 
 bool FFontData::operator!=(const FFontData& Other) const
@@ -214,7 +271,7 @@ bool FFontData::Serialize(FArchive& Ar)
 	if (bIsCooked)
 	{
 		// Cooked data uses a more compact format
-		UObject* LocalFontFaceAsset = const_cast<UObject*>(FontFaceAsset);
+		UObject* LocalFontFaceAsset = const_cast<UObject*>(ToRawPtr(FontFaceAsset));
 		Ar << LocalFontFaceAsset;
 		FontFaceAsset = LocalFontFaceAsset;
 		
@@ -242,6 +299,7 @@ bool FFontData::Serialize(FArchive& Ar)
 		}
 	}
 
+	FontFilenameHash = GetTypeHash(FontFilename);
 	return true;
 }
 
@@ -273,3 +331,4 @@ FString FStandaloneCompositeFont::GetReferencerName() const
 {
 	return TEXT("FStandaloneCompositeFont");
 }
+

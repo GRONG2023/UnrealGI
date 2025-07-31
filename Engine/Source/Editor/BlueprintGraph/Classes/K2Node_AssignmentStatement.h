@@ -3,13 +3,22 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
-#include "K2Node.h"
 #include "EdGraph/EdGraph.h"
+#include "EdGraph/EdGraphNode.h"
+#include "HAL/Platform.h"
+#include "Internationalization/Text.h"
+#include "K2Node.h"
+#include "KismetCompilerMisc.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/UObjectGlobals.h"
+
 #include "K2Node_AssignmentStatement.generated.h"
 
 class FBlueprintActionDatabaseRegistrar;
+class FName;
+class UEdGraph;
 class UEdGraphPin;
+class UObject;
 
 UCLASS(MinimalAPI)
 class UK2Node_AssignmentStatement : public UK2Node
@@ -26,7 +35,7 @@ class UK2Node_AssignmentStatement : public UK2Node
 	virtual void AllocateDefaultPins() override;
 	virtual FText GetTooltipText() const override;
 	virtual FText GetNodeTitle(ENodeTitleType::Type TitleType) const override;
-	virtual bool IsCompatibleWithGraph(UEdGraph const* TargetGraph) const override;
+	virtual bool IsCompatibleWithGraph(const UEdGraph* TargetGraph) const override;
 	virtual bool CanPasteHere(const UEdGraph* TargetGraph) const override;
 	//~ End UEdGraphNode Interface
 

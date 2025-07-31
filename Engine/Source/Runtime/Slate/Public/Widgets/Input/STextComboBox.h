@@ -18,7 +18,7 @@
 /**
  * A combo box that shows text content.
  */
-class SLATE_API STextComboBox : public SCompoundWidget
+class STextComboBox : public SCompoundWidget
 {
 public:
 
@@ -29,7 +29,7 @@ public:
 		: _ComboBoxStyle(&FCoreStyle::Get().GetWidgetStyle< FComboBoxStyle >("ComboBox"))
 		, _ButtonStyle(nullptr)
 		, _ColorAndOpacity( FSlateColor::UseForeground() )
-		, _ContentPadding(FMargin(4.0, 2.0))
+		, _ContentPadding(_ComboBoxStyle->ContentPadding)
 		, _OnGetTextLabelForItem()
 		{}
 
@@ -39,7 +39,7 @@ public:
 		SLATE_STYLE_ARGUMENT(FButtonStyle, ButtonStyle)
 
 		/** Selection of strings to pick from */
-		SLATE_ARGUMENT( TArray< TSharedPtr<FString> >*, OptionsSource )
+		SLATE_ITEMS_SOURCE_ARGUMENT(TSharedPtr<FString>, OptionsSource)
 
 		/** Text color and opacity */
 		SLATE_ATTRIBUTE( FSlateColor, ColorAndOpacity )
@@ -63,12 +63,12 @@ public:
 		SLATE_EVENT( FGetTextComboLabel, OnGetTextLabelForItem ) 
 	SLATE_END_ARGS()
 
-	void Construct( const FArguments& InArgs );
+	SLATE_API void Construct( const FArguments& InArgs );
 
 	/** Called to create a widget for each string */
-	TSharedRef<SWidget> MakeItemWidget( TSharedPtr<FString> StringItem );
+	SLATE_API TSharedRef<SWidget> MakeItemWidget( TSharedPtr<FString> StringItem );
 
-	void SetSelectedItem (TSharedPtr<FString> NewSelection);
+	SLATE_API void SetSelectedItem (TSharedPtr<FString> NewSelection);
 
 	/** Returns the currently selected text string */
 	TSharedPtr<FString> GetSelectedItem()
@@ -76,22 +76,40 @@ public:
 		return SelectedItem;
 	}
 
+	/** Sets new item source */
+	void SetItemsSource(const TArray<TSharedPtr<FString>>* InListItemsSource)
+	{
+		StringCombo->SetItemsSource(InListItemsSource);
+	}
+
+	/** Sets new item source */
+	void SetItemsSource(TSharedRef<::UE::Slate::Containers::TObservableArray<TSharedPtr<FString>>> InListItemsSource)
+	{
+		StringCombo->SetItemsSource(InListItemsSource);
+	}
+
+	/** Clears current item source */
+	void ClearItemsSource()
+	{
+		StringCombo->ClearItemsSource();
+	}
+
 	/** Request to reload the text options in the combobox from the OptionsSource attribute */
-	void RefreshOptions();
+	SLATE_API void RefreshOptions();
 
 	/** Clears the selected item in the text combo */
-	void ClearSelection();
+	SLATE_API void ClearSelection();
 
 private:
 	TSharedPtr<FString> OnGetSelection() const {return SelectedItem;}
 
 	/** Called when selection changes in the combo pop-up */
-	void OnSelectionChanged (TSharedPtr<FString> Selection, ESelectInfo::Type SelectInfo);
+	SLATE_API void OnSelectionChanged (TSharedPtr<FString> Selection, ESelectInfo::Type SelectInfo);
 
 	/** Helper method to get the text for a given item in the combo box */
-	FText GetSelectedTextLabel() const;
+	SLATE_API FText GetSelectedTextLabel() const;
 
-	FText GetItemTextLabel(TSharedPtr<FString> StringItem) const;
+	SLATE_API FText GetItemTextLabel(TSharedPtr<FString> StringItem) const;
 
 private:
 

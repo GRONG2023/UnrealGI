@@ -23,15 +23,40 @@
 #include "Async/ParallelFor.h"
 #include "UObject/ReferenceChainSearch.h"
 #include "UObject/FastReferenceCollector.h"
+#include <atomic>
 
 /*-----------------------------------------------------------------------------
    Garbage collection verification code.
 -----------------------------------------------------------------------------*/
 
 /**
-* If set and VERIFY_DISREGARD_GC_ASSUMPTIONS is true, we verify GC assumptions about "Disregard For GC" objects.
+* If set and VERIFY_DISREGARD_GC_ASSUMPTIONS is true, we verify GC assumptions about "Disregard For GC" objects and clusters.
 */
-COREUOBJECT_API bool	GShouldVerifyGCAssumptions = !(UE_BUILD_SHIPPING != 0 && WITH_EDITOR != 0);
+COREUOBJECT_API bool	GShouldVerifyGCAssumptions = !UE_BUILD_SHIPPING && !UE_BUILD_TEST && !WITH_EDITOR;
+static FAutoConsoleVariableRef CVarShouldVerifyGCAssumptions(
+	TEXT("gc.VerifyAssumptions"),
+	GShouldVerifyGCAssumptions,
+	TEXT("Whether to verify GC assumptions (disregard for GC, clustering) on each GC."),
+	ECVF_Default
+);
+
+/** If set and VERIFY_DISREGARD_GC_ASSUMPTIONS is set, we verify GC assumptions when performing a full (blocking) purge */
+COREUOBJECT_API bool	GShouldVerifyGCAssumptionsOnFullPurge = !UE_BUILD_SHIPPING && !WITH_EDITOR;
+static FAutoConsoleVariableRef CVarShouldVerifyGCAssumptionsOnFullPurge(
+	TEXT("gc.VerifyAssumptionsOnFullPurge"),
+	GShouldVerifyGCAssumptionsOnFullPurge,
+	TEXT("Whether to verify GC assumptions (disregard for GC, clustering) on full purge GCs."),
+	ECVF_Default
+);
+
+/** If > 0 and VERIFY_DISREGARD_GC_ASSUMPTIONS is set, we verify GC assumptions on that fraction of GCs. */
+COREUOBJECT_API float	GVerifyGCAssumptionsChance = 0.0f;
+static FAutoConsoleVariableRef CVarVerifyGCAssumptionsChance (
+	TEXT("gc.VerifyAssumptionsChance"),
+	GVerifyGCAssumptionsChance,
+	TEXT("Chance (0-1) to randomly verify GC assumptions on each GC."),
+	ECVF_Default
+);
 
 #if VERIFY_DISREGARD_GC_ASSUMPTIONS
 
@@ -51,7 +76,7 @@ public:
 	{
 		return NumErrors.GetValue();
 	}
-	FORCEINLINE_DEBUGGABLE void HandleTokenStreamObjectReference(TArray<UObject*>& ObjectsToSerialize, UObject* ReferencingObject, UObject*& Object, const int32 TokenIndex, bool bAllowReferenceElimination)
+	FORCEINLINE_DEBUGGABLE void HandleTokenStreamObjectReference(FGCArrayStruct& ObjectsToSerializeStruct, UObject* ReferencingObject, UObject*& Object, FMemberId MemberId, EOrigin Origin, bool bAllowReferenceElimination)
 	{
 		if (Object)
 		{
@@ -62,24 +87,23 @@ public:
 #endif
 				!Object->IsValidLowLevelFast())
 			{
-				FString TokenDebugInfo;
+				FString DebugInfo;
 				if (UClass *Class = (ReferencingObject ? ReferencingObject->GetClass() : nullptr))
 				{
-					FTokenInfo TokenInfo = Class->ReferenceTokenStream.GetTokenInfo(TokenIndex);
-					TokenDebugInfo = FString::Printf(TEXT("ReferencingObjectClass: %s, Property Name: %s, Offset: %d"),
-						*Class->GetFullName(), *TokenInfo.Name.GetPlainNameString(), TokenInfo.Offset);
+					DebugInfo = FString::Printf(TEXT("ReferencingObjectClass: %s, Property: %s"),
+						*Class->GetFullName(), *ObjectsToSerializeStruct.SchemaStack->ToString());
 				}
 				else
 				{
 					// This means this objects is most likely being referenced by AddReferencedObjects
-					TokenDebugInfo = TEXT("Native Reference");
+					DebugInfo = TEXT("Native Reference");
 				}
 
-				UE_LOG(LogGarbage, Fatal, TEXT("Invalid object while verifying Disregard for GC assumptions: 0x%016llx, ReferencingObject: %s, %s, TokenIndex: %d"),
+				UE_LOG(LogGarbage, Fatal, TEXT("Invalid object while verifying Disregard for GC assumptions: 0x%016llx, ReferencingObject: %s, %s, MemberId: %d"),
 					(int64)(PTRINT)Object,
 					ReferencingObject ? *ReferencingObject->GetFullName() : TEXT("NULL"),
-					*TokenDebugInfo, TokenIndex);
-				}
+					*DebugInfo, MemberId.AsPrintableIndex());
+			}
 #endif // ENABLE_GC_OBJECT_CHECKS
 
 			if (!(Object->IsRooted() ||
@@ -95,43 +119,37 @@ public:
 		}
 	}
 };
-typedef TDefaultReferenceCollector<FDisregardSetReferenceProcessor> FDisregardSetReferenceCollector;
 
 void VerifyGCAssumptions()
 {	
 	int32 MaxNumberOfObjects = GUObjectArray.GetObjectArrayNumPermanent();
 
 	FDisregardSetReferenceProcessor Processor;
-	TFastReferenceCollector<
-		FDisregardSetReferenceProcessor, 
-		FDisregardSetReferenceCollector, 
-		FGCArrayPool, 
-		EFastReferenceCollectorOptions::AutogenerateTokenStream | EFastReferenceCollectorOptions::ProcessNoOpTokens
-	> ReferenceCollector(Processor, FGCArrayPool::Get());
 
-	int32 NumThreads = FMath::Max(1, FTaskGraphInterface::Get().GetNumWorkerThreads());
+	int32 NumThreads = GetNumCollectReferenceWorkers();
 	int32 NumberOfObjectsPerThread = (MaxNumberOfObjects / NumThreads) + 1;
-	FGCArrayStruct* ArrayStructs = new FGCArrayStruct[NumThreads];
-
-	ParallelFor(NumThreads, [&ReferenceCollector, ArrayStructs, NumberOfObjectsPerThread, NumThreads, MaxNumberOfObjects](int32 ThreadIndex)
+	
+	ParallelFor( TEXT("GC.VerifyAssumptions"),NumThreads,1, [&Processor, NumberOfObjectsPerThread, NumThreads, MaxNumberOfObjects](int32 ThreadIndex)
 	{
 		int32 FirstObjectIndex = ThreadIndex * NumberOfObjectsPerThread;
 		int32 NumObjects = (ThreadIndex < (NumThreads - 1)) ? NumberOfObjectsPerThread : (MaxNumberOfObjects - (NumThreads - 1)*NumberOfObjectsPerThread);
-		FGCArrayStruct& ArrayStruct = ArrayStructs[ThreadIndex];
-		ArrayStruct.ObjectsToSerialize.Reserve(NumberOfObjectsPerThread);
+		
+		TArray<UObject*> ObjectsToSerialize;
+		ObjectsToSerialize.Reserve(NumberOfObjectsPerThread + UE::GC::ObjectLookahead);
 
 		for (int32 ObjectIndex = 0; ObjectIndex < NumObjects && (FirstObjectIndex + ObjectIndex) < MaxNumberOfObjects; ++ObjectIndex)
 		{
 			FUObjectItem& ObjectItem = GUObjectArray.GetObjectItemArrayUnsafe()[FirstObjectIndex + ObjectIndex];
 			if (ObjectItem.Object && ObjectItem.Object != FGCObject::GGCObjectReferencer)
 			{
-				ArrayStruct.ObjectsToSerialize.Add(static_cast<UObject*>(ObjectItem.Object));
+				ObjectsToSerialize.Add(static_cast<UObject*>(ObjectItem.Object));
 			}
 		}
-		ReferenceCollector.CollectReferences(ArrayStruct);
+		
+		UE::GC::FWorkerContext Context;
+		Context.SetInitialObjectsUnpadded(ObjectsToSerialize);
+		CollectReferences(Processor, Context);
 	});
-
-	delete[] ArrayStructs;
 
 	UE_CLOG(Processor.GetErrorCount() > 0, LogGarbage, Fatal, TEXT("Encountered %d object(s) breaking Disregard for GC assumptions. Please check log for details."), Processor.GetErrorCount());
 }
@@ -158,7 +176,7 @@ public:
 	{
 		return NumErrors.GetValue();
 	}
-	void SetCurrentObject(UObject* InRootOrClusterObject)
+	void SetCurrentObjectAndCluster(UObject* InRootOrClusterObject)
 	{
 		check(InRootOrClusterObject);
 		CurrentObject = InRootOrClusterObject;
@@ -171,15 +189,16 @@ public:
 	/**
 	* Handles UObject reference from the token stream. Performance is critical here so we're FORCEINLINING this function.
 	*
-	* @param ObjectsToSerialize An array of remaining objects to serialize (Obj must be added to it if Obj can be added to cluster)
-	* @param ReferencingObject Object referencing the object to process.
-	* @param TokenIndex Index to the token stream where the reference was found.
 	* @param bAllowReferenceElimination True if reference elimination is allowed (ignored when constructing clusters).
 	*/
-	FORCEINLINE_DEBUGGABLE void HandleTokenStreamObjectReference(TArray<UObject*>& ObjectsToSerialize, UObject* ReferencingObject, UObject*& Object, const int32 TokenIndex, bool bAllowReferenceElimination)
+	FORCEINLINE_DEBUGGABLE void HandleTokenStreamObjectReference(FGCArrayStruct& ObjectsToSerializeStruct, UObject* ReferencingObject, UObject*& Object, FMemberId MemberId, EOrigin Origin, bool bAllowReferenceElimination)
 	{
 		if (Object)
 		{
+			if (ObjectsToSerializeStruct.GetReferencingObject() != CurrentObject)
+			{
+				SetCurrentObjectAndCluster(ObjectsToSerializeStruct.GetReferencingObject());
+			}
 			check(CurrentObject);
 
 #if ENABLE_GC_OBJECT_CHECKS
@@ -189,38 +208,60 @@ public:
 #endif
 				!Object->IsValidLowLevelFast())
 			{
-				FString TokenDebugInfo;
+				FString DebugInfo;
 				if (UClass *Class = (ReferencingObject ? ReferencingObject->GetClass() : nullptr))
 				{
-					FTokenInfo TokenInfo = Class->ReferenceTokenStream.GetTokenInfo(TokenIndex);
-					TokenDebugInfo = FString::Printf(TEXT("ReferencingObjectClass: %s, Property Name: %s, Offset: %d"),
-						*Class->GetFullName(), *TokenInfo.Name.GetPlainNameString(), TokenInfo.Offset);
+					DebugInfo = FString::Printf(TEXT("ReferencingObjectClass: %s, Property: %s"),
+						*Class->GetFullName(), *ObjectsToSerializeStruct.SchemaStack->ToString());
 				}
 				else
 				{
 					// This means this objects is most likely being referenced by AddReferencedObjects
-					TokenDebugInfo = TEXT("Native Reference");
+					DebugInfo = TEXT("Native Reference");
 				}
 
 #if UE_GCCLUSTER_VERBOSE_LOGGING
 				DumpClusterToLog(*Cluster, true, true);
 #endif
 
-				UE_LOG(LogGarbage, Fatal, TEXT("Invalid object while verifying cluster assumptions: 0x%016llx, ReferencingObject: %s, %s, TokenIndex: %d"),
+				UE_LOG(LogGarbage, Fatal, TEXT("Invalid object while verifying cluster assumptions: 0x%016llx, ReferencingObject: %s, %s, MemberId: %d"),
 					(int64)(PTRINT)Object,
 					ReferencingObject ? *ReferencingObject->GetFullName() : TEXT("NULL"),
-					*TokenDebugInfo, TokenIndex);
+					*DebugInfo, MemberId.AsPrintableIndex());
 			}
 #endif // ENABLE_GC_OBJECT_CHECKS
 
 			FUObjectItem* ObjectItem = GUObjectArray.ObjectToObjectItem(Object);
 			if (ObjectItem->GetOwnerIndex() <= 0)
 			{
-				// We are allowed to reference other clusters, root set objects and objects from diregard for GC pool
-				if (!ObjectItem->HasAnyFlags(EInternalObjectFlags::ClusterRoot | EInternalObjectFlags::RootSet)
-					&& !GUObjectArray.IsDisregardForGC(Object) && Object->CanBeInCluster() &&
-					!Cluster->MutableObjects.Contains(GUObjectArray.ObjectToIndex(Object))) // This is for objects that had RF_NeedLoad|RF_NeedPostLoad set when creating the cluster
+				// Referenced object is a cluster root or not clustered
+				if (ObjectItem->HasAnyFlags(EInternalObjectFlags::ClusterRoot))
 				{
+					// Clusters need to be referenced by the current cluster otherwise they can also get GC'd too early.
+					const FUObjectItem* ClusterRootObjectItem = GUObjectArray.ObjectToObjectItem(ClusterRootObject);
+					const int32 OtherClusterRootIndex = GUObjectArray.ObjectToIndex(Object);
+					const FUObjectItem* OtherClusterRootItem = GUObjectArray.IndexToObjectUnsafeForGC(OtherClusterRootIndex);
+					check(OtherClusterRootItem && OtherClusterRootItem->Object);
+					UObject* OtherClusterRootObject = static_cast<UObject*>(OtherClusterRootItem->Object);
+					UE_CLOG(
+						OtherClusterRootIndex != Cluster->RootIndex  // Same cluster is legal 
+					&&	!Cluster->ReferencedClusters.Contains(OtherClusterRootIndex)  // cluster-cluster reference is legal
+					&&  !Cluster->MutableObjects.Contains(OtherClusterRootIndex),  // reference to an external object which later became a cluster root is legal 
+						LogGarbage, Warning,
+						TEXT("Object %s from source cluster %s (%d) is referencing cluster root object %s (0x%016llx) (%d) which is not referenced by the source cluster."),
+						*GetFullNameSafe(ReferencingObject),
+						*ClusterRootObject->GetFullName(),
+						ClusterRootObjectItem->GetClusterIndex(),
+						*Object->GetFullName(),
+						(int64)(PTRINT)Object,
+						OtherClusterRootItem->GetClusterIndex());
+				}
+				else if (	!ObjectItem->HasAnyFlags(EInternalObjectFlags::RootSet) // Root set objects will stay alive that way 
+						&&	!GUObjectArray.IsDisregardForGC(Object) // Disregard-for-GC objects are never freed
+						&&  !Cluster->MutableObjects.Contains(GUObjectArray.ObjectToIndex(Object)) // Mutable object ref is traversed during GC regardless of if the object is cluster root or not 
+				) 
+				{
+					// There is a danger this object could be freed leaving a dangling pointer in an object inside the cluster
 					UE_LOG(LogGarbage, Warning, TEXT("Object %s (0x%016llx) from cluster %s (0x%016llx / 0x%016llx) is referencing 0x%016llx %s which is not part of root set or cluster."),
 						*CurrentObject->GetFullName(),
 						(int64)(PTRINT)CurrentObject,
@@ -234,25 +275,6 @@ public:
 					FReferenceChainSearch RefChainSearch(Object, EReferenceChainSearchMode::Shortest | EReferenceChainSearchMode::PrintResults);
 #endif
 				}
-				else if (ObjectItem->HasAnyFlags(EInternalObjectFlags::ClusterRoot))
-				{
-					// However, clusters need to be referenced by the current cluster otherwise they can also get GC'd too early.
-					const FUObjectItem* ClusterRootObjectItem = GUObjectArray.ObjectToObjectItem(ClusterRootObject);
-					const int32 OtherClusterRootIndex = GUObjectArray.ObjectToIndex(Object);
-					const FUObjectItem* OtherClusterRootItem = GUObjectArray.IndexToObjectUnsafeForGC(OtherClusterRootIndex);
-					check(OtherClusterRootItem && OtherClusterRootItem->Object);
-					UObject* OtherClusterRootObject = static_cast<UObject*>(OtherClusterRootItem->Object);
-					UE_CLOG(OtherClusterRootIndex != Cluster->RootIndex &&
-						!Cluster->ReferencedClusters.Contains(OtherClusterRootIndex) &&
-						!Cluster->MutableObjects.Contains(OtherClusterRootIndex), LogGarbage, Warning,
-						TEXT("Object %s from source cluster %s (%d) is referencing cluster root object %s (0x%016llx) (%d) which is not referenced by the source cluster."),
-						*GetFullNameSafe(ReferencingObject),
-						*ClusterRootObject->GetFullName(),
-						ClusterRootObjectItem->GetClusterIndex(),
-						*Object->GetFullName(),
-						(int64)(PTRINT)Object,
-						OtherClusterRootItem->GetClusterIndex());
-				}
 			}
 			else if (ObjectItem->GetOwnerIndex() != Cluster->RootIndex)
 			{
@@ -263,9 +285,11 @@ public:
 				const FUObjectItem* OtherClusterRootItem = GUObjectArray.IndexToObjectUnsafeForGC(OtherClusterRootIndex);
 				check(OtherClusterRootItem && OtherClusterRootItem->Object);
 				UObject* OtherClusterRootObject = static_cast<UObject*>(OtherClusterRootItem->Object);
-				UE_CLOG(OtherClusterRootIndex != Cluster->RootIndex &&
-					!Cluster->ReferencedClusters.Contains(OtherClusterRootIndex) &&
-					!Cluster->MutableObjects.Contains(GUObjectArray.ObjectToIndex(Object)), LogGarbage, Warning,
+				UE_CLOG(
+						OtherClusterRootIndex != Cluster->RootIndex  // Same cluster is legal 
+					&&	!Cluster->ReferencedClusters.Contains(OtherClusterRootIndex)  // Cluster-cluster reference 
+					&&	!Cluster->MutableObjects.Contains(GUObjectArray.ObjectToIndex(Object)), // Reference to an object which was later clustered
+					LogGarbage, Warning,
 					TEXT("Object %s from source cluster %s (%d) is referencing object %s (0x%016llx) from cluster %s (%d) which is not referenced by the source cluster."),
 					*GetFullNameSafe(ReferencingObject),
 					*ClusterRootObject->GetFullName(),
@@ -277,60 +301,299 @@ public:
 			}
 		}
 	}
+
+#if WITH_VERSE_VM || defined(__INTELLISENSE__)
+	/**
+	* Handles VCell reference from the token stream. Performance is critical here so we're FORCEINLINING this function.
+	*
+	* @param Context Context of the reference collection
+	* @param ReferencingObject Object referencing the object to process.
+	* @param Cell Cell being processed
+	* @param MemberId Index to the token stream where the reference was found.
+	* @param Origin Declares if a schema represents a blueprint generated type
+	*/
+	FORCEINLINE void HandleTokenStreamVerseCellReference(FWorkerContext& Context, UObject* ReferencingObject, Verse::VCell* Cell, FMemberId MemberId, EOrigin Origin)
+	{
+		if (Cell)
+		{
+			if (Context.GetReferencingObject() != CurrentObject)
+			{
+				SetCurrentObjectAndCluster(Context.GetReferencingObject());
+			}
+			check(CurrentObject);
+
+			const FUObjectItem* ClusterRootObjectItem = GUObjectArray.ObjectToObjectItem(ClusterRootObject);
+			UE_CLOG(
+				!Cluster->MutableCells.Contains(Cell),
+				LogGarbage, Warning,
+				TEXT("Object %s from source cluster %s (%d) is referencing cell (0x%016llx) which is not part of cluster."),
+				*GetFullNameSafe(ReferencingObject),
+				*ClusterRootObject->GetFullName(),
+				ClusterRootObjectItem->GetClusterIndex(),
+				(int64)(PTRINT)Cell);
+		}
+	}
+#endif
 };
-typedef TDefaultReferenceCollector<FClusterVerifyReferenceProcessor> FClusterVerifyReferenceCollector;
 
 void VerifyClustersAssumptions()
 {
 	int32 MaxNumberOfClusters = GUObjectClusters.GetClustersUnsafe().Num();
-	int32 NumThreads = FMath::Max(1, FTaskGraphInterface::Get().GetNumWorkerThreads());
+	int32 NumThreads = GetNumCollectReferenceWorkers();
 	int32 NumberOfClustersPerThread = (MaxNumberOfClusters / NumThreads) + 1;
-	FGCArrayStruct* ArrayStructs = new FGCArrayStruct[NumThreads];
+	
 	FThreadSafeCounter NumErrors(0);
 
-	ParallelFor(NumThreads, [&NumErrors, ArrayStructs, NumberOfClustersPerThread, NumThreads, MaxNumberOfClusters](int32 ThreadIndex)
+	ParallelFor( TEXT("GC.VerifyClusterAssumptions"),NumThreads,1, [&NumErrors, NumberOfClustersPerThread, NumThreads, MaxNumberOfClusters](int32 ThreadIndex)
 	{
 		int32 FirstClusterIndex = ThreadIndex * NumberOfClustersPerThread;
 		int32 NumClusters = (ThreadIndex < (NumThreads - 1)) ? NumberOfClustersPerThread : (MaxNumberOfClusters - (NumThreads - 1) * NumberOfClustersPerThread);
-		FGCArrayStruct& ArrayStruct = ArrayStructs[ThreadIndex];
-		
+				
 		FClusterVerifyReferenceProcessor Processor;
-		TFastReferenceCollector<
-			FClusterVerifyReferenceProcessor, 
-			FClusterVerifyReferenceCollector, 
-			FGCArrayPool, 
-			EFastReferenceCollectorOptions::AutogenerateTokenStream | EFastReferenceCollectorOptions::ProcessNoOpTokens
-		> ReferenceCollector(Processor, FGCArrayPool::Get());
 
+		TArray<UObject*> ObjectsToSerialize;
 		for (int32 ClusterIndex = 0; ClusterIndex < NumClusters && (FirstClusterIndex + ClusterIndex) < MaxNumberOfClusters; ++ClusterIndex)
 		{
 			FUObjectCluster& Cluster = GUObjectClusters.GetClustersUnsafe()[FirstClusterIndex + ClusterIndex];
 			if (Cluster.RootIndex >= 0 && Cluster.Objects.Num())
 			{
-				ArrayStruct.ObjectsToSerialize.Reset();
-				ArrayStruct.ObjectsToSerialize.Reserve(Cluster.Objects.Num() + 1);
+				ObjectsToSerialize.Reset(Cluster.Objects.Num() + 1 + UE::GC::ObjectLookahead);
 				{
 					FUObjectItem* RootItem = GUObjectArray.IndexToObject(Cluster.RootIndex);
 					check(RootItem);
 					check(RootItem->Object);
-					ArrayStruct.ObjectsToSerialize.Add(static_cast<UObject*>(RootItem->Object));
+					ObjectsToSerialize.Add(static_cast<UObject*>(RootItem->Object));
 				}
 				for (int32 ObjectIndex : Cluster.Objects)
 				{
 					FUObjectItem* ObjectItem = GUObjectArray.IndexToObject(ObjectIndex);
 					check(ObjectItem);
 					check(ObjectItem->Object);
-					ArrayStruct.ObjectsToSerialize.Add(static_cast<UObject*>(ObjectItem->Object));
+					ObjectsToSerialize.Add(static_cast<UObject*>(ObjectItem->Object));
 				}
-				ReferenceCollector.CollectReferences(ArrayStruct);
-				NumErrors.Add(Processor.GetErrorCount());
+
+				UE::GC::FWorkerContext Context;
+				Context.SetInitialObjectsUnpadded(ObjectsToSerialize);
+				CollectReferences(Processor, Context);
 			}			
 		}		
+		NumErrors.Add(Processor.GetErrorCount());
 	});
 
-	delete[] ArrayStructs;
 
 	UE_CLOG(NumErrors.GetValue() > 0, LogGarbage, Fatal, TEXT("Encountered %d object(s) breaking GC Clusters assumptions. Please check log for details."), NumErrors.GetValue());
+}
+
+void VerifyObjectFlags()
+{
+	int32 MaxNumberOfObjects = GUObjectArray.GetObjectArrayNum();
+	int32 NumThreads = FMath::Max(1, FTaskGraphInterface::Get().GetNumWorkerThreads());
+	int32 NumberOfObjectsPerThread = (MaxNumberOfObjects / NumThreads) + 1;
+	std::atomic<uint32> NumErrors(0);
+
+	ParallelFor( TEXT("GC.VerifyObjectFlags"),NumThreads,1, [&NumErrors, NumberOfObjectsPerThread, NumThreads, MaxNumberOfObjects](int32 ThreadIndex)
+	{
+		int32 FirstObjectIndex = ThreadIndex * NumberOfObjectsPerThread;
+		int32 NumObjects = (ThreadIndex < (NumThreads - 1)) ? NumberOfObjectsPerThread : (MaxNumberOfObjects - (NumThreads - 1) * NumberOfObjectsPerThread);
+
+		for (int32 ObjectIndex = 0; ObjectIndex < NumObjects && (FirstObjectIndex + ObjectIndex) < MaxNumberOfObjects; ++ObjectIndex)
+		{
+			FUObjectItem& ObjectItem = GUObjectArray.GetObjectItemArrayUnsafe()[FirstObjectIndex + ObjectIndex];
+			if (ObjectItem.Object)
+			{
+				UObject* Object = (UObject*)ObjectItem.Object;
+				bool bHasObjectFlag = Object->HasAnyFlags(RF_MirroredGarbage);
+				bool bHasInternalFlag = ObjectItem.HasAnyFlags(EInternalObjectFlags::Garbage);
+				if (bHasObjectFlag != bHasInternalFlag)
+				{
+					UE_LOG(LogGarbage, Warning, TEXT("RF_Garbage (%d) and EInternalObjectFlags::Garbage (%d) flag mismatch on %s%s"),
+						(int32)bHasObjectFlag,
+						(int32)bHasInternalFlag,
+						*FReferenceChainSearch::GetObjectFlags(FGCObjectInfo(Object)),
+						*Object->GetFullName());
+
+					++NumErrors;
+				}
+
+				if (!ObjectItem.HasAnyFlags(UE::GC::GReachableObjectFlag) && !GUObjectArray.IsDisregardForGC(Object))
+				{
+					UE_LOG(LogGarbage, Warning, TEXT("Object %s%s is NOT marked as Reachable at the beginning of GC"),
+						*FReferenceChainSearch::GetObjectFlags(FGCObjectInfo(Object)),
+						*Object->GetFullName());
+
+					++NumErrors;
+				}
+
+				if (ObjectItem.HasAnyFlags(UE::GC::GUnreachableObjectFlag| UE::GC::GMaybeUnreachableObjectFlag))
+				{
+					UE_LOG(LogGarbage, Warning, TEXT("Object %s%s is marked with at least one of the unreachable flags at the beginning of GC"),
+						*FReferenceChainSearch::GetObjectFlags(FGCObjectInfo(Object)),
+						*Object->GetFullName());
+
+					++NumErrors;
+				}
+			}
+		}
+	});
+
+	UE_CLOG(NumErrors > 0, LogGarbage, Fatal, TEXT("Encountered %d object(s) breaking Object and Internal flag assumptions. Please check log for details."), (uint32)NumErrors);
+}
+
+/**
+* Finds only direct references of objects passed to the TFastReferenceCollector and verifies if they ae reachable or not
+*/
+class FUnreachableReferenceProcessor : public FSimpleReferenceProcessorBase
+{
+	int32 NumErrors = 0;
+
+public:
+	FUnreachableReferenceProcessor() = default;
+
+	int32 GetErrorCount() const
+	{
+		return NumErrors;
+	}
+
+	FORCEINLINE_DEBUGGABLE void HandleTokenStreamObjectReference(FGCArrayStruct& ObjectsToSerializeStruct, UObject* ReferencingObject, UObject*& Object, FMemberId MemberId, EOrigin Origin, bool bAllowReferenceElimination)
+	{
+		if (Object)
+		{
+			FUObjectItem* ObjectItem = GUObjectArray.ObjectToObjectItem(Object);
+			if (ObjectItem->HasAnyFlags(UE::GC::GMaybeUnreachableObjectFlag | UE::GC::GUnreachableObjectFlag))
+			{
+				if (ReferencingObject)
+				{
+					FUObjectItem* ReferencingObjectItem = GUObjectArray.ObjectToObjectItem(ReferencingObject);
+					if (ReferencingObjectItem->GetOwnerIndex() > 0 && ReferencingObjectItem->GetOwnerIndex() == GUObjectArray.ObjectToIndex(Object))
+					{
+						// ReferencingObject is in Object's cluster so it's fine it it's still reachable
+						return;
+					}
+				}
+
+				FString DebugInfo;
+				if (UClass* Class = (ReferencingObject ? ReferencingObject->GetClass() : nullptr))
+				{
+					DebugInfo = FString::Printf(TEXT("property: %s"),
+						*ObjectsToSerializeStruct.SchemaStack->ToString());
+				}
+				else
+				{
+					// This means this objects is most likely being referenced by AddReferencedObjects
+					DebugInfo = TEXT("Native Reference");
+				}
+
+				FString ReferencingObjectName;
+				if (!ReferencingObject && FGCObject::GGCObjectReferencer)
+				{
+					if (FGCObject* CurrentlySerializingObject = FGCObject::GGCObjectReferencer->GetCurrentlySerializingObject())
+					{
+						ReferencingObjectName = CurrentlySerializingObject->GetReferencerName();
+					}
+				}
+				if (ReferencingObjectName.IsEmpty())
+				{
+					ReferencingObjectName = GetFullNameSafe(ReferencingObject);
+				}
+
+				UE_LOG(LogGarbage, Warning, TEXT("Object %s%s is being referenced by reachable object %s through %s"),
+					*FReferenceChainSearch::GetObjectFlags(FGCObjectInfo(Object)),
+					*Object->GetFullName(),
+					*ReferencingObjectName,
+					*DebugInfo);
+
+				NumErrors++;
+			}
+		}
+	}
+};
+
+void VerifyNoUnreachableObjects(int32 NumUnreachable)
+{
+	const double StartTime = FPlatformTime::Seconds();
+	const int32 MaxNumberOfReachableObjects = GUObjectArray.GetObjectArrayNum();
+	const int32 NumThreads = GetNumCollectReferenceWorkers();
+	const int32 NumberOfObjectsPerThread = (MaxNumberOfReachableObjects / NumThreads) + 1;
+	std::atomic<uint32> NumErrors(0);
+	std::atomic<int32> VerifiedNumUnreachable(0);
+
+	ParallelFor(TEXT("GC.VerifyNoUnreachableObjects"), NumThreads, 1, [&NumErrors, &VerifiedNumUnreachable, NumberOfObjectsPerThread, NumThreads, MaxNumberOfReachableObjects, NumUnreachable](int32 ThreadIndex)
+	{
+		int32 FirstObjectIndex = ThreadIndex * NumberOfObjectsPerThread;
+		int32 NumObjects = (ThreadIndex < (NumThreads - 1)) ? NumberOfObjectsPerThread : (MaxNumberOfReachableObjects - (NumThreads - 1)*NumberOfObjectsPerThread);
+		TArray<UObject*> ObjectsToSerialize;
+		ObjectsToSerialize.Reserve(NumberOfObjectsPerThread);		
+
+		int32 ThisThreadUnrachableObjectsNum = 0;
+
+		for (int32 ObjectIndex = 0; ObjectIndex < NumObjects && (FirstObjectIndex + ObjectIndex) < GUObjectArray.GetObjectArrayNum(); ++ObjectIndex)
+		{
+			FUObjectItem& ObjectItem = GUObjectArray.GetObjectItemArrayUnsafe()[FirstObjectIndex + ObjectIndex];
+			if (ObjectItem.Object)
+			{
+				UObject* Object = static_cast<UObject*>(ObjectItem.Object);
+				if (!ObjectItem.HasAnyFlags(UE::GC::GUnreachableObjectFlag))
+				{
+					if (ObjectItem.HasAnyFlags(UE::GC::GMaybeUnreachableObjectFlag))
+					{
+						UE_LOG(LogGarbage, Warning, TEXT("Object %s%s is still marked as MaybeUnreachable after Reachability Analysis is complete."), 
+							*FReferenceChainSearch::GetObjectFlags(FGCObjectInfo(Object)),
+							*Object->GetFullName());
+						NumErrors++;
+					}
+					if (!ObjectItem.HasAnyFlags(UE::GC::GReachableObjectFlag) && !GUObjectArray.IsDisregardForGC(Object))
+					{
+						UE_LOG(LogGarbage, Warning, TEXT("Object %s%s is NOT marked as Unreachable and NOT marked as Reachable."),
+							*FReferenceChainSearch::GetObjectFlags(FGCObjectInfo(Object)),
+							*Object->GetFullName());
+						NumErrors++;
+					}					
+					ObjectsToSerialize.Add(Object);
+				}
+				else
+				{
+					ThisThreadUnrachableObjectsNum++;
+
+					if (ObjectItem.HasAnyFlags(UE::GC::GMaybeUnreachableObjectFlag))
+					{
+						UE_LOG(LogGarbage, Warning, TEXT("Object %s%s is still marked as MaybeUnreachable after Reachability Analysis is complete."),
+							*FReferenceChainSearch::GetObjectFlags(FGCObjectInfo(Object)),
+							*Object->GetFullName());
+						NumErrors++;
+					}
+					if (ObjectItem.HasAnyFlags(UE::GC::GReachableObjectFlag))
+					{
+						UE_LOG(LogGarbage, Warning, TEXT("Object %s%s is still marked as Reachable."),
+							*FReferenceChainSearch::GetObjectFlags(FGCObjectInfo(Object)),
+							*Object->GetFullName());
+						NumErrors++;
+					}
+				}
+			}
+		}
+
+		if (NumUnreachable > 0)
+		{
+			// No need to scan for unreachable obejcts if there's no unreachable objects. We only care about flag checks above in this case
+			FUnreachableReferenceProcessor Processor;
+			UE::GC::FWorkerContext Context;
+			Context.SetInitialObjectsUnpadded(ObjectsToSerialize);
+			CollectReferences(Processor, Context);
+			NumErrors.fetch_add(Processor.GetErrorCount(), std::memory_order_acq_rel);
+		}
+
+		VerifiedNumUnreachable.fetch_add(ThisThreadUnrachableObjectsNum, std::memory_order_acq_rel);
+	});
+
+	if (VerifiedNumUnreachable.load() != NumUnreachable)
+	{
+		NumErrors++;
+		UE_LOG(LogGarbage, Warning, TEXT("The actual number of objects with the Unreachable flag (%d) does not match the number of gathered unreachable objects (%d)."), VerifiedNumUnreachable.load(), NumUnreachable);
+	}
+
+	UE_CLOG(NumErrors > 0, LogGarbage, Fatal, TEXT("Detected %d case(s) of breaking reachability assumptions."), NumErrors.load());
+
+	UE_LOG(LogGarbage, Log, TEXT("%f ms for VerifyNoUnreachableObjects"), (FPlatformTime::Seconds() - StartTime) * 1000);
 }
 
 #endif // VERIFY_DISREGARD_GC_ASSUMPTIONS

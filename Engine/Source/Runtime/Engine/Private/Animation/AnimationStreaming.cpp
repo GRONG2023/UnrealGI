@@ -5,9 +5,10 @@ AnimationStreaming.cpp: Manager to handle streaming animation data
 =============================================================================*/
 
 #include "Animation/AnimationStreaming.h"
-#include "Misc/CoreStats.h"
 #include "Animation/AnimStreamable.h"
 #include "Algo/Find.h"
+#include "EngineLogs.h"
+#include "HAL/PlatformFile.h"
 
 static int32 SpoofFailedAnimationChunkLoad = 0;
 FAutoConsoleVariableRef CVarSpoofFailedAnimationChunkLoad(
@@ -109,7 +110,7 @@ bool FStreamingAnimationData::UpdateStreamingStatus()
 			FreeLoadedChunk(LoadedChunk);
 			
 			FScopeLock LoadedChunksLock(&LoadedChunksCritcalSection);
-			LoadedChunks.RemoveAtSwap(LoadedChunkIndex, 1, false);
+			LoadedChunks.RemoveAtSwap(LoadedChunkIndex, 1, EAllowShrinking::No);
 		}
 	}
 
@@ -188,7 +189,7 @@ void FStreamingAnimationData::BeginPendingRequests(const TArray<uint32>& Indices
 					FreeLoadedChunk(LoadedChunks[ChunkIndex]);
 
 					FScopeLock LoadedChunksLock(&LoadedChunksCritcalSection);
-					LoadedChunks.RemoveAtSwap(ChunkIndex,1,false);
+					LoadedChunks.RemoveAtSwap(ChunkIndex,1,EAllowShrinking::No);
 					break;
 				}
 			}
@@ -221,7 +222,8 @@ void FStreamingAnimationData::BeginPendingRequests(const TArray<uint32>& Indices
 				AnimationStreamingManager->OnAsyncFileCallback(this, ChunkIndex, ChunkSize, Req, bWasCancelled);
 			};
 
-			UE_LOG(LogAnimation, Warning, TEXT("Loading Stream Anim %s Chunk:%i Length: %.3f Offset:%i Size:%i File:%s\n"), *StreamableAnim->GetName(), ChunkIndex, Chunk.SequenceLength, Chunk.BulkData.GetBulkDataOffsetInFile(), Chunk.BulkData.GetBulkDataSize(), *Chunk.BulkData.GetFilename());
+			UE_LOG(LogAnimation, Warning, TEXT("Loading Stream Anim %s Chunk:%i Length: %.3f Offset:%i Size:%i File:%s\n"),
+				*StreamableAnim->GetName(), ChunkIndex, Chunk.SequenceLength, Chunk.BulkData.GetBulkDataOffsetInFile(), Chunk.BulkData.GetBulkDataSize(), *Chunk.BulkData.GetDebugName());
 			ChunkStorage.IORequest = Chunk.BulkData.CreateStreamingRequest(AsyncIOPriority, &AsyncFileCallBack, nullptr);
 			if (!ChunkStorage.IORequest)
 			{
@@ -243,12 +245,12 @@ bool FStreamingAnimationData::BlockTillAllRequestsFinished(float TimeLimit)
 	}
 	else
 	{
-		double EndTime = FPlatformTime::Seconds() + TimeLimit;
+		const double EndTime = FPlatformTime::Seconds() + TimeLimit;
 		for (FLoadedAnimationChunk& LoadedChunk : LoadedChunks)
 		{
 			if (LoadedChunk.IORequest)
 			{
-				float ThisTimeLimit = EndTime - FPlatformTime::Seconds();
+				const float ThisTimeLimit = static_cast<float>(EndTime - FPlatformTime::Seconds());
 				if (ThisTimeLimit < .001f || // one ms is the granularity of the platform event system
 					!LoadedChunk.IORequest->WaitCompletion(ThisTimeLimit))
 				{
@@ -345,7 +347,7 @@ void FAnimationStreamingManager::OnAsyncFileCallback(FStreamingAnimationData* St
 
 		FCompressedAnimSequence* NewCompressedData = new FCompressedAnimSequence();
 
-		TArrayView<const uint8> MemView(Mem, ReadSize);
+		FMemoryView MemView(Mem, ReadSize);
 		FMemoryReaderView Reader(MemView);
 
 		UAnimStreamable* Anim = StreamingAnimData->StreamableAnim;
@@ -391,7 +393,7 @@ SIZE_T FAnimationStreamingManager::GetMemorySizeForAnim(const UAnimStreamable* A
 
 void FAnimationStreamingManager::UpdateResourceStreaming(float DeltaTime, bool bProcessEverything /*= false*/)
 {
-	LLM_SCOPE(ELLMTag::Audio);
+	LLM_SCOPE(ELLMTag::Animation);
 
 	FScopeLock Lock(&CriticalSection);
 
@@ -418,10 +420,10 @@ int32 FAnimationStreamingManager::BlockTillAllRequestsFinished(float TimeLimit, 
 		}
 		else
 		{
-			double EndTime = FPlatformTime::Seconds() + TimeLimit;
+			const double EndTime = FPlatformTime::Seconds() + TimeLimit;
 			for (TPair<UAnimStreamable*, FStreamingAnimationData*>& AnimPair : StreamingAnimations)
 			{
-				float ThisTimeLimit = EndTime - FPlatformTime::Seconds();
+				const float ThisTimeLimit = static_cast<float>(EndTime - FPlatformTime::Seconds());
 				if (ThisTimeLimit < .001f || // one ms is the granularity of the platform event system
 					!AnimPair.Value->BlockTillAllRequestsFinished(ThisTimeLimit))
 				{
@@ -433,9 +435,6 @@ int32 FAnimationStreamingManager::BlockTillAllRequestsFinished(float TimeLimit, 
 
 		return Result;
 	}
-
-	// Not sure yet whether this will work the same as textures - aside from just before destroying
-	return 0;
 }
 
 void FAnimationStreamingManager::CancelForcedResources()

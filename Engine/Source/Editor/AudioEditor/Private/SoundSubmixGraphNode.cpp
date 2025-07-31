@@ -1,14 +1,111 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "SoundSubmixGraph/SoundSubmixGraphNode.h"
+
+#include "Audio/AudioWidgetSubsystem.h"
+#include "Audio/SoundSubmixWidgetInterface.h"
+#include "Blueprint/UserWidget.h"
+#include "Containers/Array.h"
+#include "Containers/EnumAsByte.h"
+#include "EdGraph/EdGraph.h"
+#include "EdGraph/EdGraphPin.h"
+#include "EdGraph/EdGraphSchema.h"
+#include "Editor.h"
+#include "Editor/EditorEngine.h"
+#include "Engine/Engine.h"
+#include "HAL/PlatformMath.h"
+#include "Internationalization/Internationalization.h"
+#include "Layout/Margin.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/Attribute.h"
+#include "SlotBase.h"
 #include "Sound/SoundSubmix.h"
-#include "SoundSubmixGraph/SoundSubmixGraphSchema.h"
-#include "SoundSubmixGraph/SoundSubmixGraph.h"
-#include "Toolkits/AssetEditorManager.h"
-#include "SoundSubmixEditor.h"
 #include "SoundSubmixDefaultColorPalette.h"
+#include "SoundSubmixEditor.h"
+#include "SoundSubmixGraph/SoundSubmixGraph.h"
+#include "SoundSubmixGraph/SoundSubmixGraphSchema.h"
+#include "Styling/AppStyle.h"
+#include "Subsystems/AssetEditorSubsystem.h"
+#include "Templates/Casts.h"
+#include "Types/SlateEnums.h"
+#include "Widgets/Layout/SBorder.h"
+#include "Widgets/SBoxPanel.h"
+
+class SWidget;
+class UWorld;
+
 
 #define LOCTEXT_NAMESPACE "SoundSubmixGraphNode"
+
+
+void SSubmixGraphNode::Construct(const FArguments& InArgs, UEdGraphNode* InGraphNode)
+{
+	SubmixBase = InArgs._SubmixBase;
+	SubmixNodeUserWidget = InArgs._SubmixNodeUserWidget;
+
+	if (SubmixNodeUserWidget.IsValid())
+	{
+		ISoundSubmixWidgetInterface::Execute_OnConstructed(SubmixNodeUserWidget.Get(), SubmixBase.Get());
+	}
+	GraphNode = InGraphNode;
+	UpdateGraphNode();
+}
+
+TSharedRef<SWidget> SSubmixGraphNode::CreateNodeContentArea()
+{	
+	if (SubmixNodeUserWidget.IsValid())
+	{
+		// NODE CONTENT AREA
+		return SNew(SBorder)
+			.BorderImage(FAppStyle::GetBrush("NoBorder"))
+			.HAlign(HAlign_Fill)
+			.VAlign(VAlign_Fill)
+			.Padding(FMargin(0, 3))
+			[
+				SNew(SVerticalBox)
+				+ SVerticalBox::Slot()
+				.AutoHeight()
+				[
+					SNew(SHorizontalBox)
+					+ SHorizontalBox::Slot()
+					.HAlign(HAlign_Left)
+					.FillWidth(1.0f)
+					[
+						// LEFT
+						SAssignNew(LeftNodeBox, SVerticalBox)
+					]
+					+ SHorizontalBox::Slot()
+					.AutoWidth()
+					.HAlign(HAlign_Right)
+					[
+						// RIGHT
+						SAssignNew(RightNodeBox, SVerticalBox)
+					]
+
+				]
+
+				+ SVerticalBox::Slot()
+				.AutoHeight()
+				[
+					SNew(SHorizontalBox)
+					+ SHorizontalBox::Slot()
+					.HAlign(HAlign_Left)
+					.FillWidth(1.0f)
+					[
+						SubmixNodeUserWidget->TakeWidget()
+					]
+				]
+			]
+		;
+	}
+	else
+	{
+		return SGraphNode::CreateNodeContentArea();
+	}
+
+}
+
+
 
 USoundSubmixGraphNode::USoundSubmixGraphNode(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -134,4 +231,33 @@ FText USoundSubmixGraphNode::GetNodeTitle(ENodeTitleType::Type TitleType) const
 		return Super::GetNodeTitle(TitleType);
 	}
 }
+
+TSharedPtr<SGraphNode> USoundSubmixGraphNode::CreateVisualWidget()
+{
+	if (UWorld* World = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr)
+	{
+		if (USoundSubmixBase* SubmixBase = Cast<USoundSubmixBase>(SoundSubmix))
+		{
+			if (UAudioWidgetSubsystem* AudioWidgetSubsystem = GEngine ? GEngine->GetEngineSubsystem<UAudioWidgetSubsystem>() : nullptr)
+			{
+				TArray<UUserWidget*> UserWidgets = AudioWidgetSubsystem->CreateUserWidgets(*World, USoundSubmixWidgetInterface::StaticClass());
+				if (!UserWidgets.IsEmpty())
+				{
+					// For now, only supports single widget. Gallery system to be implemented to support
+					// showing multiple widgets and/or cycling node widgets.
+					SubmixNodeUserWidget = UserWidgets[0];
+				}
+			}
+
+			// Pass the owning submix and the user widgets to the graph node
+			return SNew(SSubmixGraphNode, this)
+				.SubmixBase(SubmixBase)
+				.SubmixNodeUserWidget(SubmixNodeUserWidget);
+		}
+	}
+
+	return nullptr;
+}
+
+
 #undef LOCTEXT_NAMESPACE

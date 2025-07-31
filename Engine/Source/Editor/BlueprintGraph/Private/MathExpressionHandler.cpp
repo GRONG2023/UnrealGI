@@ -1,14 +1,42 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "MathExpressionHandler.h"
-#include "UObject/UnrealType.h"
-#include "UObject/Interface.h"
-#include "K2Node_MathExpression.h"
-#include "Engine/BlueprintGeneratedClass.h"
-#include "K2Node_CallFunction.h"
-#include "K2Node_VariableGet.h"
+
+#include "BPTerminal.h"
+#include "BlueprintCompiledStatement.h"
+#include "Containers/Array.h"
+#include "Containers/EnumAsByte.h"
+#include "Containers/IndirectArray.h"
+#include "Containers/UnrealString.h"
+#include "EdGraph/EdGraph.h"
+#include "EdGraph/EdGraphNode.h"
+#include "EdGraph/EdGraphPin.h"
+#include "EdGraphSchema_K2.h"
 #include "EdGraphUtilities.h"
+#include "Engine/BlueprintGeneratedClass.h"
+#include "HAL/Platform.h"
+#include "HAL/PlatformCrt.h"
+#include "Internationalization/Internationalization.h"
+#include "Internationalization/Text.h"
+#include "K2Node_CallFunction.h"
+#include "K2Node_MathExpression.h"
+#include "K2Node_Tunnel.h"
+#include "K2Node_VariableGet.h"
+#include "Kismet/KismetMathLibrary.h"
+#include "Kismet2/CompilerResultsLog.h"
+#include "KismetCastingUtils.h"
+#include "KismetCompiledFunctionContext.h"
 #include "KismetCompiler.h"
+#include "Misc/AssertionMacros.h"
+#include "Templates/Casts.h"
+#include "UObject/Class.h"
+#include "UObject/Field.h"
+#include "UObject/Interface.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/Script.h"
+#include "UObject/UObjectBaseUtility.h"
+#include "UObject/UnrealType.h"
 
 #define LOCTEXT_NAMESPACE "KCHandler_MathExpression"
 
@@ -83,9 +111,9 @@ FBlueprintCompiledStatement* FKCHandler_MathExpression::GenerateFunctionRPN(UEdG
 		FProperty* Property = *It;
 		if (Property && !Property->HasAnyPropertyFlags(CPF_ReturnParm | CPF_OutParm))
 		{
+			UEdGraphPin* PinMatch = CallFunctionNode->FindPin(Property->GetFName());
 			UEdGraphPin* PinToTry = nullptr;
 			{
-				UEdGraphPin* PinMatch = CallFunctionNode->FindPin(Property->GetFName());
 				const bool bGoodPin = PinMatch && FKismetCompilerUtilities::IsTypeCompatibleWithProperty(PinMatch, Property, CompilerContext.MessageLog, CompilerContext.GetSchema(), Context.NewClass);
 				PinToTry = bGoodPin ? FEdGraphUtilities::GetNetFromPin(PinMatch) : nullptr;
 			}
@@ -129,6 +157,47 @@ FBlueprintCompiledStatement* FKCHandler_MathExpression::GenerateFunctionRPN(UEdG
 
 			if (RHSTerm)
 			{
+				using namespace UE::KismetCompiler;
+
+				const CastingUtils::FImplicitCastParams* CastParams =
+					Context.ImplicitCastMap.Find(PinMatch);
+
+				if (CastParams)
+				{
+					check(CastParams->TargetTerminal);
+
+					UFunction* CastFunction = nullptr;
+
+					switch (CastParams->Conversion.Type)
+					{
+					case CastingUtils::FloatingPointCastType::DoubleToFloat:
+						CastFunction = 
+							UKismetMathLibrary::StaticClass()->FindFunctionByName(GET_FUNCTION_NAME_CHECKED(UKismetMathLibrary, Conv_DoubleToFloat));
+						break;
+
+					case CastingUtils::FloatingPointCastType::FloatToDouble:
+						CastFunction = 
+							UKismetMathLibrary::StaticClass()->FindFunctionByName(GET_FUNCTION_NAME_CHECKED(UKismetMathLibrary, Conv_FloatToDouble));
+						break;
+
+					default:
+						checkf(false, TEXT("Unsupported cast type used in math expression node: %d"), CastParams->Conversion.Type);
+					}
+
+					check(CastFunction);
+
+					FBlueprintCompiledStatement* CastStatement = new FBlueprintCompiledStatement();
+					CastStatement->FunctionToCall = CastFunction;
+					CastStatement->Type = KCST_CallFunction;
+					CastStatement->RHS.Add(RHSTerm);
+
+					RHSTerm = CastParams->TargetTerminal;
+					CastParams->TargetTerminal->InlineGeneratedParameter = CastStatement;
+					Context.AllGeneratedStatements.Add(CastStatement);
+
+					CastingUtils::RemoveRegisteredImplicitCast(Context, PinMatch);
+				}
+
 				RHSTerms.Add(RHSTerm);
 			}
 			else
@@ -143,6 +212,8 @@ FBlueprintCompiledStatement* FKCHandler_MathExpression::GenerateFunctionRPN(UEdG
 
 void FKCHandler_MathExpression::RegisterNets(FKismetFunctionContext& Context, UEdGraphNode* InNode)
 {
+	using namespace UE::KismetCompiler;
+
 	FNodeHandlingFunctor::RegisterNets(Context, InNode);
 
 	UK2Node_MathExpression* Node_MathExpression = CastChecked<UK2Node_MathExpression>(InNode);
@@ -190,6 +261,51 @@ void FKCHandler_MathExpression::RegisterNets(FKismetFunctionContext& Context, UE
 			}
 		}
 	}
+
+	// We have two nodes that handle input: the math expression node and the inner entry node.
+	// For any pins connected to the entry node, we need to compare their types to the nets
+	// of the math expression node. 
+	// 
+	// This is a fairly convoluted scenario that RegisterImplicitCasts fails to detect,
+	// and it only affects pins connected to the inner entry node.
+
+	int EntryNodeCursor = 0;
+	for (UEdGraphPin* Pin : Node_MathExpression->Pins)
+	{
+		if (Pin && (Pin->Direction == EEdGraphPinDirection::EGPD_Input))
+		{
+			UEdGraphPin* PinNet = FEdGraphUtilities::GetNetFromPin(Pin);
+			if (PinNet)
+			{
+				UEdGraphPin* InnerEntryNodePin = InnerEntryNode->Pins[EntryNodeCursor];
+				if (InnerEntryNodePin && (InnerEntryNodePin->GetName() == Pin->GetName()))
+				{
+					for (UEdGraphPin* DestinationPin : InnerEntryNodePin->LinkedTo)
+					{
+						if (DestinationPin)
+						{
+							CastingUtils::FConversion Conversion =
+								CastingUtils::GetFloatingPointConversion(*PinNet, *DestinationPin);
+
+							if (Conversion.Type != CastingUtils::FloatingPointCastType::None)
+							{
+								FBPTerminal* NewTerm = CastingUtils::MakeImplicitCastTerminal(Context, DestinationPin);
+								UEdGraphNode* OwningNode = DestinationPin->GetOwningNode();
+
+								Context.ImplicitCastMap.Add(DestinationPin, CastingUtils::FImplicitCastParams{Conversion, NewTerm, OwningNode});
+							}
+						}
+					}
+				}
+				else
+				{
+					Context.MessageLog.Error(*LOCTEXT("Compile_PinMismatchError", "ICE - mismatched pins found on @@ and @@!").ToString(), Node_MathExpression, InnerEntryNode);
+				}
+			}
+
+			++EntryNodeCursor;
+		}
+	}
 }
 
 void FKCHandler_MathExpression::RegisterNet(FKismetFunctionContext& Context, UEdGraphPin* Net) 
@@ -208,7 +324,7 @@ void FKCHandler_MathExpression::Compile(FKismetFunctionContext& Context, UEdGrap
 
 	if (!InnerExitNode || !InnerEntryNode || (InnerExitNode->Pins.Num() != 1) || ((InnerExitNode->Pins.Num() + InnerEntryNode->Pins.Num()) != Node->Pins.Num()))
 	{
-		Context.MessageLog.Error(*LOCTEXT("Compile_PinError", "ICE - wrong inner pins - @@").ToString(), Node);
+		Context.MessageLog.Error(*LOCTEXT("Compile_WrongInnerPinError", "ICE - wrong inner pins - @@").ToString(), Node);
 		return;
 	}
 
@@ -239,9 +355,24 @@ void FKCHandler_MathExpression::Compile(FKismetFunctionContext& Context, UEdGrap
 	FBlueprintCompiledStatement* DetachedStatement = GenerateFunctionRPN(LastInnerNode, Context, *Node_MathExpression, OutputTerm, InnerToOuterInput);
 	if (DetachedStatement)
 	{
+		using namespace UE::KismetCompiler;
+	
 		Context.AllGeneratedStatements.Add(DetachedStatement);
 		TArray<FBlueprintCompiledStatement*>& StatementList = Context.StatementsPerNode.FindOrAdd(Node);
 		StatementList.Add(DetachedStatement);
+
+		// The casts that we care about occur *within* the nodes generated by the math expression.
+		// The expression node merely serves as a proxy, so we can silently remove the casts
+		// on the input pins that were registered by the compiler.
+
+		for (UEdGraphPin* Pin : Node_MathExpression->Pins)
+		{
+			check(Pin);
+			if (!Context.Schema->IsMetaPin(*Pin) && (Pin->Direction == EGPD_Input))
+			{
+				CastingUtils::RemoveRegisteredImplicitCast(Context, Pin);
+			}
+		}
 	}
 	else
 	{

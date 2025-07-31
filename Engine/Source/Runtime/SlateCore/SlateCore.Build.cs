@@ -6,34 +6,24 @@ public class SlateCore : ModuleRules
 {
 	public SlateCore(ReadOnlyTargetRules Target) : base(Target)
 	{
+		PrivateDefinitions.Add("UE_REPORT_SLATE_VECTOR_DEPRECATION=1");
+
 		PublicDependencyModuleNames.AddRange(
 			new string[] {
 				"Core",
 				"CoreUObject",
+				"DeveloperSettings",
 				"InputCore",
-				"ApplicationCore",
 				"Json",
 				"TraceLog",
 			});
 
-		PrivateIncludePaths.AddRange(
-			new string[] {
-				"Runtime/SlateCore/Private",
-				"Runtime/SlateCore/Private/Animation",
-				"Runtime/SlateCore/Private/Application",
-				"Runtime/SlateCore/Private/Brushes",
-				"Runtime/SlateCore/Private/Fonts",
-				"Runtime/SlateCore/Private/Input",
-				"Runtime/SlateCore/Private/Layout",
-				"Runtime/SlateCore/Private/Rendering",
-				"Runtime/SlateCore/Private/Sound",
-				"Runtime/SlateCore/Private/Styling",
-				"Runtime/SlateCore/Private/Textures",
-				"Runtime/SlateCore/Private/Types",
-				"Runtime/SlateCore/Private/Widgets",
-			});
+		if (Target.bCompileAgainstApplicationCore)
+		{
+			PublicDependencyModuleNames.Add("ApplicationCore");
+		}
 
-        if (Target.Type != TargetType.Server)
+		if (Target.Type != TargetType.Server)
 		{
 			if (Target.bCompileFreeType)
 			{
@@ -51,6 +41,7 @@ public class SlateCore : ModuleRules
 			}
 
 			AddEngineThirdPartyPrivateStaticDependencies(Target, "HarfBuzz");
+			AddEngineThirdPartyPrivateStaticDependencies(Target, "Nanosvg");
 		}
 		else
 		{
@@ -58,8 +49,7 @@ public class SlateCore : ModuleRules
 			PublicDefinitions.Add("WITH_HARFBUZZ=0");
 		}
 
-		if ((Target.Platform == UnrealTargetPlatform.Win64) ||
-			(Target.Platform == UnrealTargetPlatform.Win32))
+		if (Target.Platform == UnrealTargetPlatform.Win64)
 		{
 			AddEngineThirdPartyPrivateStaticDependencies(Target, "XInput");
 		}

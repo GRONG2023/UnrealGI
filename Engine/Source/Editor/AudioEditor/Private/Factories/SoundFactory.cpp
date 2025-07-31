@@ -1,8 +1,9 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Factories/SoundFactory.h"
-#include "AssetRegistryModule.h"
+#include "AssetRegistry/AssetRegistryModule.h"
 #include "Audio.h"
+#include "AudioAnalytics.h"
 #include "Components/AudioComponent.h"
 #include "ContentBrowserModule.h"
 #include "IContentBrowserSingleton.h"
@@ -22,10 +23,53 @@
 #include "EditorFramework/AssetImportData.h"
 #include "AudioCompressionSettingsUtils.h"
 #include "SoundFileIO/SoundFileIO.h"
+#include "Misc/NamePermissionList.h"
+#include "AssetToolsModule.h"
+#include "IAssetTools.h"
+#include "Math/NumericLimits.h"
+
+// Disable user import
+static int32 EnableUserSoundwaveImportCvar = 1;
+FAutoConsoleVariableRef CVarEnableUserSoundwaveImport(
+	TEXT("au.EnableUserSoundwaveImport"),
+	EnableUserSoundwaveImportCvar,
+	TEXT("Enables letting the user import soundwaves in editor.\n")
+	TEXT("0: Disabled, 1: Enabled"),
+	ECVF_Default);
+
+static float SoundWaveImportLengthLimitInSecondsCVar = -1.f;
+FAutoConsoleVariableRef CVarSoundWaveImportLengthLimitInSeconds(
+	TEXT("au.SoundWaveImportLengthLimitInSeconds"),
+	SoundWaveImportLengthLimitInSecondsCVar,
+	TEXT("When set to a value > 0.0f, Soundwaves with durations greater than the value will fail to import.\n")
+	TEXT("if the value is < 0.0f, the length will be unlimited"),
+	ECVF_Default);
 
 
 namespace
 {
+
+	bool CanImportSoundWaves()
+	{
+		// disabled via cvar?
+		if(EnableUserSoundwaveImportCvar == 0)
+		{
+			return false;
+		}
+
+		IAssetTools& AssetTools = FAssetToolsModule::GetModule().Get();
+		TSharedPtr<FPathPermissionList> AssetClassPermissionList = AssetTools.GetAssetClassPathPermissionList(EAssetClassAction::ImportAsset);
+		if (AssetClassPermissionList && AssetClassPermissionList->HasFiltering())
+		{
+			if (!AssetClassPermissionList->PassesFilter(USoundWave::StaticClass()->GetPathName()))
+			{
+				return false;
+			}
+		}
+
+		return true;
+	}
+
 	void InsertSoundNode(USoundCue* SoundCue, UClass* NodeClass, int32 NodeIndex)
 	{
 		USoundNode* SoundNode = SoundCue->ConstructSoundNode<USoundNode>(NodeClass);
@@ -105,8 +149,11 @@ USoundFactory::USoundFactory(const FObjectInitializer& ObjectInitializer)
 
 #if WITH_SNDFILE_IO
 	Formats.Add(TEXT("aif;Audio Interchange File"));
+	Formats.Add(TEXT("aiff;Audio Interchange File Format"));
 	Formats.Add(TEXT("ogg;OGG Vorbis bitstream format "));
 	Formats.Add(TEXT("flac;Free Lossless Audio Codec"));
+	Formats.Add(TEXT("opus;OGG OPUS bitstream format"));
+	Formats.Add(TEXT("mp3;MPEG Layer 3 Audio"));
 #endif // WITH_SNDFILE_IO
 
 	bCreateNew = false;
@@ -134,6 +181,16 @@ UObject* USoundFactory::FactoryCreateBinary
 {
 	GEditor->GetEditorSubsystem<UImportSubsystem>()->BroadcastAssetPreImport(this, Class, InParent, Name, FileType);
 
+	{ // Refuse to accept big files. We currently use TArray<> which will fail if we go over an int32.
+		const uint64 Size = BufferEnd - Buffer;
+		if (!IntFitsIn<int32>(Size))
+		{
+			Warn->Logf(ELogVerbosity::Error, TEXT("File '%s' is too big (%umb), Max=%umb"), *Name.ToString(), Size>>20, TNumericLimits<int32>::Max()>>20);
+			GEditor->GetEditorSubsystem<UImportSubsystem>()->BroadcastAssetPostImport(this, nullptr);
+			return nullptr;
+		}
+	}
+
 	UObject* SoundObject = nullptr;
 
 	// First, see if we support this file type in-engine:
@@ -152,7 +209,7 @@ UObject* USoundFactory::FactoryCreateBinary
 
 		// Convert audio data to a wav file in memory
 		TArray<uint8> RawWaveData;
-		if (Audio::ConvertAudioToWav(RawAudioData, RawWaveData))
+		if (Audio::SoundFileUtils::ConvertAudioToWav(RawAudioData, RawWaveData))
 		{
 			const uint8* Ptr = &RawWaveData[0];
 
@@ -165,9 +222,8 @@ UObject* USoundFactory::FactoryCreateBinary
 
 	if (!SoundObject)
 	{
-		// Unrecognized sound format
-		Warn->Logf(ELogVerbosity::Error, TEXT("Unrecognized sound format '%s' in %s"), FileType, *Name.ToString());
-		GEditor->GetEditorSubsystem<UImportSubsystem>()->BroadcastAssetPostImport(this, nullptr);
+		// Inform user we failed to create the sound wave
+		Warn->Logf(ELogVerbosity::Error, TEXT("Failed to import sound wave %s"), *Name.ToString());
 	}
 
 	return SoundObject;
@@ -212,6 +268,14 @@ UObject* USoundFactory::CreateObject
 			}
 		}
 
+		if (!CanImportSoundWaves())
+		{
+			FMessageDialog::Open(EAppMsgType::Ok, FText::Format(NSLOCTEXT("SoundFactory", "Soundwave Import Not Allowed", "Soundwave import is not allowed ({0}: {1})"), FText::FromString(CuePackageName), Reason));
+			GEditor->GetEditorSubsystem<UImportSubsystem>()->BroadcastAssetPostImport(this, nullptr);
+			return nullptr;
+		}
+
+
 		// if we are creating the cue move it when necessary
 		UPackage* CuePackage = bMoveCue ? CreatePackage( *CuePackageName) : nullptr;
 
@@ -225,21 +289,13 @@ UObject* USoundFactory::CreateObject
 			// Will block internally on audio thread completing outstanding commands
 			AudioDeviceManager->StopSoundsUsingResource(ExistingSound, &ComponentsToRestart);
 
-			// We need to clear out any stale multichannel data on the sound wave in the case this is a reimport from multichannel to mono/stereo
-			ExistingSound->ChannelOffsets.Reset();
-			ExistingSound->ChannelSizes.Reset();
-			ExistingSound->bIsAmbisonics = false;
-
 			// Resource data is required to exist, if it hasn't been loaded yet,
 			// to properly flush compressed data.  This allows the new version
 			// to be auditioned in the editor properly.
-			if (!ExistingSound->ResourceData)
+			if (!ExistingSound->GetResourceData())
 			{
-				if (FAudioDeviceHandle AudioDevice = GEngine->GetMainAudioDevice())
-				{
-					FName RuntimeFormat = AudioDevice->GetRuntimeFormat(ExistingSound);
-					ExistingSound->InitAudioResource(RuntimeFormat);
-				}
+				FName RuntimeFormat = ExistingSound->GetRuntimeFormat();
+				ExistingSound->InitAudioResource(RuntimeFormat);
 			}
 
 			if (ComponentsToRestart.Num() > 0)
@@ -319,19 +375,26 @@ UObject* USoundFactory::CreateObject
 			return nullptr;
 		}
 
-		if (*WaveInfo.pBitsPerSample != 16)
+		// If we need to change bit depth, or if the format is not something we know, use libsndfile.
+		if (*WaveInfo.pBitsPerSample != 16 || !WaveInfo.IsFormatSupported()) 
 		{
 #if WITH_SNDFILE_IO
+			const uint32 OrigNumSamples = Audio::SoundFileUtils::GetNumSamples(RawWaveData);
+
 			// Attempt to convert to 16 bit audio
-			if (Audio::ConvertAudioToWav(RawWaveData, ConvertedRawWaveData))
+			if (Audio::SoundFileUtils::ConvertAudioToWav(RawWaveData, ConvertedRawWaveData))
 			{
-				WaveInfo = FWaveModInfo();
+				WaveInfo = FWaveModInfo();				
 				if (!WaveInfo.ReadWaveInfo(ConvertedRawWaveData.GetData(), ConvertedRawWaveData.Num(), &ErrorMessage))
 				{
 					Warn->Logf(ELogVerbosity::Error, TEXT("Failed to convert to 16 bit WAV source on import."));
 					GEditor->GetEditorSubsystem<UImportSubsystem>()->BroadcastAssetPostImport(this, nullptr);
 					return nullptr;
 				}
+
+				// Sanity check that the same number of samples exist in the converted file as the original
+				const uint32 ConvertedNumSamples = WaveInfo.GetNumSamples();
+				ensure(ConvertedNumSamples == OrigNumSamples);
 			}
 
 			// Copy over the data
@@ -361,17 +424,25 @@ UObject* USoundFactory::CreateObject
 		// otherwise create new sound and import raw data.
 		USoundWave* Sound = (bUseExistingSettings && ExistingSound) ? ExistingSound : NewObject<USoundWave>(InParent, Name, Flags, TemplateSoundWave.Get());
 
+		// If we're a multi-channel file, we're going to spoof the behavior of the SoundSurroundFactory
+		int32 ChannelCount = (int32)*WaveInfo.pChannels;
+		check(ChannelCount >0);
+
 		// These get wiped in PostInitProperties by defaults set from Audio Settings,
 		// so set back to template in this specialized case
 		if (TemplateSoundWave.IsValid())
 		{
 			Sound->SoundClassObject = TemplateSoundWave->SoundClassObject;
 			Sound->ConcurrencySet = TemplateSoundWave->ConcurrencySet;
-		}
+			Sound->CompressionQuality = TemplateSoundWave->CompressionQuality;
+			Sound->SoundAssetCompressionType = TemplateSoundWave->SoundAssetCompressionType;
 
-		// If we're a multi-channel file, we're going to spoof the behavior of the SoundSurroundFactory
-		int32 ChannelCount = (int32)*WaveInfo.pChannels;
-		check(ChannelCount >0);
+			// we do not want to inherit these values from the template, as the data may be incorrect
+			// rather we re-parse them from the incoming file.
+			Sound->NumChannels = 0;
+			Sound->ChannelOffsets.Reset();
+			Sound->ChannelSizes.Reset();
+		}
 
 		int32 SizeOfSample = (*WaveInfo.pBitsPerSample) / 8;
 
@@ -470,45 +541,146 @@ UObject* USoundFactory::CreateObject
 			// copy the data into the bulk byte data
 
 			// Get the raw data bulk byte pointer and copy over the .wav files we generated
-			Sound->RawData.Lock(LOCK_READ_WRITE);
 
-			uint8* LockedData = (uint8*)Sound->RawData.Realloc(TotalSize);
+			FUniqueBuffer EditableBuffer = FUniqueBuffer::Alloc(TotalSize);
+			uint8* LockedData = (uint8*)EditableBuffer.GetData();
+			int16* LockedDataInt16 = reinterpret_cast<int16*>(LockedData);
+
 			int32 RawDataOffset = 0;
 
 
 			if (bIsAmbiX || bIsFuMa)
 			{
 				check(ChannelCount == 4);
-
 				// Flag that this is an ambisonics file
 				Sound->bIsAmbisonics = true;
 			}
-			for (int32 Chan = 0; Chan < ChannelCount; ++Chan)
+			if (bIsFuMa)
 			{
-				const int32 ChannelSize = RawChannelWaveData[Chan].Num();
-				FMemory::Memcpy(LockedData + RawDataOffset, RawChannelWaveData[Chan].GetData(), ChannelSize);
-				RawDataOffset += ChannelSize;
+				int32 FuMaChannelIndices[4] = { 0, 2, 3, 1 };
+				const float ScalerPlus3dB = Audio::ConvertToLinear(3.0f);
+
+				for (int32 ChannelIndex : FuMaChannelIndices)
+				{
+					const int32 ChannelSize = RawChannelWaveData[ChannelIndex].Num();
+					FMemory::Memcpy(LockedData + RawDataOffset, RawChannelWaveData[ChannelIndex].GetData(), ChannelSize);
+					RawDataOffset += ChannelSize;
+
+//  TODO: make sure this isn't already being done somewhere else, conversion sounds wrong when gain is applied
+					// scale zeroth channel
+//					if (ChannelIndex == 0)
+//					{
+// 						for (int32 i = 0; i < ChannelSize; ++i)
+// 						{
+// 							LockedData[i] = static_cast<int16>(static_cast<float>(LockedData[i]) * ScalerPlus3dB);
+// 						}
+//					}
+				}
+			}
+			else
+			{
+				for (int32 Chan = 0; Chan < ChannelCount; ++Chan)
+				{
+					const int32 ChannelSize = RawChannelWaveData[Chan].Num();
+					FMemory::Memcpy(LockedData + RawDataOffset, RawChannelWaveData[Chan].GetData(), ChannelSize);
+					RawDataOffset += ChannelSize;
+				}
 			}
 
-			Sound->RawData.Unlock();
+			Sound->RawData.UpdatePayload(EditableBuffer.MoveToShared());
 		}
 		else
 		{
+			// If this sound existed previously, we need to clear out any stale multichannel data on the sound wave in the case this is a reimport from multichannel to mono/stereo
+			if (ExistingSound)
+			{
+				ExistingSound->ChannelOffsets.Reset();
+				ExistingSound->ChannelSizes.Reset();
+				ExistingSound->bIsAmbisonics = false;
+			}
+			
+
 			// For mono and stereo assets, just copy the data into the buffer
-			Sound->RawData.Lock(LOCK_READ_WRITE);
-			void* LockedData = Sound->RawData.Realloc(RawWaveDataBufferSize);
-			FMemory::Memcpy(LockedData, Buffer, RawWaveDataBufferSize);
-			Sound->RawData.Unlock();
+			// Clone directly as a param so that if anyone MoveToUniques it then its a steal not a copy.
+			Sound->RawData.UpdatePayload(FSharedBuffer::Clone(Buffer, RawWaveDataBufferSize));
+
 		}
 
 		Sound->Duration = (float)NumFrames / *WaveInfo.pSamplesPerSec;
+		Sound->SetImportedSampleRate(*WaveInfo.pSamplesPerSec);
 		Sound->SetSampleRate(*WaveInfo.pSamplesPerSec);
 		Sound->NumChannels = ChannelCount;
 		Sound->TotalSamples = *WaveInfo.pSamplesPerSec * Sound->Duration;
 
+		const bool bLimitingSoundWaveLength = SoundWaveImportLengthLimitInSecondsCVar > 0.0f; 
+		if (bLimitingSoundWaveLength && Sound->Duration >= SoundWaveImportLengthLimitInSecondsCVar)
+		{
+			FMessageDialog::Open(EAppMsgType::Ok, FText::Format(NSLOCTEXT("SoundFactory", "Soundwave is too long to import"
+				, "{0} is {1} seconds in duration (this is over the limit of {2} seconds) {3}")
+				, FText::FromString(CuePackageName), Sound->Duration, SoundWaveImportLengthLimitInSecondsCVar, Reason));
+				
+			GEditor->GetEditorSubsystem<UImportSubsystem>()->BroadcastAssetPostImport(this, nullptr);
+			return nullptr;			
+		}
+
 		// Store the current file path and timestamp for re-import purposes
 		Sound->AssetImportData->Update(CurrentFilename);
 
+		// Setup the cue points
+		int TotalNum = WaveInfo.WaveCues.Num() + WaveInfo.WaveSampleLoops.Num();
+		Sound->CuePoints.Reset(TotalNum);
+
+		// Start with WaveCues
+		for (FWaveCue& WaveCue : WaveInfo.WaveCues)
+		{
+			FSoundWaveCuePoint NewCuePoint;
+			NewCuePoint.CuePointID = (int32)WaveCue.CuePointID;
+			NewCuePoint.FrameLength = (int32)WaveCue.SampleLength;
+			NewCuePoint.FramePosition = (int32)WaveCue.Position;
+			NewCuePoint.Label = WaveCue.Label;
+			Sound->CuePoints.Add(NewCuePoint);
+		}
+
+		// add Sample Loops to end
+		bool FoundInvalidSampleLoops = false;
+		for (FWaveSampleLoop& SampleLoop : WaveInfo.WaveSampleLoops)
+		{
+			FSoundWaveCuePoint NewCuePoint;
+			NewCuePoint.bIsLoopRegion = true;
+			NewCuePoint.CuePointID = (int32)SampleLoop.LoopID;
+			NewCuePoint.FramePosition = (int32)SampleLoop.StartFrame;
+			NewCuePoint.FrameLength = (int32)SampleLoop.EndFrame - (int32)SampleLoop.StartFrame;
+			if (SampleLoop.EndFrame <= SampleLoop.StartFrame)
+			{
+				Warn->Logf(ELogVerbosity::Error, 
+					TEXT("Found invalid start and end frames when creating Cue Point from Sample Loop Region! LoopID = %d, StartFrame = %d, EndFrame = %d"), 
+					SampleLoop.LoopID, SampleLoop.StartFrame, SampleLoop.EndFrame);
+
+				FoundInvalidSampleLoops = true;
+			}
+			Sound->CuePoints.Add(NewCuePoint);
+		}
+
+		// fail import if we found invalid sample loops
+		// each invalid sample loop is logged
+		if (FoundInvalidSampleLoops)
+		{
+			FText InvalidSamplesText = NSLOCTEXT("SoundFactory", "Invalid Sample Loops", "Found sample loops with invalid start and end frames. See logs for more info.");
+			FMessageDialog::Open(EAppMsgType::Ok, FText::Format(NSLOCTEXT("SoundFactory", "Import Failed", "Import failed for {0}: {1}"), FText::FromString(Name.ToString()), InvalidSamplesText));
+			GEditor->GetEditorSubsystem<UImportSubsystem>()->BroadcastAssetPostImport(this, nullptr);
+			return nullptr;
+		}
+
+		// If we've read some time-code.
+		if (WaveInfo.TimecodeInfo)
+		{
+			Sound->SetTimecodeInfo(*WaveInfo.TimecodeInfo);
+		}
+		else
+		{
+			Sound->SetTimecodeInfo(FSoundWaveTimecodeInfo{});
+		}
+				
 		// Compressed data is now out of date.
 		const bool bRebuildStreamingChunks = FPlatformCompressionUtilities::IsCurrentPlatformUsingStreamCaching();
 		Sound->InvalidateCompressedData(true /* bFreeResources */, bRebuildStreamingChunks);
@@ -516,8 +688,10 @@ UObject* USoundFactory::CreateObject
 		// If stream caching is enabled, we need to make sure this asset is ready for playback.
 		if (bRebuildStreamingChunks && Sound->IsStreaming(nullptr))
 		{
-			Sound->EnsureZerothChunkIsLoaded();
+			Sound->LoadZerothChunk();
 		}
+
+		Sound->PostImport();
 
 		GEditor->GetEditorSubsystem<UImportSubsystem>()->BroadcastAssetPostImport(this, Sound);
 
@@ -538,9 +712,17 @@ UObject* USoundFactory::CreateObject
 			AudioComponent->Play();
 		}
 
-		Sound->bNeedsThumbnailGeneration = true;
+		Sound->SetRedrawThumbnail(true);
+
+		Audio::Analytics::RecordEvent_Usage(TEXT("SoundFactory.SoundWaveImported"));
 
 		return Sound;
+	}
+	else
+	{
+		// Unrecognized sound format
+		Warn->Logf(ELogVerbosity::Error, TEXT("Unrecognized sound format '%s' in %s"), FileType, *Name.ToString());
+		GEditor->GetEditorSubsystem<UImportSubsystem>()->BroadcastAssetPostImport(this, nullptr);
 	}
 
 	return nullptr;

@@ -1,37 +1,61 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "SBehaviorTreeBlackboardView.h"
-#include "SBehaviorTreeBlackboardEditor.h"
-#include "Styling/SlateBrush.h"
-#include "Fonts/SlateFontInfo.h"
-#include "Misc/Paths.h"
+
+#include "BehaviorTreeEditorDelegates.h"
+#include "AssetRegistry/AssetData.h"
+#include "AssetRegistry/AssetRegistryModule.h"
+#include "AssetRegistry/IAssetRegistry.h"
 #include "BehaviorTree/BehaviorTreeTypes.h"
+#include "BehaviorTree/Blackboard/BlackboardKeyType.h"
+#include "BehaviorTree/BlackboardAssetProvider.h"
 #include "BehaviorTree/BlackboardData.h"
-#include "Misc/ScopedSlowTask.h"
-#include "Modules/ModuleManager.h"
-#include "UObject/UObjectHash.h"
-#include "UObject/UnrealType.h"
-#include "UObject/UObjectIterator.h"
-#include "Widgets/SBoxPanel.h"
+#include "BehaviorTreeEditorCommands.h"
+#include "Editor/EditorPerProjectUserSettings.h"
+#include "Fonts/SlateFontInfo.h"
 #include "Framework/Commands/UIAction.h"
 #include "Framework/Commands/UICommandList.h"
-#include "Widgets/Layout/SBorder.h"
-#include "Widgets/Text/STextBlock.h"
-#include "Framework/MultiBox/MultiBoxDefs.h"
 #include "Framework/MultiBox/MultiBoxBuilder.h"
-#include "Editor/EditorPerProjectUserSettings.h"
-#include "EditorStyleSet.h"
+#include "Framework/MultiBox/MultiBoxDefs.h"
+#include "HAL/PlatformCrt.h"
+#include "HAL/PlatformMath.h"
+#include "Internationalization/Internationalization.h"
+#include "Layout/Children.h"
+#include "Layout/Margin.h"
+#include "Logging/LogCategory.h"
+#include "Logging/LogMacros.h"
+#include "Math/Color.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/AssetRegistryInterface.h"
+#include "Misc/Attribute.h"
+#include "Misc/ScopedSlowTask.h"
+#include "Modules/ModuleManager.h"
+#include "SBehaviorTreeBlackboardEditor.h"
 #include "SGraphActionMenu.h"
 #include "SGraphPalette.h"
-#include "BehaviorTree/BehaviorTree.h"
-#include "BehaviorTree/BlackboardAssetProvider.h"
-#include "Styling/SlateIconFinder.h"
-#include "Styling/CoreStyle.h"
 #include "ScopedTransaction.h"
-#include "BehaviorTreeEditorCommands.h"
+#include "SlotBase.h"
+#include "Styling/AppStyle.h"
+#include "Styling/CoreStyle.h"
+#include "Styling/SlateIconFinder.h"
+#include "Templates/Casts.h"
+#include "Trace/Detail/Channel.h"
+#include "UObject/Class.h"
+#include "UObject/Object.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/Package.h"
+#include "UObject/UObjectGlobals.h"
+#include "UObject/UObjectHash.h"
+#include "UObject/UObjectIterator.h"
+#include "UObject/UnrealType.h"
+#include "Widgets/Layout/SBorder.h"
+#include "Widgets/SBoxPanel.h"
 #include "Widgets/Text/SInlineEditableTextBlock.h"
-#include "ARFilter.h"
-#include "AssetRegistryModule.h"
+#include "Widgets/Text/STextBlock.h"
+
+class SWidget;
+struct FSlateBrush;
 
 #define LOCTEXT_NAMESPACE "SBehaviorTreeBlackboardView"
 
@@ -54,14 +78,14 @@ FName FEdGraphSchemaAction_BlackboardEntry::GetTypeId() const
 	return StaticGetTypeId(); 
 }
 
-FEdGraphSchemaAction_BlackboardEntry::FEdGraphSchemaAction_BlackboardEntry( UBlackboardData* InBlackboardData, FBlackboardEntry& InKey, bool bInIsInherited )
+FEdGraphSchemaAction_BlackboardEntry::FEdGraphSchemaAction_BlackboardEntry( TWeakObjectPtr<UBlackboardData> InBlackboardData, FBlackboardEntry& InKey, bool bInIsInherited )
 	: FEdGraphSchemaAction_Dummy()
 	, BlackboardData(InBlackboardData)
 	, Key(InKey)
 	, bIsInherited(bInIsInherited)
 	, bIsNew(false)
 {
-	check(BlackboardData);
+	check(BlackboardData.IsValid());
 	Update();
 }
 
@@ -78,7 +102,6 @@ class SBehaviorTreeBlackboardItem : public SGraphPaletteItem
 		SLATE_EVENT(FOnGetDebugKeyValue, OnGetDebugKeyValue)
 		SLATE_EVENT(FOnGetDisplayCurrentState, OnGetDisplayCurrentState)
 		SLATE_EVENT(FOnIsDebuggerReady, OnIsDebuggerReady)
-		SLATE_EVENT(FOnBlackboardKeyChanged, OnBlackboardKeyChanged)
 
 	SLATE_END_ARGS()
 
@@ -87,7 +110,6 @@ class SBehaviorTreeBlackboardItem : public SGraphPaletteItem
 		OnGetDebugKeyValue = InArgs._OnGetDebugKeyValue;
 		OnIsDebuggerReady = InArgs._OnIsDebuggerReady;
 		OnGetDisplayCurrentState = InArgs._OnGetDisplayCurrentState;
-		OnBlackboardKeyChanged = InArgs._OnBlackboardKeyChanged;
 
 		const FSlateFontInfo NameFont = FCoreStyle::GetDefaultFontStyle("Regular", 10);
 
@@ -100,11 +122,11 @@ class SBehaviorTreeBlackboardItem : public SGraphPaletteItem
 
 		ActionPtr = InCreateData->Action;
 		
-		FSlateBrush const* IconBrush   = FEditorStyle::GetBrush(TEXT("NoBrush"));
+		FSlateBrush const* IconBrush   = FAppStyle::GetBrush(TEXT("NoBrush"));
 		GetPaletteItemIcon(GraphAction, IconBrush);
 
 		TSharedRef<SWidget> IconWidget = CreateIconWidget( GraphAction->GetTooltipDescription(), IconBrush, FLinearColor::White );
-		TSharedRef<SWidget> NameSlotWidget = CreateTextSlotWidget( NameFont, InCreateData, BlackboardEntryAction->bIsInherited );
+		TSharedRef<SWidget> NameSlotWidget = CreateTextSlotWidget(InCreateData, BlackboardEntryAction->bIsInherited );
 		TSharedRef<SWidget> DebugSlotWidget = CreateDebugSlotWidget( NameFont );
 
 		// Create the actual widget
@@ -151,7 +173,7 @@ private:
 		}
 	}
 
-	virtual TSharedRef<SWidget> CreateTextSlotWidget( const FSlateFontInfo& NameFont, FCreateWidgetForActionData* const InCreateData, TAttribute<bool> bInIsReadOnly ) override
+	virtual TSharedRef<SWidget> CreateTextSlotWidget(FCreateWidgetForActionData* const InCreateData, TAttribute<bool> bInIsReadOnly ) override
 	{
 		check(InCreateData);
 
@@ -169,7 +191,6 @@ private:
 		InlineRenameWidget =
 			SAssignNew(DisplayWidget, SInlineEditableTextBlock)
 			.Text(this, &SBehaviorTreeBlackboardItem::GetDisplayText)
-			.Font(NameFont)
 			.HighlightText(InCreateData->HighlightText)
 			.ToolTipText(this, &SBehaviorTreeBlackboardItem::GetItemTooltip)
 			.OnTextCommitted(this, &SBehaviorTreeBlackboardItem::OnNameTextCommitted)
@@ -206,41 +227,45 @@ private:
 		if(NewName != OldName)
 		{
 			TArray<UObject*> ExternalBTAssetsWithKeyReferences;
-			if(!BlackboardEntryAction->bIsNew && BlackboardEntryAction->BlackboardData)
+			UBlackboardData* BlackboardData = BlackboardEntryAction->BlackboardData.Get();
+			if (BlackboardData)
 			{
-				// Preload behavior trees before we transact otherwise they will add objects to 
-				// the transaction buffer whether we change them or not.
-				// Blueprint regeneration does this in UEdGraphNode::CreatePin.
-				LoadReferencerBehaviorTrees(*(BlackboardEntryAction->BlackboardData), ExternalBTAssetsWithKeyReferences);
+				if (!BlackboardEntryAction->bIsNew)
+				{
+					// Preload behavior trees before we transact otherwise they will add objects to 
+					// the transaction buffer whether we change them or not.
+					// Blueprint regeneration does this in UEdGraphNode::CreatePin.
+					LoadReferencerBehaviorTrees(*(BlackboardData), ExternalBTAssetsWithKeyReferences);
+				}
+
+				const FScopedTransaction Transaction(LOCTEXT("BlackboardEntryRenameTransaction", "Rename Blackboard Entry"));
+				BlackboardData->SetFlags(RF_Transactional);
+				BlackboardData->Modify();
+				BlackboardEntryAction->Key.EntryName = NewName;
+
+				FProperty* KeysArrayProperty = FindFProperty<FProperty>(UBlackboardData::StaticClass(), GET_MEMBER_NAME_CHECKED(UBlackboardData, Keys));
+				FProperty* NameProperty = FindFProperty<FProperty>(FBlackboardEntry::StaticStruct(), GET_MEMBER_NAME_CHECKED(FBlackboardEntry, EntryName));
+				FEditPropertyChain PropertyChain;
+				PropertyChain.AddHead(KeysArrayProperty);
+				PropertyChain.AddTail(NameProperty);
+				PropertyChain.SetActiveMemberPropertyNode(KeysArrayProperty);
+				PropertyChain.SetActivePropertyNode(NameProperty);
+
+				BlackboardData->PreEditChange(PropertyChain);
+
+				BlackboardEntryAction->Update();
+
+				UE::BehaviorTreeEditor::Delegates::OnBlackboardKeyChanged.Broadcast(*BlackboardData, &BlackboardEntryAction->Key);
+
+				if (!BlackboardEntryAction->bIsNew)
+				{
+					UpdateExternalBlackboardKeyReferences(OldName, NewName, ExternalBTAssetsWithKeyReferences);
+				}
+
+				FPropertyChangedEvent PropertyChangedEvent(NameProperty, EPropertyChangeType::ValueSet);
+				FPropertyChangedChainEvent PropertyChangedChainEvent(PropertyChain, PropertyChangedEvent);
+				BlackboardData->PostEditChangeChainProperty(PropertyChangedChainEvent);
 			}
-
-			const FScopedTransaction Transaction(LOCTEXT("BlackboardEntryRenameTransaction", "Rename Blackboard Entry"));
-			BlackboardEntryAction->BlackboardData->SetFlags(RF_Transactional);
-			BlackboardEntryAction->BlackboardData->Modify();
-			BlackboardEntryAction->Key.EntryName = NewName;
-
-			FProperty* KeysArrayProperty = FindFProperty<FProperty>(UBlackboardData::StaticClass(), GET_MEMBER_NAME_CHECKED(UBlackboardData, Keys));
-			FProperty* NameProperty = FindFProperty<FProperty>(FBlackboardEntry::StaticStruct(), GET_MEMBER_NAME_CHECKED(FBlackboardEntry, EntryName));
-			FEditPropertyChain PropertyChain;
-			PropertyChain.AddHead(KeysArrayProperty);
-			PropertyChain.AddTail(NameProperty);
-			PropertyChain.SetActiveMemberPropertyNode(KeysArrayProperty);
-			PropertyChain.SetActivePropertyNode(NameProperty);
-
-			BlackboardEntryAction->BlackboardData->PreEditChange(PropertyChain);
-
-			BlackboardEntryAction->Update();
-
-			OnBlackboardKeyChanged.ExecuteIfBound(BlackboardEntryAction->BlackboardData, &BlackboardEntryAction->Key);
-
-			if(!BlackboardEntryAction->bIsNew)
-			{
-				UpdateExternalBlackboardKeyReferences(OldName, NewName, ExternalBTAssetsWithKeyReferences);
-			}
-
-			FPropertyChangedEvent PropertyChangedEvent(NameProperty, EPropertyChangeType::ValueSet);
-			FPropertyChangedChainEvent PropertyChangedChainEvent(PropertyChain, PropertyChangedEvent);
-			BlackboardEntryAction->BlackboardData->PostEditChangeChainProperty(PropertyChangedChainEvent);
 		}
 
 		BlackboardEntryAction->bIsNew = false;
@@ -333,21 +358,25 @@ private:
 		const FString NewTextAsString = InNewText.ToString();
 
 		// check for duplicate keys
-		for(const auto& Key : BlackboardEntryAction->BlackboardData->Keys)
+		const UBlackboardData* BlackboardData = BlackboardEntryAction->BlackboardData.Get();
+		if (BlackboardData)
 		{
-			if(&BlackboardEntryAction->Key != &Key && Key.EntryName.ToString() == NewTextAsString)
+			for(const auto& Key : BlackboardData->Keys)
 			{
-				OutErrorMessage = LOCTEXT("DuplicateKeyWarning", "A key of this name already exists.");
-				return false;
+				if(&BlackboardEntryAction->Key != &Key && Key.EntryName.ToString() == NewTextAsString)
+				{
+					OutErrorMessage = LOCTEXT("DuplicateKeyWarning", "A key of this name already exists.");
+					return false;
+				}
 			}
-		}
 
-		for(const auto& Key : BlackboardEntryAction->BlackboardData->ParentKeys)
-		{
-			if(&BlackboardEntryAction->Key != &Key && Key.EntryName.ToString() == NewTextAsString)
+			for(const auto& Key : BlackboardData->ParentKeys)
 			{
-				OutErrorMessage = LOCTEXT("DuplicateParentKeyWarning", "An inherited key of this name already exists.");
-				return false;
+				if(&BlackboardEntryAction->Key != &Key && Key.EntryName.ToString() == NewTextAsString)
+				{
+					OutErrorMessage = LOCTEXT("DuplicateParentKeyWarning", "An inherited key of this name already exists.");
+					return false;
+				}
 			}
 		}
 
@@ -406,21 +435,10 @@ private:
 	/** Delegate used to determine whether the BT debugger displaying the current state */
 	FOnGetDisplayCurrentState OnGetDisplayCurrentState;
 
-	/** Delegate for when a blackboard key changes (added, removed, renamed) */
-	FOnBlackboardKeyChanged OnBlackboardKeyChanged;
-
 	/** Read-only flag */
 	bool bIsReadOnly;
 };
 
-
-void SBehaviorTreeBlackboardView::AddReferencedObjects( FReferenceCollector& Collector )
-{
-	if(BlackboardData != nullptr)
-	{
-		Collector.AddReferencedObject(BlackboardData);
-	}
-}
 
 void SBehaviorTreeBlackboardView::Construct(const FArguments& InArgs, TSharedRef<FUICommandList> InCommandList, UBlackboardData* InBlackboardData)
 {
@@ -430,7 +448,8 @@ void SBehaviorTreeBlackboardView::Construct(const FArguments& InArgs, TSharedRef
 	OnIsDebuggerPaused = InArgs._OnIsDebuggerPaused;
 	OnGetDebugTimeStamp = InArgs._OnGetDebugTimeStamp;
 	OnGetDisplayCurrentState = InArgs._OnGetDisplayCurrentState;
-	OnBlackboardKeyChanged = InArgs._OnBlackboardKeyChanged;
+
+	OnBlackboardKeyChangedDelegateHandle = UE::BehaviorTreeEditor::Delegates::OnBlackboardKeyChanged.AddSP(this, &SBehaviorTreeBlackboardView::HandleBlackboardKeyChanged);
 
 	BlackboardData = InBlackboardData;
 
@@ -474,7 +493,7 @@ void SBehaviorTreeBlackboardView::Construct(const FArguments& InArgs, TSharedRef
 	[
 		SNew(SBorder)
 		.Padding(4.0f)
-		.BorderImage(FEditorStyle::GetBrush("ToolPanel.GroupBorder"))
+		.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
 		[
 			SNew(SVerticalBox)
 			+SVerticalBox::Slot()
@@ -507,10 +526,16 @@ void SBehaviorTreeBlackboardView::Construct(const FArguments& InArgs, TSharedRef
 				.OnContextMenuOpening(this, &SBehaviorTreeBlackboardView::HandleContextMenuOpening, InCommandList)
 				.OnActionMatchesName(this, &SBehaviorTreeBlackboardView::HandleActionMatchesName)
 				.AlphaSortItems(GetDefault<UEditorPerProjectUserSettings>()->bDisplayBlackboardKeysInAlphabeticalOrder)
+				.DefaultRowExpanderBaseIndentLevel(1)
 				.AutoExpandActionMenu(true)
 			]
 		]
 	];
+}
+
+SBehaviorTreeBlackboardView::~SBehaviorTreeBlackboardView()
+{
+	UE::BehaviorTreeEditor::Delegates::OnBlackboardKeyChanged.Remove(OnBlackboardKeyChangedDelegateHandle);
 }
 
 TSharedRef<SWidget> SBehaviorTreeBlackboardView::HandleCreateWidgetForAction(FCreateWidgetForActionData* const InCreateData)
@@ -518,8 +543,7 @@ TSharedRef<SWidget> SBehaviorTreeBlackboardView::HandleCreateWidgetForAction(FCr
 	return SNew(SBehaviorTreeBlackboardItem, InCreateData)
 		.OnIsDebuggerReady(OnIsDebuggerReady)
 		.OnGetDebugKeyValue(OnGetDebugKeyValue)
-		.OnGetDisplayCurrentState(this, &SBehaviorTreeBlackboardView::IsUsingCurrentValues)
-		.OnBlackboardKeyChanged(OnBlackboardKeyChanged);
+		.OnGetDisplayCurrentState(this, &SBehaviorTreeBlackboardView::IsUsingCurrentValues);
 }
 
 void SBehaviorTreeBlackboardView::HandleCollectAllActions( FGraphActionListBuilderBase& GraphActionListBuilder )
@@ -587,12 +611,16 @@ int32 SBehaviorTreeBlackboardView::GetSelectedEntryIndex(bool& bOutIsInherited) 
 		FBlackboardEntry* BlackboardEntry = &Entry->Key;
 
 		// check to see what entry index we are using
-		TArray<FBlackboardEntry>& EntryArray = bOutIsInherited ? BlackboardData->ParentKeys : BlackboardData->Keys;
-		for(int32 Index = 0; Index < EntryArray.Num(); Index++)
+		const UBlackboardData* BlackboardDataPtr = BlackboardData.Get();
+		if (BlackboardDataPtr)
 		{
-			if(BlackboardEntry == &EntryArray[Index])
+			const TArray<FBlackboardEntry>& EntryArray = bOutIsInherited ? BlackboardDataPtr->ParentKeys : BlackboardDataPtr->Keys;
+			for (int32 Index = 0; Index < EntryArray.Num(); Index++)
 			{
-				return Index;
+				if (BlackboardEntry == &EntryArray[Index])
+				{
+					return Index;
+				}
 			}
 		}
 	}
@@ -616,6 +644,15 @@ void SBehaviorTreeBlackboardView::SetObject(UBlackboardData* InBlackboardData)
 {
 	BlackboardData = InBlackboardData;
 	GraphActionMenu->RefreshAllActions(true);
+}
+
+void SBehaviorTreeBlackboardView::HandleBlackboardKeyChanged(const UBlackboardData& InBlackboardData, FBlackboardEntry* const InKey)
+{
+	// OnBlackboardKeyChanged is a global delegate so refresh only if it's our asset.
+	if (BlackboardData == &InBlackboardData)
+	{
+		GraphActionMenu->RefreshAllActions(true);
+	}
 }
 
 TSharedPtr<SWidget> SBehaviorTreeBlackboardView::HandleContextMenuOpening(TSharedRef<FUICommandList> ToolkitCommands) const

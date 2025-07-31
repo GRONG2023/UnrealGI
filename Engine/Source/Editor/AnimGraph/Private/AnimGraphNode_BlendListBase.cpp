@@ -1,6 +1,8 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "AnimGraphNode_BlendListBase.h"
+#include "AnimNodes/AnimNode_BlendListBase.h"
+#include "Animation/AnimNode_Inertialization.h"
 
 /////////////////////////////////////////////////////
 // UAnimGraphNode_BlendListBase
@@ -30,7 +32,7 @@ void UAnimGraphNode_BlendListBase::PostEditChangeProperty(struct FPropertyChange
 
 FString UAnimGraphNode_BlendListBase::GetNodeCategory() const
 {
-	return TEXT("Blends");
+	return TEXT("Animation|Blends");
 }
 
 void UAnimGraphNode_BlendListBase::RemovePinsFromOldPins(TArray<UEdGraphPin*>& OldPins, int32 RemovedArrayIndex)
@@ -78,7 +80,7 @@ void UAnimGraphNode_BlendListBase::RemovePinsFromOldPins(TArray<UEdGraphPin*>& O
 				// and if array index is greater than removed index, decrease index
 				if (ArrayIndex == RemovedArrayIndex)
 				{
-					OldPins[PinIdx]->MarkPendingKill();
+					OldPins[PinIdx]->MarkAsGarbage();
 					OldPins.RemoveAt(PinIdx);
 					--PinIdx;
 				}
@@ -102,5 +104,18 @@ void UAnimGraphNode_BlendListBase::ReallocatePinsDuringReconstruction(TArray<UEd
 		// Clears removed pin info to avoid to remove multiple times
 		// @TODO : Considering receiving RemovedPinArrayIndex as an argument of ReconstructNode()
 		RemovedPinArrayIndex = INDEX_NONE;
+	}
+}
+
+void UAnimGraphNode_BlendListBase::GetOutputLinkAttributes(FNodeAttributeArray& OutAttributes) const
+{
+	if(GetFNodeProperty()->Struct->IsChildOf(FAnimNode_BlendListBase::StaticStruct()))
+	{
+		const FAnimNode_BlendListBase* BaseNode = GetFNodeProperty()->ContainerPtrToValuePtr<FAnimNode_BlendListBase>(this);
+
+		if(BaseNode->GetTransitionType() == EBlendListTransitionType::Inertialization)
+		{
+			OutAttributes.Add(UE::Anim::IInertializationRequester::Attribute);
+		}
 	}
 }

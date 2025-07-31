@@ -10,229 +10,312 @@
 #include "Widgets/DeclarativeSyntaxSupport.h"
 #include "SlotBase.h"
 #include "Widgets/SWidget.h"
+#include "Layout/BasicLayoutWidgetSlot.h"
 #include "Layout/Children.h"
 #include "Widgets/SPanel.h"
 #include "Layout/ArrangedChildren.h"
 #include "Input/DragAndDrop.h"
 #include "Rendering/DrawElements.h"
+#include "Styling/SlateBrush.h"
 
 class FArrangedChildren;
 
 /**
  * A BoxPanel contains one child and describes how that child should be arranged on the screen.
  */
-class SLATECORE_API SBoxPanel
-	: public SPanel
+class SBoxPanel : public SPanel
 {
-public:
+	SLATE_DECLARE_WIDGET_API(SBoxPanel, SPanel, SLATECORE_API)
 
+protected:
 	/**
 	 * A BoxPanel contains one BoxPanel child and describes how that
 	 * child should be arranged on the screen.
 	 */
-	class FSlot : public TSlotBase<FSlot>
+	template<typename SlotType>
+	class TSlot : public TBasicLayoutWidgetSlot<SlotType>
 	{
-	public:		
-		/** Horizontal and Vertical Boxes inherit from FSlot */
-		virtual ~FSlot(){}
-		
-		/** Horizontal positioning of child within the allocated slot */
-		TEnumAsByte<EHorizontalAlignment> HAlignment;
-		
-		/** Vertical positioning of child within the allocated slot */
-		TEnumAsByte<EVerticalAlignment> VAlignment;
+	public:
+		SLATE_SLOT_BEGIN_ARGS(TSlot, TBasicLayoutWidgetSlot<SlotType>)
+			SLATE_ARGUMENT(TOptional<FSizeParam>, SizeParam)
+			TAttribute<float> _MaxSize;
+		SLATE_SLOT_END_ARGS()
 
-		/**
-		* How much space this slot should occupy along panel's direction.
-		*   When SizeRule is SizeRule_Auto, the widget's DesiredSize will be used as the space required.
-		*   When SizeRule is SizeRule_Stretch, the available space will be distributed proportionately between
-		*   peer Widgets depending on the Value property. Available space is space remaining after all the
-		*   peers' SizeRule_Auto requirements have been satisfied.
-		*/
-		FSizeParam SizeParam;
-
-		/** The padding to add around the child. */
-		TAttribute<FMargin> SlotPadding;
-		
-		/** The max size that this slot can be (0 if no max) */
-		TAttribute<float> MaxSize;
-			
 	protected:
 		/** Default values for a slot. */
-		FSlot()
-			: TSlotBase<FSlot>()
-			, HAlignment( HAlign_Fill )
-			, VAlignment( VAlign_Fill )
-			, SizeParam( FStretch(1) )
-			, SlotPadding( FMargin(0) )
-			, MaxSize( 0.0f )
+		TSlot()
+			: TBasicLayoutWidgetSlot<SlotType>(HAlign_Fill, VAlign_Fill)
+			, SizeRule(FSizeParam::SizeRule_Stretch)
+			, SizeValue(*this, 1.f)
+			, MaxSize(*this, 0.0f)
 		{ }
+
+	public:
+		void Construct(const FChildren& SlotOwner, FSlotArguments&& InArgs)
+		{
+			TBasicLayoutWidgetSlot<SlotType>::Construct(SlotOwner, MoveTemp(InArgs));
+			if (InArgs._MaxSize.IsSet())
+			{
+				SetMaxSize(MoveTemp(InArgs._MaxSize));
+			}
+			if (InArgs._SizeParam.IsSet())
+			{
+				SetSizeParam(MoveTemp(InArgs._SizeParam.GetValue()));
+			}
+		}
+
+		static void RegisterAttributes(FSlateWidgetSlotAttributeInitializer& AttributeInitializer)
+		{
+			TBasicLayoutWidgetSlot<SlotType>::RegisterAttributes(AttributeInitializer);
+			SLATE_ADD_SLOT_ATTRIBUTE_DEFINITION_WITH_NAME(TSlot<SlotType>, AttributeInitializer, "Slot.MaxSize", MaxSize, EInvalidateWidgetReason::Layout);
+			SLATE_ADD_SLOT_ATTRIBUTE_DEFINITION_WITH_NAME(TSlot<SlotType>, AttributeInitializer, "Slot.SizeValue", SizeValue, EInvalidateWidgetReason::Layout)
+				.UpdatePrerequisite("Slot.MaxSize");
+		}
+
+		/** Get the space rule this slot should occupy along panel's direction. */
+		FSizeParam::ESizeRule GetSizeRule() const
+		{
+			return SizeRule;
+		}
+
+		/** Get the space rule value this slot should occupy along panel's direction. */
+		float GetSizeValue() const
+		{
+			return SizeValue.Get();
+		}
+
+		/** Get the max size the slot can be.*/
+		float GetMaxSize() const
+		{
+			return MaxSize.Get();
+		}
+
+	public:
+		/** Set the size Param of the slot, It could be a FStretch or a FAuto. */
+		void SetSizeParam(FSizeParam InSizeParam)
+		{
+			SizeRule = InSizeParam.SizeRule;
+			SizeValue.Assign(*this, MoveTemp(InSizeParam.Value));
+		}
+
+		/** The widget's DesiredSize will be used as the space required. */
+		void SetSizeToAuto()
+		{
+			SetSizeParam(FAuto());
+		}
+
+		/** The available space will be distributed proportionately. */
+		void SetSizeToStretch(TAttribute<float> StretchCoefficient)
+		{
+			SetSizeParam(FStretch(MoveTemp(StretchCoefficient)));
+		}
+
+		/** Set the max size in SlateUnit this slot can be. */
+		void SetMaxSize(TAttribute<float> InMaxSize)
+		{
+			MaxSize.Assign(*this, MoveTemp(InMaxSize));
+		}
+
+	private:
+		/**
+		 * How much space this slot should occupy along panel's direction.
+		 * When SizeRule is SizeRule_Auto, the widget's DesiredSize will be used as the space required.
+		 * When SizeRule is SizeRule_Stretch, the available space will be distributed proportionately between
+		 * peer Widgets depending on the Value property. Available space is space remaining after all the
+		 * peers' SizeRule_Auto requirements have been satisfied.
+		 */
+
+		/** The sizing rule to use. */
+		FSizeParam::ESizeRule SizeRule;
+
+		/** The actual value this size parameter stores. */
+		typename TBasicLayoutWidgetSlot<SlotType>::template TSlateSlotAttribute<float> SizeValue;
+
+		/** The max size that this slot can be (0 if no max) */
+		typename TBasicLayoutWidgetSlot<SlotType>::template TSlateSlotAttribute<float> MaxSize;
 	};
 
 public:
+	class FSlot : public TSlot<FSlot>
+	{
+	};
 
+protected:
+	template<typename SlotType>
+	struct FScopedWidgetSlotArguments : public SlotType::FSlotArguments
+	{
+	public:
+		FScopedWidgetSlotArguments(TUniquePtr<SlotType> InSlot, TPanelChildren<FSlot>& InChildren, int32 InIndex)
+			: SlotType::FSlotArguments(MoveTemp(InSlot))
+			, Children(InChildren)
+			, Index(InIndex)
+		{
+		}
+
+		FScopedWidgetSlotArguments() = delete;
+		FScopedWidgetSlotArguments(const FScopedWidgetSlotArguments&) = delete;
+		FScopedWidgetSlotArguments& operator=(const FScopedWidgetSlotArguments&) = delete;
+		FScopedWidgetSlotArguments(FScopedWidgetSlotArguments&&) = default;
+		FScopedWidgetSlotArguments& operator=(FScopedWidgetSlotArguments&&) = default;
+
+		virtual ~FScopedWidgetSlotArguments()
+		{
+			if (this->GetSlot())	// Is nullptr when the FScopedWidgetSlotArguments is moved-constructed.
+			{
+				SBoxPanel::FSlot::FSlotArguments* SelfAsBaseSlot = static_cast<SBoxPanel::FSlot::FSlotArguments*>(static_cast<FSlotBase::FSlotArguments*>(this));
+				if (Index == INDEX_NONE)
+				{
+					Children.AddSlot(MoveTemp(*SelfAsBaseSlot));
+				}
+				else
+				{
+					Children.InsertSlot(MoveTemp(*SelfAsBaseSlot), Index);
+				}
+			}
+		}
+
+	private:
+		TPanelChildren<FSlot>& Children;
+		int32 Index;
+	};
+
+public:
 	/** Removes a slot from this box panel which contains the specified SWidget
 	 *
 	 * @param SlotWidget The widget to match when searching through the slots
 	 * @returns The index in the children array where the slot was removed and -1 if no slot was found matching the widget
 	 */
-	int32 RemoveSlot( const TSharedRef<SWidget>& SlotWidget );
+	SLATECORE_API int32 RemoveSlot( const TSharedRef<SWidget>& SlotWidget );
 
-	/**
-	 * Removes all children from the box.
-	 */
-	void ClearChildren();
+	/** Removes all children from the box. */
+	SLATECORE_API void ClearChildren();
 
+	/** @return the number of slots. */
+	int32 NumSlots() const { return Children.Num(); }
+
+	/** @return if it's a valid index slot index. */
+	bool IsValidSlotIndex(int32 Index) const { return Children.IsValidIndex(Index); }
+
+	//~ Begin SWidget overrides.
 public:
-
-	// Begin SWidget overrides.
-	virtual void OnArrangeChildren(const FGeometry& AllottedGeometry, FArrangedChildren& ArrangedChildren) const override;
-	virtual FChildren* GetChildren() override;
-	// End SWidget overrides.
+	SLATECORE_API virtual void OnArrangeChildren(const FGeometry& AllottedGeometry, FArrangedChildren& ArrangedChildren) const override;
+	SLATECORE_API virtual FChildren* GetChildren() override;
 
 protected:
-	// Begin SWidget overrides.
-	virtual FVector2D ComputeDesiredSize(float) const override;
-	// End SWidget overrides.
+	SLATECORE_API virtual FVector2D ComputeDesiredSize(float) const override;
+	//~ End SWidget overrides.
 
-	/**
-	 * A Box Panel's orientation cannot be changed once it is constructed..
-	 *
-	 * @param InOrientation   The orientation of the Box Panel
-	 */
-	SBoxPanel( EOrientation InOrientation );
+protected:
+	SLATECORE_API SBoxPanel();
+	/** A Box Panel's orientation. */
+	SLATECORE_API SBoxPanel(EOrientation InOrientation);
 
+	/** Set the orientation of the Box. It will do a full invalidation of the widget. */
+	SLATECORE_API void SetOrientation(EOrientation InOrientation);
+	EOrientation GetOrientation() const
+	{
+		return Orientation;
+	}
+
+protected:
 	/** The Box Panel's children. */
 	TPanelChildren<FSlot> Children;
 
 	/** The Box Panel's orientation; determined at construct time. */
-	const EOrientation Orientation;
+	EOrientation Orientation;
 };
 
 
 /** A Horizontal Box Panel. See SBoxPanel for more info. */
-class SLATECORE_API SHorizontalBox : public SBoxPanel
+class SHorizontalBox : public SBoxPanel
 {
+	SLATE_DECLARE_WIDGET_API(SHorizontalBox, SBoxPanel, SLATECORE_API)
 public:
-	class FSlot : public SBoxPanel::FSlot
+	class FSlot : public SBoxPanel::TSlot<FSlot>
 	{
-		public:
-		FSlot()
-		: SBoxPanel::FSlot()
+	public:
+		SLATE_SLOT_BEGIN_ARGS(FSlot, SBoxPanel::TSlot<FSlot>)
+			/** The widget's DesiredSize will be used as the space required. */
+			FSlotArguments& AutoWidth()
+			{
+				_SizeParam = FAuto();
+				return Me();
+			}
+			/** The available space will be distributed proportionately. */
+			FSlotArguments& FillWidth(TAttribute<float> InStretchCoefficient)
+			{
+				_SizeParam = FStretch(MoveTemp(InStretchCoefficient));
+				return Me();
+			}
+			/** Set the max size in SlateUnit this slot can be. */
+			FSlotArguments& MaxWidth(TAttribute<float> InMaxWidth)
+			{
+				_MaxSize = MoveTemp(InMaxWidth);
+				return Me();
+			}
+		SLATE_SLOT_END_ARGS()
+
+		/** The widget's DesiredSize will be used as the space required. */
+		void SetAutoWidth()
 		{
+			SetSizeToAuto();
 		}
 
-		FSlot& AutoWidth()
+		/** The available space will be distributed proportionately. */
+		void SetFillWidth(TAttribute<float> InStretchCoefficient)
 		{
-			SizeParam = FAuto();
-			return *this;
+			SetSizeToStretch(MoveTemp(InStretchCoefficient));
 		}
 
-		FSlot& MaxWidth( const TAttribute< float >& InMaxWidth )
+		/** Set the max size in SlateUnit this slot can be. */
+		void SetMaxWidth(TAttribute<float> InMaxWidth)
 		{
-			MaxSize = InMaxWidth;
-			return *this;
+			SetMaxSize(MoveTemp(InMaxWidth));
 		}
 
-		FSlot& FillWidth( const TAttribute< float >& StretchCoefficient )
+		void Construct(const FChildren& SlotOwner, FSlotArguments&& InArgs)
 		{
-			SizeParam = FStretch( StretchCoefficient );
-			return *this;
-		}
-		FSlot& Padding( float Uniform )
-		{
-			SlotPadding = FMargin(Uniform);
-			return *this;
+			SBoxPanel::TSlot<FSlot>::Construct(SlotOwner, MoveTemp(InArgs));
 		}
 
-		FSlot& Padding( float Horizontal, float Vertical )
-		{
-			SlotPadding = FMargin(Horizontal, Vertical);
-			return *this;
-		}
+		UE_DEPRECATED(5.0, "Chained AutoWidth is deprecated. Use the FSlotArgument or SetAutoWidth")
+		FSlot& AutoWidth() { SetAutoWidth(); return *this; }
 
-		FSlot& Padding( float Left, float Top, float Right, float Bottom )
-		{
-			SlotPadding = FMargin(Left, Top, Right, Bottom);
-			return *this;
-		}
-		
-		FSlot& Padding( TAttribute<FMargin> InPadding )
-		{
-			SlotPadding = InPadding;
-			return *this;
-		}
+		UE_DEPRECATED(5.0, "Chained FillWidth is deprecated. Use the FSlotArgument or SetFillWidth")
+		FSlot& FillWidth(TAttribute<float> InStretchCoefficient) { SetFillWidth(InStretchCoefficient); return *this; }
 
-		FSlot& HAlign( EHorizontalAlignment InHAlignment )
-		{
-			HAlignment = InHAlignment;
-			return *this;
-		}
-
-		FSlot& VAlign( EVerticalAlignment InVAlignment )
-		{
-			VAlignment = InVAlignment;
-			return *this;
-		}
-
-		FSlot& operator[]( TSharedRef<SWidget> InWidget )
-		{
-			SBoxPanel::FSlot::operator[](InWidget);
-			return *this;
-		}
-
-		FSlot& Expose( FSlot*& OutVarToInit )
-		{
-			OutVarToInit = this;
-			return *this;
-		}
+		UE_DEPRECATED(5.0, "Chained MaxWidth is deprecated. Use the FSlotArgument or SetMaxWidth")
+		FSlot& MaxWidth(TAttribute<float> InMaxWidth) { SetMaxWidth(InMaxWidth); return *this; }
 	};
 
-	static FSlot& Slot()
+	static FSlot::FSlotArguments Slot()
 	{
-		return *(new FSlot());
+		return FSlot::FSlotArguments(MakeUnique<FSlot>());
 	}
 
 	SLATE_BEGIN_ARGS( SHorizontalBox )
 	{
 		_Visibility = EVisibility::SelfHitTestInvisible;
 	}
-
-		SLATE_SUPPORTS_SLOT(SHorizontalBox::FSlot)
-
+		SLATE_SLOT_ARGUMENT(SHorizontalBox::FSlot, Slots)
 	SLATE_END_ARGS()
 
-	FSlot& AddSlot()
+	using FScopedWidgetSlotArguments = SBoxPanel::FScopedWidgetSlotArguments<SHorizontalBox::FSlot>;
+	FScopedWidgetSlotArguments AddSlot()
 	{
-		SHorizontalBox::FSlot& NewSlot = *new SHorizontalBox::FSlot();
-		this->Children.Add( &NewSlot );
-
-		Invalidate(EInvalidateWidget::Layout);
-
-		return NewSlot;
+		return InsertSlot(INDEX_NONE);
 	}
 
-	FSlot& InsertSlot(int32 Index = INDEX_NONE)
+	FScopedWidgetSlotArguments InsertSlot(int32 Index = INDEX_NONE)
 	{
-		if (Index == INDEX_NONE)
-		{
-			return AddSlot();
-		}
-		SHorizontalBox::FSlot& NewSlot = *new SHorizontalBox::FSlot();
-		this->Children.Insert(&NewSlot, Index);
-
-		Invalidate(EInvalidateWidget::Layout);
-
-		return NewSlot;
+		return FScopedWidgetSlotArguments(MakeUnique<FSlot>(), this->Children, Index);
 	}
 
-	int32 NumSlots() const
-	{
-		return this->Children.Num();
-	}
+	SLATECORE_API FSlot& GetSlot(int32 SlotIndex);
+	SLATECORE_API const FSlot& GetSlot(int32 SlotIndex) const;
 
 	FORCENOINLINE SHorizontalBox()
-	: SBoxPanel( Orient_Horizontal )
+		: SBoxPanel( Orient_Horizontal )
 	{
 		SetCanTick(false);
 		bCanSupportFocus = false;
@@ -243,98 +326,74 @@ public:
 	 *
 	 * @param	InArgs	The declaration data for this widget
 	 */
-	void Construct( const FArguments& InArgs );
+	SLATECORE_API void Construct( const FArguments& InArgs );
 };
 
 /** A Vertical Box Panel. See SBoxPanel for more info. */
-class SLATECORE_API SVerticalBox : public SBoxPanel
+class SVerticalBox : public SBoxPanel
 {
+	SLATE_DECLARE_WIDGET_API(SVerticalBox, SBoxPanel, SLATECORE_API)
 public:
-	class FSlot : public SBoxPanel::FSlot
+	class FSlot : public SBoxPanel::TSlot<FSlot>
 	{
-		public:
+	public:
+		SLATE_SLOT_BEGIN_ARGS(FSlot, SBoxPanel::TSlot<FSlot>)
+			/** The widget's DesiredSize will be used as the space required. */
+			FSlotArguments& AutoHeight()
+			{
+				_SizeParam = FAuto();
+				return Me();
+			}
+			/** The available space will be distributed proportionately. */
+			FSlotArguments& FillHeight(TAttribute<float> InStretchCoefficient)
+			{
+				_SizeParam = FStretch(MoveTemp(InStretchCoefficient));
+				return Me();
+			}
+			/** Set the max size in SlateUnit this slot can be. */
+			FSlotArguments& MaxHeight(TAttribute<float> InMaxHeight)
+			{
+				_MaxSize = MoveTemp(InMaxHeight);
+				return Me();
+			}
+		SLATE_SLOT_END_ARGS()
 
-		FSlot()
-		: SBoxPanel::FSlot()
+		/** The widget's DesiredSize will be used as the space required. */
+		void SetAutoHeight()
 		{
+			SetSizeToAuto();
 		}
 
-		FSlot& AutoHeight()
+		/** The available space will be distributed proportionately. */
+		void SetFillHeight(TAttribute<float> InStretchCoefficient)
 		{
-			SizeParam = FAuto();
-			return *this;
+			SetSizeToStretch(MoveTemp(InStretchCoefficient));
 		}
 
-		FSlot& MaxHeight( const TAttribute< float >& InMaxHeight )
+		/** Set the max size in SlateUnit this slot can be. */
+		void SetMaxHeight(TAttribute<float> InMaxHeight)
 		{
-			MaxSize = InMaxHeight;
-			return *this;
+			SetMaxSize(MoveTemp(InMaxHeight));
 		}
 
-		FSlot& FillHeight( const TAttribute< float >& StretchCoefficient )
+		void Construct(const FChildren& SlotOwner, FSlotArguments&& InArgs)
 		{
-			SizeParam = FStretch( StretchCoefficient );
-			return *this;
+			SBoxPanel::TSlot<FSlot>::Construct(SlotOwner, MoveTemp(InArgs));
 		}
 
-		FSlot& Padding( float Uniform )
-		{
-			SlotPadding = FMargin(Uniform);
-			return *this;
-		}
+		UE_DEPRECATED(5.0, "Chained AutoHeight is deprecated. Use the FSlotArgument or SetAutoHeight")
+		FSlot& AutoHeight() { SetAutoHeight(); return *this; }
 
-		FSlot& Padding( float Horizontal, float Vertical )
-		{
-			SlotPadding = FMargin(Horizontal, Vertical);
-			return *this;
-		}
+		UE_DEPRECATED(5.0, "Chained FillWidth is deprecated. Use the FSlotArgument or SetFillWidth")
+		FSlot& FillHeight(TAttribute<float> InStretchCoefficient) { SetFillHeight(InStretchCoefficient); return *this; }
 
-		FSlot& Padding( float Left, float Top, float Right, float Bottom )
-		{
-			SlotPadding = FMargin(Left, Top, Right, Bottom);
-			return *this;
-		}
-
-		FSlot& Padding( const TAttribute<FMargin>::FGetter& InDelegate )
-		{
-			SlotPadding.Bind( InDelegate );
-			return *this;
-		}
-
-		FSlot& HAlign( EHorizontalAlignment InHAlignment )
-		{
-			HAlignment = InHAlignment;
-			return *this;
-		}
-
-		FSlot& VAlign( EVerticalAlignment InVAlignment )
-		{
-			VAlignment = InVAlignment;
-			return *this;
-		}
-
-		FSlot& Padding( TAttribute<FMargin> InPadding )
-		{
-			SlotPadding = InPadding;
-			return *this;
-		}
-
-		FSlot& operator[]( TSharedRef<SWidget> InWidget )
-		{
-			SBoxPanel::FSlot::operator[](InWidget);
-			return *this;
-		}
-
-		FSlot& Expose( FSlot*& OutVarToInit )
-		{
-			OutVarToInit = this;
-			return *this;
-		}
+		UE_DEPRECATED(5.0, "Chained MaxWidth is deprecated. Use the FSlotArgument or SetMaxHeight")
+		FSlot& MaxHeight(TAttribute<float> InMaxHeight) { SetMaxHeight(InMaxHeight); return *this; }
 	};
 
-	static FSlot& Slot()
+	static FSlot::FSlotArguments Slot()
 	{
-		return *(new FSlot());
+		return FSlot::FSlotArguments(MakeUnique<FSlot>());
 	}
 
 
@@ -342,42 +401,25 @@ public:
 	{
 		_Visibility = EVisibility::SelfHitTestInvisible;
 	}
-
-		SLATE_SUPPORTS_SLOT(SVerticalBox::FSlot)
-
+		SLATE_SLOT_ARGUMENT(SVerticalBox::FSlot, Slots)
 	SLATE_END_ARGS()
 
-	FSlot& AddSlot()
+	using FScopedWidgetSlotArguments = SBoxPanel::FScopedWidgetSlotArguments<SVerticalBox::FSlot>;
+	FScopedWidgetSlotArguments AddSlot()
 	{
-		SVerticalBox::FSlot& NewSlot = *new SVerticalBox::FSlot();
-		this->Children.Add( &NewSlot );
-
-		Invalidate(EInvalidateWidget::Layout);
-
-		return NewSlot;
+		return InsertSlot(INDEX_NONE);
 	}
 
-	FSlot& InsertSlot(int32 Index = INDEX_NONE)
+	FScopedWidgetSlotArguments InsertSlot(int32 Index = INDEX_NONE)
 	{
-		if (Index == INDEX_NONE)
-		{
-			return AddSlot();
-		}
-		SVerticalBox::FSlot& NewSlot = *new SVerticalBox::FSlot();
-		this->Children.Insert(&NewSlot, Index);
-
-		Invalidate(EInvalidateWidget::Layout);
-
-		return NewSlot;
+		return FScopedWidgetSlotArguments(MakeUnique<FSlot>(), this->Children, Index);
 	}
 
-	int32 NumSlots() const
-	{
-		return this->Children.Num();
-	}
+	SLATECORE_API FSlot& GetSlot(int32 SlotIndex);
+	SLATECORE_API const FSlot& GetSlot(int32 SlotIndex) const;
 
 	FORCENOINLINE SVerticalBox()
-	: SBoxPanel( Orient_Vertical )
+		: SBoxPanel( Orient_Vertical )
 	{
 		SetCanTick(false);
 		bCanSupportFocus = false;
@@ -388,7 +430,87 @@ public:
 	 *
 	 * @param	InArgs	The declaration data for this widget
 	 */
-	void Construct( const FArguments& InArgs );
+	SLATECORE_API void Construct( const FArguments& InArgs );
+};
+
+/** A Stack Box Panel that stack vertically or horizontally. See SBoxPanel for more info. */
+class SStackBox : public SBoxPanel
+{
+	SLATE_DECLARE_WIDGET_API(SStackBox, SBoxPanel, SLATECORE_API)
+public:
+	class FSlot : public SBoxPanel::TSlot<FSlot>
+	{
+	public:
+		SLATE_SLOT_BEGIN_ARGS(FSlot, SBoxPanel::TSlot<FSlot>)
+			/** The widget's DesiredSize will be used as the space required. */
+			FSlotArguments& AutoSize()
+			{
+				_SizeParam = FAuto();
+				return Me();
+			}
+			/** The available space will be distributed proportionately. */
+			FSlotArguments& FillSize(TAttribute<float> InStretchCoefficient)
+			{
+				_SizeParam = FStretch(MoveTemp(InStretchCoefficient));
+				return Me();
+			}
+			/** Set the max size in SlateUnit this slot can be. */
+			FSlotArguments& MaxSize(TAttribute<float> InMaxHeight)
+			{
+				_MaxSize = MoveTemp(InMaxHeight);
+				return Me();
+			}
+		SLATE_SLOT_END_ARGS()
+
+		void Construct(const FChildren& SlotOwner, FSlotArguments&& InArgs)
+		{
+			SBoxPanel::TSlot<FSlot>::Construct(SlotOwner, MoveTemp(InArgs));
+		}
+	};
+
+	static FSlot::FSlotArguments Slot()
+	{
+		return FSlot::FSlotArguments(MakeUnique<FSlot>());
+	}
+
+
+	SLATE_BEGIN_ARGS(SStackBox)
+	{
+		_Visibility = EVisibility::SelfHitTestInvisible;
+	}
+		SLATE_ARGUMENT(EOrientation, Orientation)
+		SLATE_SLOT_ARGUMENT(SStackBox::FSlot, Slots)
+	SLATE_END_ARGS()
+
+	using FScopedWidgetSlotArguments = SBoxPanel::FScopedWidgetSlotArguments<SStackBox::FSlot>;
+	FScopedWidgetSlotArguments AddSlot()
+	{
+		return InsertSlot(INDEX_NONE);
+	}
+
+	FScopedWidgetSlotArguments InsertSlot(int32 Index = INDEX_NONE)
+	{
+		return FScopedWidgetSlotArguments(MakeUnique<FSlot>(), this->Children, Index);
+	}
+
+	SLATECORE_API FSlot& GetSlot(int32 SlotIndex);
+	SLATECORE_API const FSlot& GetSlot(int32 SlotIndex) const;
+
+	FORCENOINLINE SStackBox()
+	{
+		SetCanTick(false);
+		bCanSupportFocus = false;
+	}
+
+	/**
+	 * Construct this widget
+	 *
+	 * @param	InArgs	The declaration data for this widget
+	 */
+	SLATECORE_API void Construct(const FArguments& InArgs);
+
+	using SBoxPanel::SetOrientation;
+	using SBoxPanel::GetOrientation;
 };
 
 class FDragAndDropVerticalBoxOp : public FDragDropOperation
@@ -405,7 +527,7 @@ public:
 };
 
 /** A Vertical Box Panel. See SBoxPanel for more info. */
-class SLATECORE_API SDragAndDropVerticalBox : public SVerticalBox
+class SDragAndDropVerticalBox : public SVerticalBox
 {
 public:
 	/**
@@ -456,22 +578,22 @@ public:
 		SLATE_EVENT(FOnDragAndDropVerticalBoxDrop, OnDrop)
 	SLATE_END_ARGS()
 
-	void Construct(const FArguments& InArgs);
+	SLATECORE_API void Construct(const FArguments& InArgs);
 
 	/** Set the Drop indicators */
 	SDragAndDropVerticalBox& SetDropIndicator_Above(const FSlateBrush& InValue) { DropIndicator_Above = InValue; return *this; }
 	SDragAndDropVerticalBox& SetDropIndicator_Below(const FSlateBrush& InValue) { DropIndicator_Below = InValue; return *this; }
 
 	/** Drag detection and handling */
-	virtual FReply OnMouseButtonDown(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent) override;
+	SLATECORE_API virtual FReply OnMouseButtonDown(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent) override;
 		
-	virtual FReply OnDragDetected(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent) override;
-	virtual void OnDragEnter(FGeometry const& MyGeometry, FDragDropEvent const& DragDropEvent) override;
-	virtual void OnDragLeave(FDragDropEvent const& DragDropEvent) override;
-	virtual FReply OnDragOver(const FGeometry& MyGeometry, const FDragDropEvent& DragDropEvent) override;
-	virtual FReply OnDrop(const FGeometry& MyGeometry, const FDragDropEvent& DragDropEvent) override;
+	SLATECORE_API virtual FReply OnDragDetected(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent) override;
+	SLATECORE_API virtual void OnDragEnter(FGeometry const& MyGeometry, FDragDropEvent const& DragDropEvent) override;
+	SLATECORE_API virtual void OnDragLeave(FDragDropEvent const& DragDropEvent) override;
+	SLATECORE_API virtual FReply OnDragOver(const FGeometry& MyGeometry, const FDragDropEvent& DragDropEvent) override;
+	SLATECORE_API virtual FReply OnDrop(const FGeometry& MyGeometry, const FDragDropEvent& DragDropEvent) override;
 
-	virtual int32 OnPaint(const FPaintArgs& Args, const FGeometry& AllottedGeometry, const FSlateRect& MyCullingRect, FSlateWindowElementList& OutDrawElements, int32 LayerId, const FWidgetStyle& InWidgetStyle, bool bParentEnabled) const override;
+	SLATECORE_API virtual int32 OnPaint(const FPaintArgs& Args, const FGeometry& AllottedGeometry, const FSlateRect& MyCullingRect, FSlateWindowElementList& OutDrawElements, int32 LayerId, const FWidgetStyle& InWidgetStyle, bool bParentEnabled) const override;
 
 private:
 	/** @see SDragAndDropVerticalBox's OnCanAcceptDrop event */
@@ -500,9 +622,9 @@ private:
 	FSlateBrush DropIndicator_Below;
 
 	/** This is required for the paint to access which item we're hovering */
-	FVector2D CurrentDragOperationScreenSpaceLocation;
+	FVector2f CurrentDragOperationScreenSpaceLocation;
 	int32 CurrentDragOverSlotIndex;
 
 	/** @return the zone (above, below) based on where the user is hovering over */
-	EItemDropZone ZoneFromPointerPosition(FVector2D LocalPointerPos, const FGeometry& CurrentGeometry, const FGeometry& StartGeometry) const;
+	SLATECORE_API EItemDropZone ZoneFromPointerPosition(FVector2f LocalPointerPos, const FGeometry& CurrentGeometry, const FGeometry& StartGeometry) const;
 };

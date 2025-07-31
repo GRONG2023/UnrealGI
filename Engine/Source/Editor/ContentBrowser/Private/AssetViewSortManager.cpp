@@ -1,8 +1,22 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "AssetViewSortManager.h"
+
 #include "AssetViewTypes.h"
+#include "Containers/ArrayView.h"
+#include "Containers/UnrealString.h"
 #include "ContentBrowserDataSource.h"
+#include "ContentBrowserDelegates.h"
+#include "ContentBrowserItem.h"
+#include "ContentBrowserItemData.h"
+#include "HAL/Platform.h"
+#include "HAL/PlatformCrt.h"
+#include "Internationalization/Text.h"
+#include "Misc/CString.h"
+#include "Misc/ComparisonUtility.h"
+#include "Templates/UniquePtr.h"
+#include "Templates/UnrealTemplate.h"
+#include "UObject/UnrealNames.h"
 
 struct FCompareFAssetItemBase
 {
@@ -115,7 +129,8 @@ protected:
 		const FContentBrowserItemData* BItemData = B->GetItem().GetPrimaryInternalItem();
 		// TODO: Have an option to sort by display name? It's slower, but more correct for non-English languages
 		//const int32 Result = (AItemData && BItemData) ? AItemData->GetDisplayName().CompareTo(BItemData->GetDisplayName()) : 0;
-		const int32 Result = (AItemData && BItemData) ? AItemData->GetItemName().Compare(BItemData->GetItemName()) : 0;
+		//const int32 Result = (AItemData && BItemData) ? FAssetViewSortManager::CompareWithNumericSuffix(FNameBuilder(AItemData->GetItemName()).ToView(), FNameBuilder(BItemData->GetItemName()).ToView()) : 0;
+		const int32 Result = (AItemData && BItemData) ? UE::ComparisonUtility::CompareWithNumericSuffix(AItemData->GetDisplayName().ToString(), BItemData->GetDisplayName().ToString()) : 0;
 		if (Result < 0)
 		{
 			return bAscending;
@@ -169,7 +184,7 @@ protected:
 	{
 		const FContentBrowserItemData* AItemData = A->GetItem().GetPrimaryInternalItem();
 		const FContentBrowserItemData* BItemData = B->GetItem().GetPrimaryInternalItem();
-		const int32 Result = (AItemData && BItemData) ? AItemData->GetVirtualPath().Compare(BItemData->GetVirtualPath()) : 0;
+		const int32 Result = (AItemData && BItemData) ? UE::ComparisonUtility::CompareWithNumericSuffix(AItemData->GetVirtualPath(), BItemData->GetVirtualPath()) : 0;
 		if (Result < 0)
 		{
 			return bAscending;
@@ -316,6 +331,8 @@ protected:
 const FName FAssetViewSortManager::NameColumnId = "Name";
 const FName FAssetViewSortManager::ClassColumnId = "Class";
 const FName FAssetViewSortManager::PathColumnId = "Path";
+const FName FAssetViewSortManager::RevisionControlColumnId = "RevisionControl";
+
 
 FAssetViewSortManager::FAssetViewSortManager()
 {

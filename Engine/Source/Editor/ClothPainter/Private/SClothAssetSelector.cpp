@@ -1,39 +1,90 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "SClothAssetSelector.h"
+
+#include "Animation/DebugSkelMeshComponent.h"
+#include "AssetRegistry/ARFilter.h"
+#include "AssetRegistry/AssetData.h"
+#include "ClothLODData.h"
+#include "ClothPhysicalMeshData.h"
+#include "ClothingAsset.h"
+#include "ClothingAssetBase.h"
+#include "ClothingAssetExporter.h"
+#include "ClothingAssetFactoryInterface.h"
+#include "ClothingAssetListCommands.h"
+#include "ClothingSimulationFactory.h"
+#include "ClothingSystemEditorInterfaceModule.h"
+#include "Containers/ContainersFwd.h"
+#include "Containers/IndirectArray.h"
+#include "Containers/Map.h"
+#include "Containers/UnrealString.h"
+#include "ContentBrowserDelegates.h"
+#include "ContentBrowserModule.h"
+#include "DetailLayoutBuilder.h"
+#include "Editor.h"
+#include "Editor/EditorEngine.h"
+#include "Engine/SkeletalMesh.h"
+#include "Fonts/SlateFontInfo.h"
+#include "Framework/Application/MenuStack.h"
+#include "Framework/Application/SlateApplication.h"
+#include "Framework/Commands/GenericCommands.h"
+#include "Framework/Commands/UIAction.h"
+#include "Framework/Commands/UICommandList.h"
+#include "Framework/MultiBox/MultiBoxBuilder.h"
+#include "Framework/Views/ITypedTableView.h"
+#include "IContentBrowserSingleton.h"
+#include "Input/Events.h"
+#include "InputCoreTypes.h"
+#include "Internationalization/Internationalization.h"
+#include "Layout/Children.h"
+#include "Layout/Margin.h"
+#include "Layout/WidgetPath.h"
+#include "Math/Vector2D.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/Attribute.h"
+#include "Modules/ModuleManager.h"
+#include "PointWeightMap.h"
+#include "Rendering/SkeletalMeshLODModel.h"
+#include "Rendering/SkeletalMeshModel.h"
+#include "SCopyVertexColorSettingsPanel.h"
+#include "SPositiveActionButton.h"
+#include "ScopedTransaction.h"
+#include "SkeletalMeshTypes.h"
+#include "SlotBase.h"
+#include "Styling/AppStyle.h"
+#include "Styling/ISlateStyle.h"
+#include "Styling/SlateColor.h"
+#include "Templates/Casts.h"
+#include "Templates/SubclassOf.h"
+#include "Textures/SlateIcon.h"
+#include "Types/SlateStructs.h"
+#include "UObject/Class.h"
+#include "UObject/NameTypes.h"
+#include "UObject/TopLevelAssetPath.h"
+#include "UObject/UObjectGlobals.h"
+#include "UObject/UnrealNames.h"
+#include "Utils/ClothingMeshUtils.h"
+#include "Widgets/Images/SImage.h"
+#include "Widgets/Input/SButton.h"
+#include "Widgets/Input/SCheckBox.h"
+#include "Widgets/Input/SComboButton.h"
+#include "Widgets/Input/SNumericEntryBox.h"
+#include "Widgets/Layout/SBox.h"
 #include "Widgets/Layout/SExpandableArea.h"
 #include "Widgets/Layout/SSplitter.h"
 #include "Widgets/SBoxPanel.h"
-#include "EditorStyleSet.h"
-#include "DetailLayoutBuilder.h"
-#include "Widgets/Input/SButton.h"
-#include "Widgets/Input/SSlider.h"
-#include "Widgets/Input/SCheckBox.h"
-#include "Widgets/Input/SNumericEntryBox.h"
-#include "Widgets/Images/SImage.h"
-#include "ClothingAsset.h"
-#include "Framework/MultiBox/MultiBoxBuilder.h"
-#include "Widgets/Input/SCheckBox.h"
+#include "Widgets/SNullWidget.h"
 #include "Widgets/Text/SInlineEditableTextBlock.h"
-#include "Engine/SkeletalMesh.h"
-#include "ApexClothingUtils.h"
-#include "UObject/UObjectIterator.h"
-#include "Components/SkeletalMeshComponent.h"
-#include "ComponentReregisterContext.h"
-#include "Misc/MessageDialog.h"
-#include "ClothingSystemEditorInterfaceModule.h"
-#include "Modules/ModuleManager.h"
-#include "ClothingAssetFactoryInterface.h"
-#include "Utils/ClothingMeshUtils.h"
-#include "ClothingAssetListCommands.h"
-#include "Framework/Commands/GenericCommands.h"
-#include "Rendering/SkeletalMeshModel.h"
-#include "ScopedTransaction.h"
-#include "Editor.h"
-#include "SCopyVertexColorSettingsPanel.h"
-#include "Editor/ContentBrowser/Private/SAssetPicker.h"
-#include "ContentBrowserModule.h"
-#include "Animation/DebugSkelMeshComponent.h"
+#include "Widgets/Text/STextBlock.h"
+#include "Widgets/Views/SHeaderRow.h"
+#include "Widgets/Views/STableRow.h"
+
+class FUICommandInfo;
+class ITableRow;
+class STableViewBase;
+class SWidget;
+class UObject;
+struct FGeometry;
 
 #define LOCTEXT_NAMESPACE "ClothAssetSelector"
 
@@ -146,19 +197,22 @@ public:
 			FExecuteAction::CreateSP(this, &SAssetListRow::DeleteAsset)
 		);
 
-#if WITH_APEX_CLOTHING
-		UICommandList->MapAction(
-			Commands.ReimportAsset,
-			FExecuteAction::CreateSP(this, &SAssetListRow::ReimportAsset),
-			FCanExecuteAction::CreateSP(this, &SAssetListRow::CanReimportAsset)
-		);
-#endif
-
 		UICommandList->MapAction(
 			Commands.RebuildAssetParams,
 			FExecuteAction::CreateSP(this, &SAssetListRow::RebuildLODParameters),
 			FCanExecuteAction::CreateSP(this, &SAssetListRow::CanRebuildLODParameters)
 		);
+
+		// Add clothing asset exporters
+		ForEachClothingAssetExporter([this, &Commands](UClass* ExportedType)
+			{
+				if (const TSharedPtr<FUICommandInfo>* const CommandId = Commands.ExportAssets.Find(ExportedType->GetFName()))
+				{
+					UICommandList->MapAction(
+						*CommandId,
+						FExecuteAction::CreateSP(this, &SAssetListRow::ExportAsset, ExportedType));
+				}
+			});
 	}
 
 	virtual FReply OnMouseButtonUp(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent) override
@@ -171,10 +225,12 @@ public:
 			Builder.BeginSection(NAME_None, LOCTEXT("AssetActions_SectionName", "Actions"));
 			{
 				Builder.AddMenuEntry(FGenericCommands::Get().Delete);
-#if WITH_APEX_CLOTHING
-				Builder.AddMenuEntry(Commands.ReimportAsset);
-#endif
 				Builder.AddMenuEntry(Commands.RebuildAssetParams);
+
+				for (const TPair<FName, TSharedPtr<FUICommandInfo>>& CommandId : Commands.ExportAssets)
+				{
+					Builder.AddMenuEntry(CommandId.Value);
+				}
 			}
 			Builder.EndSection();
 
@@ -198,6 +254,7 @@ private:
 			FSkelMeshSourceSectionUserData& SourceSectionUserData = LODModel.UserSectionsData.FindOrAdd(OriginalSectionIndex);
 			SourceSectionUserData.bDisabled = LODModel.Sections[SectionIndex].bDisabled;
 			SourceSectionUserData.bCastShadow = LODModel.Sections[SectionIndex].bCastShadow;
+			SourceSectionUserData.bVisibleInRayTracing = LODModel.Sections[SectionIndex].bVisibleInRayTracing;			
 			SourceSectionUserData.bRecomputeTangent = LODModel.Sections[SectionIndex].bRecomputeTangent;
 			SourceSectionUserData.GenerateUpToLodIndex = LODModel.Sections[SectionIndex].GenerateUpToLodIndex;
 			SourceSectionUserData.CorrespondClothAssetIndex = LODModel.Sections[SectionIndex].CorrespondClothAssetIndex;
@@ -242,62 +299,6 @@ private:
 		}
 	}
 
-#if WITH_APEX_CLOTHING
-	void ReimportAsset()
-	{
-		if(UClothingAssetCommon* Asset = Item->ClothingAsset.Get())
-		{
-			if(USkeletalMesh* SkelMesh = Cast<USkeletalMesh>(Asset->GetOuter()))
-			{
-				FString ReimportPath = Asset->ImportedFilePath;
-
-				if(ReimportPath.IsEmpty())
-				{
-					const FText MessageText = LOCTEXT("Warning_NoReimportPath", "There is no reimport path available for this asset, it was likely created in the Editor. Would you like to select a file and overwrite this asset?");
-					EAppReturnType::Type MessageReturn = FMessageDialog::Open(EAppMsgType::YesNo, MessageText);
-
-					if(MessageReturn == EAppReturnType::Yes)
-					{
-						ReimportPath = ApexClothingUtils::PromptForClothingFile();
-					}
-				}
-
-				if(ReimportPath.IsEmpty())
-				{
-					return;
-				}
-
-				// Retry if the file isn't there
-				if(!FPaths::FileExists(ReimportPath))
-				{
-					const FText MessageText = LOCTEXT("Warning_NoFileFound", "Could not find an asset to reimport, select a new file on disk?");
-					EAppReturnType::Type MessageReturn = FMessageDialog::Open(EAppMsgType::YesNo, MessageText);
-
-					if(MessageReturn == EAppReturnType::Yes)
-					{
-						ReimportPath = ApexClothingUtils::PromptForClothingFile();
-					}
-				}
-
-				FClothingSystemEditorInterfaceModule& ClothingEditorInterface = FModuleManager::Get().LoadModuleChecked<FClothingSystemEditorInterfaceModule>("ClothingSystemEditorInterface");
-				UClothingAssetFactoryBase* Factory = ClothingEditorInterface.GetClothingAssetFactory();
-
-				if(Factory && Factory->CanImport(ReimportPath))
-				{
-					Factory->Reimport(ReimportPath, SkelMesh, Asset);
-
-					OnInvalidateList.ExecuteIfBound();
-				}
-			}
-		}
-	}
-
-	bool CanReimportAsset() const
-	{
-		return Item.IsValid() && !Item->ClothingAsset->ImportedFilePath.IsEmpty();
-	}
-#endif  // #if WITH_APEX_CLOTHING
-
 	// Using LOD0 of an asset, rebuild the other LOD masks by mapping the LOD0 parameters onto their meshes
 	void RebuildLODParameters()
 	{
@@ -337,6 +338,19 @@ private:
 					ParameterMapper.Map(SourceMask.Values, DestMask.Values);
 				}
 			}
+		}
+	}
+
+	void ExportAsset(UClass* ExportedType)
+	{
+		if (!Item.IsValid() || !ExportedType)
+		{
+			return;
+		}
+
+		if (const UClothingAssetCommon* const ClothingAsset = Item->ClothingAsset.Get())
+		{
+			ExportClothingAsset(ClothingAsset, ExportedType);
 		}
 	}
 
@@ -394,12 +408,15 @@ public:
 	{
 		if(InColumnName == Column_Enabled)
 		{
-			return SNew(SCheckBox)
+			return SNew(SBox)
+			.Padding(2.f)
+			[
+				SNew(SCheckBox)
 				.IsEnabled(this, &SMaskListRow::IsMaskCheckboxEnabled, Item)
 				.IsChecked(this, &SMaskListRow::IsMaskEnabledChecked, Item)
 				.OnCheckStateChanged(this, &SMaskListRow::OnMaskEnabledCheckboxChanged, Item)
-				.Padding(2.0f)
-				.ToolTipText(LOCTEXT("MaskEnableCheckBox_ToolTip", "Sets whether this mask is enabled and can affect final parameters for its target parameter."));
+				.ToolTipText(LOCTEXT("MaskEnableCheckBox_ToolTip", "Sets whether this mask is enabled and can affect final parameters for its target parameter."))
+			];
 		}
 
 		if(InColumnName == Column_MaskName)
@@ -734,153 +751,91 @@ void SClothAssetSelector::Construct(const FArguments& InArgs, USkeletalMesh* InM
 	ChildSlot
 	[
 		SNew(SVerticalBox)
+
 		+SVerticalBox::Slot()
-		.Padding(0.0f, 0.0f, 0.0f, 2.0f)
+		.Padding(FMargin(0.0f, 0.0f, 0.0f, 1.0f))
 		.AutoHeight()
 		[
 			SNew(SExpandableArea)
-			.BorderBackgroundColor(FLinearColor(0.6f, 0.6f, 0.6f))
-			.BodyBorderImage(FEditorStyle::GetBrush("DetailsView.CategoryMiddle"))
-			.BodyBorderBackgroundColor(FLinearColor(1.0f, 1.0f, 1.0f))
+			.BorderImage(FAppStyle::Get().GetBrush("DetailsView.CategoryTop"))
 			.HeaderContent()
 			[
 				SAssignNew(AssetHeaderBox, SHorizontalBox)
 				+SHorizontalBox::Slot()
 				.VAlign(VAlign_Center)
+				.Padding(10.f, 0.f, 0.f, 0.f)
 				[
 					SNew(STextBlock)
 					.Text(LOCTEXT("AssetExpander_Title", "Clothing Data"))
-					.Font(FEditorStyle::GetFontStyle("DetailsView.CategoryFontStyle"))
-					.ShadowOffset(FVector2D(1.0f, 1.0f))
+					.TransformPolicy(ETextTransformPolicy::ToUpper)
+					.TextStyle(FAppStyle::Get(), "DetailsView.CategoryTextStyle")
+					.Font(FAppStyle::Get().GetFontStyle("PropertyWindow.BoldFont"))
 				]
-#if WITH_APEX_CLOTHING
-				+SHorizontalBox::Slot()
+				+ SHorizontalBox::Slot()
 				.AutoWidth()
 				.VAlign(VAlign_Center)
 				.HAlign(HAlign_Right)
 				.Padding(0.0f, 0.0f, 4.0f, 0.0f)
 				[
-					SNew(SButton)
-					.ButtonStyle(FEditorStyle::Get(), "RoundButton")
-					.ForegroundColor(FEditorStyle::GetSlateColor("DefaultForeground"))
-					.ContentPadding(FMargin(2, 0))
-					.OnClicked(this, &SClothAssetSelector::OnImportApexFileClicked)
-					.HAlign(HAlign_Center)
-					.VAlign(VAlign_Center)
-					[
-						SNew(SHorizontalBox)
-
-						+ SHorizontalBox::Slot()
-						.AutoWidth()
-						.Padding(FMargin(0, 1))
-						[
-							SNew(SImage)
-							.Image(FEditorStyle::GetBrush("Plus"))
-						]
-
-						+ SHorizontalBox::Slot()
-						.VAlign(VAlign_Center)
-						.AutoWidth()
-						.Padding(FMargin(2, 0, 0, 0))
-						[
-							SNew(STextBlock)
-							.Font(IDetailLayoutBuilder::GetDetailFontBold())
-							.Text(LOCTEXT("NewAssetButtonText", "Import APEX file"))
-							.Visibility(this, &SClothAssetSelector::GetAssetHeaderButtonTextVisibility)
-							.ShadowOffset(FVector2D(1, 1))
-						]
-					]
-				]
-#endif  // #if WITH_APEX_CLOTHING
-				+ SHorizontalBox::Slot()
-					.AutoWidth()
-					.VAlign(VAlign_Center)
-					.HAlign(HAlign_Right)
-					.Padding(0.0f, 0.0f, 4.0f, 0.0f)
-					[
-						SNew(SComboButton)
-						.ButtonStyle(FEditorStyle::Get(), "RoundButton")
-					.ForegroundColor(FEditorStyle::GetSlateColor("DefaultForeground"))
-					.ContentPadding(FMargin(2, 0))
+					SNew(SPositiveActionButton)
+					.Text(LOCTEXT("CopyClothingFromMeshText_TEXT", "Add Clothing"))
+					.Icon(FAppStyle::Get().GetBrush("Icons.Plus"))
+					.ToolTipText(LOCTEXT("CopyClothingFromMeshText_TOOLTIP", "Copy Clothing from SkeletalMesh"))
 					.OnGetMenuContent(this, &SClothAssetSelector::OnGenerateSkeletalMeshPickerForClothCopy)
-					.HAlign(HAlign_Center)
-					.VAlign(VAlign_Center)
-					.ButtonContent()
-					[
-						SNew(SHorizontalBox)
+				]
 
-						+ SHorizontalBox::Slot()
-					.VAlign(VAlign_Center)
-					.AutoWidth()
-					.Padding(FMargin(2, 0, 0, 0))
-					[
-						SNew(STextBlock)
-						.Font(IDetailLayoutBuilder::GetDetailFontBold())
-					.Text(LOCTEXT("CopyClothingFromMeshText", "Copy Clothing from SkeletalMesh"))
-					.ShadowOffset(FVector2D(1, 1))
-					]
-					]
-					]
 				+ SHorizontalBox::Slot()
 				.AutoWidth()
 				.VAlign(VAlign_Center)
 				.HAlign(HAlign_Right)
 				[
 					SNew(SComboButton)
-					.ButtonStyle(FEditorStyle::Get(), "RoundButton")
-					.ForegroundColor(FEditorStyle::GetSlateColor("DefaultForeground"))
-					.ContentPadding(FMargin(2, 0))
+					.ForegroundColor(FSlateColor::UseStyle())
 					.OnGetMenuContent(this, &SClothAssetSelector::OnGetLodMenu)
 					.HasDownArrow(true)
 					.ButtonContent()
 					[
 						SNew(STextBlock)
-						.Font(IDetailLayoutBuilder::GetDetailFontBold())
 						.Text(this, &SClothAssetSelector::GetLodButtonText)
-						.ShadowOffset(FVector2D(1, 1))
 					]
 				]
 			]
 			.BodyContent()
 			[
-				SNew(SVerticalBox)
-				+ SVerticalBox::Slot()
-				.Padding(3.0f)
-				.AutoHeight()
+				SNew(SBox)
+				.Padding(FMargin(0.f, 2.0f))
+				.MinDesiredHeight(100.0f)
 				[
-					SNew(SBox)
-					.MinDesiredHeight(100.0f)
-					.MaxDesiredHeight(100.0f)
-					[
-						SAssignNew(AssetList, SAssetList)
-						.ItemHeight(24)
-						.ListItemsSource(&AssetListItems)
-						.OnGenerateRow(this, &SClothAssetSelector::OnGenerateWidgetForClothingAssetItem)
-						.OnSelectionChanged(this, &SClothAssetSelector::OnAssetListSelectionChanged)
-						.ClearSelectionOnClick(false)
-						.SelectionMode(ESelectionMode::Single)
-					]
+					SAssignNew(AssetList, SAssetList)
+					.ItemHeight(24)
+					.ListItemsSource(&AssetListItems)
+					.OnGenerateRow(this, &SClothAssetSelector::OnGenerateWidgetForClothingAssetItem)
+					.OnSelectionChanged(this, &SClothAssetSelector::OnAssetListSelectionChanged)
+					.ClearSelectionOnClick(false)
+					.SelectionMode(ESelectionMode::Single)
 				]
 			]
 		]
+
 		+ SVerticalBox::Slot()
-		.Padding(0.0f, 0.0f, 0.0f, 2.0f)
+		.Padding(FMargin(0.0f, 0.0f, 0.0f, 1.0f))
 		.AutoHeight()
 		[
 			SNew(SExpandableArea)
-			.BorderBackgroundColor(FLinearColor(0.6f, 0.6f, 0.6f))
-			.BodyBorderImage(FEditorStyle::GetBrush("DetailsView.CategoryMiddle"))
-			.BodyBorderBackgroundColor(FLinearColor(1.0f, 1.0f, 1.0f))
+			.BorderImage(FAppStyle::Get().GetBrush("DetailsView.CategoryTop"))
+			.Padding(FMargin(0.f, 2.0f))
 			.HeaderContent()
 			[
 				SAssignNew(MaskHeaderBox, SHorizontalBox)
 				+SHorizontalBox::Slot()
 				.VAlign(VAlign_Center)
+				.Padding(10.f, 0.f, 0.f, 0.f)
 				[
 					SNew(STextBlock)
 					.Text(LOCTEXT("MaskExpander_Title", "Masks"))
-					.Font(FEditorStyle::GetFontStyle("DetailsView.CategoryFontStyle"))
-					.ShadowOffset(FVector2D(1.0f, 1.0f))
+					.TransformPolicy(ETextTransformPolicy::ToUpper)
+					.TextStyle(FAppStyle::Get(), "DetailsView.CategoryTextStyle")
+					.Font(FAppStyle::Get().GetFontStyle("PropertyWindow.BoldFont"))
 				]
 				+SHorizontalBox::Slot()
 				.AutoWidth()
@@ -888,35 +843,16 @@ void SClothAssetSelector::Construct(const FArguments& InArgs, USkeletalMesh* InM
 				.HAlign(HAlign_Right)
 				[
 					SAssignNew(NewMaskButton, SButton)
-					.ButtonStyle(FEditorStyle::Get(), "RoundButton")
-					.ForegroundColor(FEditorStyle::GetSlateColor("DefaultForeground"))
-					.ContentPadding(FMargin(2, 0))
+					.ButtonStyle( FAppStyle::Get(), "SimpleButton" )
 					.OnClicked(this, &SClothAssetSelector::AddNewMask)
 					.IsEnabled(this, &SClothAssetSelector::CanAddNewMask)
+					.ToolTipText(LOCTEXT("AddMask_Tooltip", "Add a Mask"))
 					.HAlign(HAlign_Center)
 					.VAlign(VAlign_Center)
 					[
-						SNew(SHorizontalBox)
-
-						+ SHorizontalBox::Slot()
-						.AutoWidth()
-						.Padding(FMargin(0, 1))
-						[
-							SNew(SImage)
-							.Image(FEditorStyle::GetBrush("Plus"))
-						]
-
-						+ SHorizontalBox::Slot()
-						.VAlign(VAlign_Center)
-						.AutoWidth()
-						.Padding(FMargin(2, 0, 0, 0))
-						[
-							SNew(STextBlock)
-							.Font(IDetailLayoutBuilder::GetDetailFontBold())
-							.Text(LOCTEXT("NewMaskButtonText", "Mask"))
-							.Visibility(this, &SClothAssetSelector::GetMaskHeaderButtonTextVisibility)
-							.ShadowOffset(FVector2D(1, 1))
-						]
+						SNew(SImage)
+						.ColorAndOpacity(FSlateColor::UseForeground())
+						.Image(FAppStyle::Get().GetBrush("Icons.PlusCircle"))
 					]
 				]
 			]
@@ -924,8 +860,6 @@ void SClothAssetSelector::Construct(const FArguments& InArgs, USkeletalMesh* InM
 			[
 				SNew(SBox)
 				.MinDesiredHeight(100.0f)
-				.MaxDesiredHeight(200.0f)
-				.Padding(FMargin(3.0f))
 				[
 					SAssignNew(MaskList, SMaskList)
 					.ItemHeight(24)
@@ -937,16 +871,15 @@ void SClothAssetSelector::Construct(const FArguments& InArgs, USkeletalMesh* InM
 					.HeaderRow
 					(
 						SNew(SHeaderRow)
+
 						+ SHeaderRow::Column(SMaskListRow::Column_Enabled)
-						.FixedWidth(24)
-						.DefaultLabel(LOCTEXT("MaskListHeader_Enabled", "Enabled"))
-						.HeaderContent()
-						[
-							SNew(SBox)
-						]
+						.FixedWidth(40)
+						.HAlignCell(HAlign_Right) .DefaultLabel(FText::GetEmpty())
+
 						+ SHeaderRow::Column(SMaskListRow::Column_MaskName)
 						.FillWidth(0.5f)
 						.DefaultLabel(LOCTEXT("MaskListHeader_Name", "Name"))
+
 						+ SHeaderRow::Column(SMaskListRow::Column_CurrentTarget)
 						.FillWidth(0.3f)
 						.DefaultLabel(LOCTEXT("MaskListHeader_Target", "Target"))
@@ -955,23 +888,24 @@ void SClothAssetSelector::Construct(const FArguments& InArgs, USkeletalMesh* InM
 			]
 		]
 		+ SVerticalBox::Slot()					// Mesh to mesh skinning
-		.Padding(0.0f, 0.0f, 0.0f, 2.0f)
 		.AutoHeight()
+		.Padding(FMargin(0.0f, 0.0f, 0.0f, 1.0f))
 		[
 			SNew(SExpandableArea)
-			.BorderBackgroundColor(FLinearColor(0.6f, 0.6f, 0.6f))
-			.BodyBorderImage(FEditorStyle::GetBrush("DetailsView.CategoryMiddle"))
-			.BodyBorderBackgroundColor(FLinearColor(1.0f, 1.0f, 1.0f))
+			.BorderImage(FAppStyle::Get().GetBrush("DetailsView.CategoryTop"))
+			.Padding(FMargin(0.f, 2.0f))
 			.HeaderContent()
 			[
 				SNew(SHorizontalBox)
 				+ SHorizontalBox::Slot()
 				.VAlign(VAlign_Center)
+				.Padding(10, 8, 0, 8)
 				[
 					SNew(STextBlock)
 					.Text(LOCTEXT("MeshSkinning_Title", "Mesh Skinning"))
-					.Font(FEditorStyle::GetFontStyle("DetailsView.CategoryFontStyle"))
-					.ShadowOffset(FVector2D(1.0f, 1.0f))
+					.TransformPolicy(ETextTransformPolicy::ToUpper)
+					.TextStyle(FAppStyle::Get(), "DetailsView.CategoryTextStyle")
+					.Font(FAppStyle::Get().GetFontStyle("PropertyWindow.BoldFont"))
 				]
 			]
 			.BodyContent()
@@ -980,28 +914,38 @@ void SClothAssetSelector::Construct(const FArguments& InArgs, USkeletalMesh* InM
 
 				SNew(SSplitter)
 				.Orientation(EOrientation::Orient_Horizontal)
+				.PhysicalSplitterHandleSize(1.0)
 
 				+ SSplitter::Slot()
 				.Value(.3f)
 				[
 					SNew(SVerticalBox)
+
 					+ SVerticalBox::Slot()
-					.Padding(0.0f, 2.0f, 0.0f, 2.0f)
-					.AutoHeight()
+					.VAlign(VAlign_Center)
+					.Padding(16.0f, 2.0f, 0.0f, 2.0f)
 					[
 						SNew(STextBlock)
-						.Font(IDetailLayoutBuilder::GetDetailFontBold())
+						.Font(FAppStyle::Get().GetFontStyle("PropertyWindow.NormalFont"))
 						.Text(LOCTEXT("MultipleInfluences", "Use Multiple Influences"))
-						.ShadowOffset(FVector2D(1, 1))
 					]
 
 					+ SVerticalBox::Slot()
+					.VAlign(VAlign_Center)
+					.Padding(16.0f, 2.0f, 0.0f, 2.0f)
+					[
+						SNew(STextBlock)
+						.Font(FAppStyle::Get().GetFontStyle("PropertyWindow.NormalFont"))
+						.Text(LOCTEXT("CurrentRadius", "Kernel Radius"))
+					]
+					
+					+ SVerticalBox::Slot()
 					.Padding(0.0f, 2.0f, 0.0f, 2.0f)
 					.AutoHeight()
 					[
 						SNew(STextBlock)
 						.Font(IDetailLayoutBuilder::GetDetailFontBold())
-						.Text(LOCTEXT("CurrentRadius", "Kernel Radius"))
+						.Text(LOCTEXT("SmoothTransition", "Smooth Transition From Skin to Cloth"))
 						.ShadowOffset(FVector2D(1, 1))
 					]
 				]
@@ -1009,19 +953,20 @@ void SClothAssetSelector::Construct(const FArguments& InArgs, USkeletalMesh* InM
 				+ SSplitter::Slot()
 				[
 					SNew(SVerticalBox)
+
 					+ SVerticalBox::Slot()
-					.Padding(0.0f, 2.0f, 0.0f, 2.0f)
-					.AutoHeight()
+					.VAlign(VAlign_Center)
+					.Padding(12.0f, 4.0f, 0.0f, 4.0f)
 					[
 						SNew(SCheckBox)
 						.IsChecked(this, &SClothAssetSelector::GetCurrentUseMultipleInfluences)
 						.OnCheckStateChanged(this, &SClothAssetSelector::OnCurrentUseMultipleInfluencesChanged)
-						.IsEnabled(this, &SClothAssetSelector::CurrentUseMultipleInfluencesIsEnabled)
+						.IsEnabled(this, &SClothAssetSelector::IsValidClothLodSelected)
 					]
 
 					+ SVerticalBox::Slot()
-					.Padding(0.0f, 2.0f, 0.0f, 2.0f)
-					.AutoHeight()
+					.VAlign(VAlign_Center)
+					.Padding(12.0f, 4.0f, 0.0f, 4.0f)
 					[
 						SNew(SNumericEntryBox<float>)
 						.AllowSpin(true)
@@ -1035,11 +980,20 @@ void SClothAssetSelector::Construct(const FArguments& InArgs, USkeletalMesh* InM
 						.OnValueChanged(this, &SClothAssetSelector::OnCurrentKernelRadiusChanged)
 						.LabelPadding(0)
 					]
+					
+					+ SVerticalBox::Slot()
+					.Padding(0.0f, 2.0f, 0.0f, 2.0f)
+					.AutoHeight()
+					[
+						SNew(SCheckBox)
+						.IsChecked(this, &SClothAssetSelector::GetCurrentSmoothTransition)
+						.OnCheckStateChanged(this, &SClothAssetSelector::OnCurrentSmoothTransitionChanged)
+						.IsEnabled(this, &SClothAssetSelector::IsValidClothLodSelected)
+					]
 				]
 
 			]
 		]
-		
 	];
 
 	RefreshAssetList();
@@ -1125,7 +1079,43 @@ void SClothAssetSelector::OnCurrentUseMultipleInfluencesChanged(ECheckBoxState I
 	}
 }
 
-bool SClothAssetSelector::CurrentUseMultipleInfluencesIsEnabled() const
+
+ECheckBoxState SClothAssetSelector::GetCurrentSmoothTransition() const
+{
+	UClothingAssetCommon* Asset = SelectedAsset.Get();
+	if (Asset && Asset->IsValidLod(SelectedLod))
+	{
+		const FClothLODDataCommon& LodData = Asset->LodData[SelectedLod];
+		return LodData.bSmoothTransition ? ECheckBoxState::Checked : ECheckBoxState::Unchecked;
+	}
+
+	return ECheckBoxState::Undetermined;
+}
+
+
+void SClothAssetSelector::OnCurrentSmoothTransitionChanged(ECheckBoxState InValue)
+{
+	if (InValue == ECheckBoxState::Undetermined)
+	{
+		return;
+	}
+
+	UClothingAssetCommon* Asset = SelectedAsset.Get();
+	if (Asset && Asset->IsValidLod(SelectedLod))
+	{
+		FClothLODDataCommon& LodData = Asset->LodData[SelectedLod];
+		LodData.bSmoothTransition = (InValue == ECheckBoxState::Checked);
+
+		// Recompute weights
+		if (USkeletalMesh* SkeletalMesh = Cast<USkeletalMesh>(Asset->GetOuter()))
+		{
+			FScopedSkeletalMeshPostEditChange ScopedSkeletalMeshPostEditChange(SkeletalMesh);
+			SkeletalMesh->InvalidateDeriveDataCacheGUID();
+		}
+	}
+}
+
+bool SClothAssetSelector::IsValidClothLodSelected() const
 {
 	UClothingAssetCommon* Asset = SelectedAsset.Get();
 	return (Asset && Asset->IsValidLod(SelectedLod));
@@ -1153,21 +1143,6 @@ void SClothAssetSelector::PostUndo(bool bSuccess)
 	OnRefresh();
 }
 
-#if WITH_APEX_CLOTHING
-FReply SClothAssetSelector::OnImportApexFileClicked()
-{
-	if(Mesh)
-	{
-		ApexClothingUtils::PromptAndImportClothing(Mesh);
-		OnRefresh();
-
-		return FReply::Handled();
-	}
-
-	return FReply::Unhandled();
-}
-#endif  // #if WITH_APEX_CLOTHING
-
 void SClothAssetSelector::OnCopyClothingAssetSelected(const FAssetData& AssetData)
 {
 	USkeletalMesh* SourceSkelMesh = Cast<USkeletalMesh>(AssetData.GetAsset());
@@ -1194,7 +1169,7 @@ TSharedRef<SWidget> SClothAssetSelector::OnGenerateSkeletalMeshPickerForClothCop
 	FContentBrowserModule& ContentBrowserModule = FModuleManager::Get().LoadModuleChecked<FContentBrowserModule>(TEXT("ContentBrowser"));
 
 	FAssetPickerConfig AssetPickerConfig;
-	AssetPickerConfig.Filter.ClassNames.Add(USkeletalMesh::StaticClass()->GetFName());
+	AssetPickerConfig.Filter.ClassPaths.Add(USkeletalMesh::StaticClass()->GetClassPathName());
 	AssetPickerConfig.OnAssetSelected = FOnAssetSelected::CreateSP(this, &SClothAssetSelector::OnCopyClothingAssetSelected);
 	AssetPickerConfig.bAllowNullSelection = true;
 	AssetPickerConfig.InitialAssetViewType = EAssetViewType::List;

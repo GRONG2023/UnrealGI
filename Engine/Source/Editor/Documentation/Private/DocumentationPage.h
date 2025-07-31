@@ -1,9 +1,13 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 #pragma once
 
-#include "CoreMinimal.h"
-#include "Misc/Attribute.h"
+#include "Containers/Array.h"
+#include "Containers/UnrealString.h"
+#include "HAL/Platform.h"
 #include "IDocumentationPage.h"
+#include "Internationalization/Text.h"
+#include "Misc/Attribute.h"
+#include "Templates/SharedPointer.h"
 #include "UDNParser.h"
 
 class FDocumentationPage : public IDocumentationPage
@@ -43,6 +47,4 @@ private:
 	TArray<FExcerpt> StoredExcerpts;
 	/** The UDN meta data contained in this page */
 	FUDNPageMetadata StoredMetadata;
-	/** Signals if the page has been loaded */
-	bool IsLoaded;
 };

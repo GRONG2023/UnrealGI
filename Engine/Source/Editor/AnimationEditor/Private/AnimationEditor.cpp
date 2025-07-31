@@ -1,55 +1,92 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "AnimationEditor.h"
-#include "Misc/MessageDialog.h"
-#include "Modules/ModuleManager.h"
-#include "Framework/Application/SlateApplication.h"
-#include "Framework/MultiBox/MultiBoxBuilder.h"
-#include "EditorStyleSet.h"
-#include "EditorReimportHandler.h"
-#include "Animation/SmartName.h"
+
+#include "Algo/Transform.h"
+#include "AnimPreviewInstance.h"
+#include "Animation/AnimCompositeBase.h"
+#include "Animation/AnimCurveTypes.h"
+#include "Animation/AnimData/AnimDataModel.h"
+#include "Animation/AnimData/IAnimationDataController.h"
+#include "Animation/AnimMontage.h"
+#include "Animation/AnimSequence.h"
+#include "Animation/AnimSequenceBase.h"
 #include "Animation/AnimationAsset.h"
 #include "Animation/DebugSkelMeshComponent.h"
-#include "AssetData.h"
-#include "EdGraph/EdGraphSchema.h"
-#include "Animation/AnimSequence.h"
-#include "Animation/AnimMontage.h"
-#include "Editor/EditorEngine.h"
-#include "Factories/AnimSequenceFactory.h"
-#include "Factories/PoseAssetFactory.h"
-#include "EngineGlobals.h"
-#include "Editor.h"
-#include "IAnimationEditorModule.h"
-#include "IPersonaToolkit.h"
-#include "PersonaModule.h"
-#include "AnimationEditorMode.h"
-#include "IPersonaPreviewScene.h"
+#include "Animation/Skeleton.h"
+#include "Animation/SmartName.h"
 #include "AnimationEditorCommands.h"
-#include "IDetailsView.h"
-#include "ISkeletonTree.h"
-#include "ISkeletonEditorModule.h"
-#include "IDocumentation.h"
-#include "Widgets/Docking/SDockTab.h"
-#include "Animation/PoseAsset.h"
-#include "AnimPreviewInstance.h"
-#include "ScopedTransaction.h"
-#include "IContentBrowserSingleton.h"
-#include "ContentBrowserModule.h"
+#include "AnimationEditorMode.h"
 #include "AnimationEditorUtils.h"
-#include "AssetRegistryModule.h"
-#include "IAssetFamily.h"
-#include "IAnimationSequenceBrowser.h"
-#include "Framework/Notifications/NotificationManager.h"
-#include "Widgets/Notifications/SNotificationList.h"
-#include "PersonaCommonCommands.h"
-#include "Sound/SoundWave.h"
+#include "AnimationToolMenuContext.h"
+#include "DetailLayoutBuilder.h"
+#include "AssetRegistry/AssetData.h"
+#include "Curves/RichCurve.h"
+#include "Editor.h"
+#include "Editor/EditorEngine.h"
+#include "EditorReimportHandler.h"
 #include "Engine/CurveTable.h"
-#include "Developer/AssetTools/Public/IAssetTools.h"
-#include "Developer/AssetTools/Public/AssetToolsModule.h"
-#include "ISkeletonTreeItem.h"
-#include "Algo/Transform.h"
-#include "ISequenceRecorder.h"
+#include "Engine/SkeletalMesh.h"
+#include "Framework/Application/SlateApplication.h"
+#include "Framework/Commands/UIAction.h"
+#include "Framework/Commands/UICommandList.h"
+#include "Framework/Docking/TabManager.h"
+#include "Framework/MultiBox/MultiBoxBuilder.h"
+#include "Framework/MultiBox/MultiBoxExtender.h"
+#include "Framework/Notifications/NotificationManager.h"
+#include "Framework/SlateDelegates.h"
+#include "HAL/PlatformCrt.h"
+#include "HAL/PlatformMisc.h"
 #include "IAnimSequenceCurveEditor.h"
+#include "IAnimationEditorModule.h"
+#include "IAnimationSequenceBrowser.h"
+#include "IAssetFamily.h"
+#include "IDetailsView.h"
+#include "IDocumentation.h"
+#include "IPersonaPreviewScene.h"
+#include "IPersonaToolkit.h"
+#include "ISequenceRecorder.h"
+#include "ISkeletonEditorModule.h"
+#include "ISkeletonTree.h"
+#include "ISkeletonTreeItem.h"
+#include "Internationalization/Internationalization.h"
+#include "Logging/LogMacros.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/Attribute.h"
+#include "Misc/MessageDialog.h"
+#include "Modules/ModuleManager.h"
+#include "PersonaCommonCommands.h"
+#include "PersonaDelegates.h"
+#include "PersonaModule.h"
+#include "PersonaToolMenuContext.h"
+#include "Sound/SoundWave.h"
+#include "Styling/AppStyle.h"
+#include "Subsystems/ImportSubsystem.h"
+#include "Templates/Casts.h"
+#include "Textures/SlateIcon.h"
+#include "ToolMenu.h"
+#include "ToolMenuContext.h"
+#include "ToolMenuDelegates.h"
+#include "ToolMenuEntry.h"
+#include "ToolMenuMisc.h"
+#include "ToolMenuOwner.h"
+#include "ToolMenuSection.h"
+#include "ToolMenus.h"
+#include "Toolkits/AssetEditorToolkit.h"
+#include "UObject/Object.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/UObjectGlobals.h"
+#include "UObject/WeakObjectPtr.h"
+#include "UObject/WeakObjectPtrTemplates.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
+#include "Widgets/Docking/SDockTab.h"
+#include "Widgets/Notifications/SNotificationList.h"
+
+class ITimeSliderController;
+class IToolkitHost;
+class SWidget;
+class UFactory;
 
 const FName AnimationEditorAppIdentifier = FName(TEXT("AnimationEditorApp"));
 
@@ -66,30 +103,22 @@ const FName AnimationEditorTabs::AssetDetailsTab(TEXT("AnimAssetPropertiesTab"))
 const FName AnimationEditorTabs::CurveNamesTab(TEXT("AnimCurveViewerTab"));
 const FName AnimationEditorTabs::SlotNamesTab(TEXT("SkeletonSlotNames"));
 const FName AnimationEditorTabs::AnimMontageSectionsTab(TEXT("AnimMontageSections"));
+const FName AnimationEditorTabs::FindReplaceTab(TEXT("FindReplaceTab"));
 
 DEFINE_LOG_CATEGORY(LogAnimationEditor);
 
 #define LOCTEXT_NAMESPACE "AnimationEditor"
 
-FAnimationEditor::FAnimationEditor()
-{
-	UEditorEngine* Editor = Cast<UEditorEngine>(GEngine);
-	if (Editor != nullptr)
-	{
-		Editor->RegisterForUndo(this);
-	}
-}
-
 FAnimationEditor::~FAnimationEditor()
 {
-	UEditorEngine* Editor = Cast<UEditorEngine>(GEngine);
-	if (Editor != nullptr)
-	{
-		Editor->UnregisterForUndo(this);
-	}
-
 	GEditor->GetEditorSubsystem<UImportSubsystem>()->OnAssetPostImport.RemoveAll(this);
 	FReimportManager::Instance()->OnPostReimport().RemoveAll(this);
+	//Make sure all delegate for preview mesh change are removed, by setting it to nullptr
+	if (PersonaToolkit.IsValid())
+	{
+		constexpr bool bSetPreviewMeshInAsset = false;
+		PersonaToolkit->SetPreviewMesh(nullptr, bSetPreviewMeshInAsset);
+	}
 }
 
 void FAnimationEditor::RegisterTabSpawners(const TSharedRef<class FTabManager>& InTabManager)
@@ -112,8 +141,11 @@ void FAnimationEditor::InitAnimationEditor(const EToolkitMode::Type Mode, const 
 	FReimportManager::Instance()->OnPostReimport().AddRaw(this, &FAnimationEditor::HandlePostReimport);
 	GEditor->GetEditorSubsystem<UImportSubsystem>()->OnAssetPostImport.AddRaw(this, &FAnimationEditor::HandlePostImport);
 
+	FPersonaToolkitArgs PersonaToolkitArgs;
+	PersonaToolkitArgs.OnPreviewSceneSettingsCustomized = FOnPreviewSceneSettingsCustomized::FDelegate::CreateSP(this, &FAnimationEditor::HandleOnPreviewSceneSettingsCustomized);
+	
 	FPersonaModule& PersonaModule = FModuleManager::LoadModuleChecked<FPersonaModule>("Persona");
-	PersonaToolkit = PersonaModule.CreatePersonaToolkit(InAnimationAsset);
+	PersonaToolkit = PersonaModule.CreatePersonaToolkit(InAnimationAsset, PersonaToolkitArgs);
 
 	PersonaToolkit->GetPreviewScene()->SetDefaultAnimationMode(EPreviewSceneDefaultAnimationMode::Animation);
 
@@ -142,6 +174,8 @@ void FAnimationEditor::InitAnimationEditor(const EToolkitMode::Type Mode, const 
 	RegenerateMenusAndToolbars();
 
 	OpenNewAnimationDocumentTab(AnimationAsset);
+
+	PersonaToolkit->GetPreviewScene()->SetAllowMeshHitProxies(false);
 }
 
 FName FAnimationEditor::GetToolkitFName() const
@@ -164,8 +198,26 @@ FLinearColor FAnimationEditor::GetWorldCentricTabColorScale() const
 	return FLinearColor(0.3f, 0.2f, 0.5f, 0.5f);
 }
 
+void FAnimationEditor::InitToolMenuContext(FToolMenuContext& MenuContext)
+{
+	FAssetEditorToolkit::InitToolMenuContext(MenuContext);
+
+	UAnimationToolMenuContext* AnimationToolMenuContext = NewObject<UAnimationToolMenuContext>();
+	AnimationToolMenuContext->AnimationEditor = SharedThis(this);
+	MenuContext.AddObject(AnimationToolMenuContext);
+
+	UPersonaToolMenuContext* PersonaToolMenuContext = NewObject<UPersonaToolMenuContext>();
+	PersonaToolMenuContext->SetToolkit(GetPersonaToolkit());
+	MenuContext.AddObject(PersonaToolMenuContext);
+}
+
 void FAnimationEditor::Tick(float DeltaTime)
 {
+	//Do not tick the animation editor if we are compiling the skeletalmesh we edit
+	if (GetPersonaToolkit()->GetMesh() && GetPersonaToolkit()->GetMesh()->IsCompiling())
+	{
+		return;
+	}
 	GetPersonaToolkit()->GetPreviewScene()->InvalidateViews();
 }
 
@@ -195,10 +247,6 @@ void FAnimationEditor::BindCommands()
 		FExecuteAction::CreateSP(this, &FAnimationEditor::OnReimportAnimation),
 		FCanExecuteAction::CreateSP(this, &FAnimationEditor::HasValidAnimationSequence));
 
-	ToolkitCommands->MapAction(FAnimationEditorCommands::Get().ApplyAnimation,
-		FExecuteAction::CreateSP(this, &FAnimationEditor::OnApplyRawAnimChanges),
-		FCanExecuteAction::CreateSP(this, &FAnimationEditor::CanApplyRawAnimChanges));
-
 	ToolkitCommands->MapAction(FAnimationEditorCommands::Get().ExportToFBX_AnimData,
 		FExecuteAction::CreateSP(this, &FAnimationEditor::OnExportToFBX, EExportSourceOption::CurrentAnimation_AnimData),
 		FCanExecuteAction::CreateSP(this, &FAnimationEditor::HasValidAnimationSequence));
@@ -219,8 +267,69 @@ void FAnimationEditor::BindCommands()
 		FExecuteAction::CreateRaw(&GetPersonaToolkit()->GetPreviewScene().Get(), &IPersonaPreviewScene::TogglePlayback));
 }
 
+TSharedPtr<FAnimationEditor> FAnimationEditor::GetAnimationEditor(const FToolMenuContext& InMenuContext)
+{
+	if (UAnimationToolMenuContext* Context = InMenuContext.FindContext<UAnimationToolMenuContext>())
+	{
+		if (Context->AnimationEditor.IsValid())
+		{
+			return StaticCastSharedPtr<FAnimationEditor>(Context->AnimationEditor.Pin());
+		}
+	}
+
+	return TSharedPtr<FAnimationEditor>();
+}
+
+void FAnimationEditor::HandleOnPreviewSceneSettingsCustomized(IDetailLayoutBuilder& DetailBuilder) const
+{
+	DetailBuilder.HideCategory("Animation Blueprint");
+}
+
 void FAnimationEditor::ExtendToolbar()
 {
+	FToolMenuOwnerScoped OwnerScoped(this);
+
+	// Add in Editor Specific functionality
+	FName ParentName;
+	static const FName MenuName = GetToolMenuToolbarName(ParentName);
+
+	UToolMenu* ToolMenu = UToolMenus::Get()->ExtendMenu(MenuName);
+	const FToolMenuInsert SectionInsertLocation("Asset", EToolMenuInsertType::After);
+
+	{
+		ToolMenu->AddDynamicSection("Persona", FNewToolMenuDelegate::CreateLambda([](UToolMenu* InToolMenu)
+		{
+			TSharedPtr<FAnimationEditor> AnimationEditor = GetAnimationEditor(InToolMenu->Context);
+			if (AnimationEditor.IsValid() && AnimationEditor->PersonaToolkit.IsValid())
+			{
+				FPersonaModule& PersonaModule = FModuleManager::LoadModuleChecked<FPersonaModule>("Persona");
+				FPersonaModule::FCommonToolbarExtensionArgs Args;
+				Args.bPreviewAnimation = false;
+				Args.bReferencePose = false;
+				PersonaModule.AddCommonToolbarExtensions(InToolMenu, Args);
+			}
+		}), SectionInsertLocation);
+	}
+
+	{
+		FToolMenuSection& AnimationSection = ToolMenu->AddSection("Animation", LOCTEXT("ToolbarAnimationSectionLabel", "Animation"), SectionInsertLocation);
+		AnimationSection.AddEntry(FToolMenuEntry::InitToolBarButton(FAnimationEditorCommands::Get().ReimportAnimation));
+		AnimationSection.AddEntry(FToolMenuEntry::InitToolBarButton(FAnimationEditorCommands::Get().ApplyCompression, LOCTEXT("Toolbar_ApplyCompression", "Apply Compression")));
+		AnimationSection.AddEntry(FToolMenuEntry::InitComboButton(
+			"ExportAsset",
+			FToolUIActionChoice(FUIAction()),
+			FNewToolMenuChoice(FOnGetContent::CreateSP(this, &FAnimationEditor::GenerateExportAssetMenu)),
+			LOCTEXT("ExportAsset_Label", "Export Asset"),
+			LOCTEXT("ExportAsset_ToolTip", "Export Assets for this skeleton."),
+			FSlateIcon(FAppStyle::GetAppStyleSetName(), "Persona.ExportToFBX")
+		));
+	}
+
+	{
+		FToolMenuSection& EditingSection = ToolMenu->AddSection("Editing", LOCTEXT("ToolbarEditingSectionLabel", "Editing"), SectionInsertLocation);
+		EditingSection.AddEntry(FToolMenuEntry::InitToolBarButton(FAnimationEditorCommands::Get().SetKey, LOCTEXT("Toolbar_SetKey", "Key")));
+	}
+
 	// If the ToolbarExtender is valid, remove it before rebuilding it
 	if (ToolbarExtender.IsValid())
 	{
@@ -253,35 +362,6 @@ void FAnimationEditor::ExtendToolbar()
 		FToolBarExtensionDelegate::CreateLambda([this](FToolBarBuilder& ToolbarBuilder)
 		{
 			FPersonaModule& PersonaModule = FModuleManager::LoadModuleChecked<FPersonaModule>("Persona");
-			FPersonaModule::FCommonToolbarExtensionArgs Args;
-			Args.bPreviewAnimation = false;
-			Args.bReferencePose = false;
-			PersonaModule.AddCommonToolbarExtensions(ToolbarBuilder, PersonaToolkit.ToSharedRef(), Args);
-
-			ToolbarBuilder.BeginSection("Animation");
-			{
-				ToolbarBuilder.AddToolBarButton(FAnimationEditorCommands::Get().ReimportAnimation);
-				ToolbarBuilder.AddToolBarButton(FAnimationEditorCommands::Get().ApplyCompression, NAME_None, LOCTEXT("Toolbar_ApplyCompression", "Compression"));
-
-				{
-					ToolbarBuilder.AddComboButton(
-						FUIAction(),
-						FOnGetContent::CreateSP(this, &FAnimationEditor::GenerateExportAssetMenu),
-						LOCTEXT("ExportAsset_Label", "Export Asset"),
-						LOCTEXT("ExportAsset_ToolTip", "Export Assets for this skeleton."),
-						FSlateIcon(FEditorStyle::GetStyleSetName(), "Persona.ExportToFBX")
-					);
-				}
-			}
-			ToolbarBuilder.EndSection();
-
-			ToolbarBuilder.BeginSection("Editing");
-			{
-				ToolbarBuilder.AddToolBarButton(FAnimationEditorCommands::Get().SetKey, NAME_None, LOCTEXT("Toolbar_SetKey", "Key"));
-				ToolbarBuilder.AddToolBarButton(FAnimationEditorCommands::Get().ApplyAnimation, NAME_None, LOCTEXT("Toolbar_ApplyAnimation", "Apply"));
-			}
-			ToolbarBuilder.EndSection();
-
 			TSharedRef<class IAssetFamily> AssetFamily = PersonaModule.CreatePersonaAssetFamily(AnimationAsset);
 			AddToolbarWidget(PersonaModule.CreateAssetFamilyShortcutWidget(SharedThis(this), AssetFamily));
 		}	
@@ -292,43 +372,26 @@ void FAnimationEditor::ExtendMenu()
 {
 	MenuExtender = MakeShareable(new FExtender);
 
-	struct Local
-	{
-		static void AddAssetMenu(FMenuBuilder& MenuBuilder, FAnimationEditor* InAnimationEditor)
-		{
-			MenuBuilder.BeginSection("AnimationEditor", LOCTEXT("AnimationEditorAssetMenu_Animation", "Animation"));
-			{
-				MenuBuilder.AddMenuEntry(FAnimationEditorCommands::Get().ApplyCompression);
+	FToolMenuOwnerScoped OwnerScoped(this);
 
-				MenuBuilder.AddSubMenu(
-					LOCTEXT("ExportToFBX", "Export to FBX"),
-					LOCTEXT("ExportToFBX_ToolTip", "Export current animation to FBX"),
-					FNewMenuDelegate::CreateSP(InAnimationEditor, &FAnimationEditor::FillExportAssetMenu),
-					false,
-					FSlateIcon(FEditorStyle::GetStyleSetName(), "ClassIcon.")
-				);
+	// Add in Editor Specific functionality
+	UToolMenu* ToolMenu = UToolMenus::Get()->ExtendMenu("AssetEditor.AnimationEditor.MainMenu.Asset");
+	const FToolMenuInsert SectionInsertLocation("AssetEditorActions", EToolMenuInsertType::After);
 
-				MenuBuilder.AddMenuEntry(FAnimationEditorCommands::Get().AddLoopingInterpolation);
-				MenuBuilder.AddMenuEntry(FAnimationEditorCommands::Get().RemoveBoneTracks);
+	FToolMenuSection& AnimationSection = ToolMenu->AddSection("AnimationEditor", LOCTEXT("AnimationEditorAssetMenu_Animation", "Animation"), SectionInsertLocation);
+	AnimationSection.AddEntry(FToolMenuEntry::InitMenuEntry(FAnimationEditorCommands::Get().ApplyCompression));
+	
+	AnimationSection.AddEntry(FToolMenuEntry::InitSubMenu(
+		"ExportAsset",
+		LOCTEXT("ExportAsset_Label", "Export Asset"),
+		LOCTEXT("ExportAsset_ToolTip", "Export Assets for this skeleton."),
+		FNewToolMenuChoice(FNewMenuDelegate::CreateSP(this, &FAnimationEditor::FillExportAssetMenu)),
+		false,
+		FSlateIcon(FAppStyle::GetAppStyleSetName(), "Persona.ExportToFBX")
+	));
 
-				MenuBuilder.AddSubMenu(
-					LOCTEXT("CopyCurvesToSoundWave", "Copy Curves To SoundWave"),
-					LOCTEXT("CopyCurvesToSoundWave_ToolTip", "Copy curves from this animation to the selected SoundWave"),
-					FNewMenuDelegate::CreateSP(InAnimationEditor, &FAnimationEditor::FillCopyToSoundWaveMenu),
-					false,
-					FSlateIcon(FEditorStyle::GetStyleSetName(), "ClassIcon.")
-				);
-			}
-			MenuBuilder.EndSection();
-		}
-	};
-
-	MenuExtender->AddMenuExtension(
-		"AssetEditorActions",
-		EExtensionHook::After,
-		GetToolkitCommands(),
-		FMenuExtensionDelegate::CreateStatic(&Local::AddAssetMenu, this)
-		);
+	AnimationSection.AddEntry(FToolMenuEntry::InitMenuEntry(FAnimationEditorCommands::Get().AddLoopingInterpolation));
+	AnimationSection.AddEntry(FToolMenuEntry::InitMenuEntry(FAnimationEditorCommands::Get().RemoveBoneTracks));
 
 	AddMenuExtender(MenuExtender);
 
@@ -362,16 +425,6 @@ void FAnimationEditor::HandleObjectSelected(UObject* InObject)
 	}
 }
 
-void FAnimationEditor::PostUndo(bool bSuccess)
-{
-	OnPostUndo.Broadcast();
-}
-
-void FAnimationEditor::PostRedo(bool bSuccess)
-{
-	OnPostUndo.Broadcast();
-}
-
 void FAnimationEditor::HandleDetailsCreated(const TSharedRef<IDetailsView>& InDetailsView)
 {
 	DetailsView = InDetailsView;
@@ -385,7 +438,7 @@ TSharedPtr<SDockTab> FAnimationEditor::OpenNewAnimationDocumentTab(UAnimationAss
 	{
 		FString	DocumentLink;
 
-		FAnimDocumentArgs Args(PersonaToolkit->GetPreviewScene(), GetPersonaToolkit(), GetSkeletonTree()->GetEditableSkeleton(), OnPostUndo, OnSectionsChanged);
+		FAnimDocumentArgs Args(PersonaToolkit->GetPreviewScene(), GetPersonaToolkit(), GetSkeletonTree()->GetEditableSkeleton(), OnSectionsChanged);
 		Args.OnDespatchObjectsSelected = FOnObjectsSelected::CreateSP(this, &FAnimationEditor::HandleObjectsSelected);
 		Args.OnDespatchInvokeTab = FOnInvokeTab::CreateSP(this, &FAssetEditorToolkit::InvokeTab);
 		Args.OnDespatchSectionsChanged = FSimpleDelegate::CreateSP(this, &FAnimationEditor::HandleSectionsChanged);
@@ -422,7 +475,8 @@ TSharedPtr<SDockTab> FAnimationEditor::OpenNewAnimationDocumentTab(UAnimationAss
 
 		TAttribute<FText> NameAttribute = TAttribute<FText>::Create(TAttribute<FText>::FGetter::CreateStatic(&Local::GetObjectName, (UObject*)InAnimAsset));
 
-		if (SharedAnimDocumentTab.IsValid())
+		const bool bIsReusedEditor = SharedAnimDocumentTab.IsValid();
+		if (bIsReusedEditor)
 		{
 			OpenedTab = SharedAnimDocumentTab.Pin();
 			OpenedTab->SetContent(TabContents);
@@ -455,10 +509,16 @@ TSharedPtr<SDockTab> FAnimationEditor::OpenNewAnimationDocumentTab(UAnimationAss
 			SharedAnimDocumentTab = OpenedTab;
 		}
 
-		// Invoke the preview tab if this is a montage
+		// Invoke the montage sections tab, and make sure the asset browser is there and in focus when we are dealing with a montage.
 		if(InAnimAsset->IsA<UAnimMontage>())
 		{
 			TabManager->TryInvokeTab(AnimationEditorTabs::AnimMontageSectionsTab);
+
+			// Only activate the asset browser tab when this is a reused Animation Editor window.
+			if (bIsReusedEditor)
+			{
+				TabManager->TryInvokeTab(AnimationEditorTabs::AssetBrowserTab);
+			}
 			OnSectionsChanged.Broadcast();
 		}
 		else
@@ -477,8 +537,7 @@ TSharedPtr<SDockTab> FAnimationEditor::OpenNewAnimationDocumentTab(UAnimationAss
 		}
 
 		// let the asset family know too
-		TSharedRef<IAssetFamily> AssetFamily = PersonaModule.CreatePersonaAssetFamily(InAnimAsset);
-		AssetFamily->RecordAssetOpened(FAssetData(InAnimAsset));
+		PersonaModule.RecordAssetOpened(FAssetData(InAnimAsset));
 	}
 
 	return OpenedTab;
@@ -512,11 +571,9 @@ void FAnimationEditor::EditCurves(UAnimSequenceBase* InAnimSequence, const TArra
 
 	check(CurveEditor.IsValid());
 
-	CurveEditor.Pin()->ResetCurves();
-
 	for(const FCurveEditInfo& CurveInfo : InCurveInfo)
 	{
-		CurveEditor.Pin()->AddCurve(CurveInfo.CurveDisplayName, CurveInfo.CurveColor, CurveInfo.Name, CurveInfo.Type, CurveInfo.CurveIndex, CurveInfo.OnCurveModified);
+		CurveEditor.Pin()->AddCurve(CurveInfo.CurveDisplayName, CurveInfo.CurveColor, CurveInfo.CurveName, CurveInfo.Type, CurveInfo.CurveIndex, CurveInfo.OnCurveModified);
 	}
 
 	CurveEditor.Pin()->ZoomToFit();
@@ -528,7 +585,7 @@ void FAnimationEditor::StopEditingCurves(const TArray<FCurveEditInfo>& InCurveIn
 	{
 		for(const FCurveEditInfo& CurveInfo : InCurveInfo)
 		{
-			CurveEditor.Pin()->RemoveCurve(CurveInfo.Name, CurveInfo.Type, CurveInfo.CurveIndex);
+			CurveEditor.Pin()->RemoveCurve(CurveInfo.CurveName, CurveInfo.Type, CurveInfo.CurveIndex);
 		}
 	}
 }
@@ -582,43 +639,12 @@ void FAnimationEditor::OnSetKey()
 	}
 }
 
-bool FAnimationEditor::CanApplyRawAnimChanges() const
-{
-	UAnimSequence* AnimSequence = Cast<UAnimSequence>(AnimationAsset);
-
-	// ideally would be great if we can only show if something changed
-	return (AnimSequence && (AnimSequence->DoesNeedRebake() || AnimSequence->DoesNeedRecompress()));
-}
-
-void FAnimationEditor::OnApplyRawAnimChanges()
-{
-	UAnimSequence* AnimSequence = Cast<UAnimSequence>(AnimationAsset);
-	if (AnimSequence)
-	{
-		if (AnimSequence->DoesNeedRebake() || AnimSequence->DoesNeedRecompress())
-		{
-			FScopedTransaction ScopedTransaction(LOCTEXT("BakeAnimation", "Bake Animation"));
-			if (AnimSequence->DoesNeedRebake())
-			{
-				AnimSequence->Modify(true);
-				AnimSequence->BakeTrackCurvesToRawAnimation();
-			}
-
-			if (AnimSequence->DoesNeedRecompress())
-			{
-				AnimSequence->Modify(true);
-				AnimSequence->RequestSyncAnimRecompression(false);
-			}
-		}
-	}
-}
-
 void FAnimationEditor::OnReimportAnimation()
 {
 	UAnimSequence* AnimSequence = Cast<UAnimSequence>(AnimationAsset);
 	if (AnimSequence)
 	{
-		FReimportManager::Instance()->Reimport(AnimSequence, true);
+		FReimportManager::Instance()->ReimportAsync(AnimSequence, true);
 	}
 }
 
@@ -645,7 +671,7 @@ void FAnimationEditor::OnExportToFBX(const EExportSourceOption Option)
 	}
 	else if (Option == EExportSourceOption::CurrentAnimation_PreviewMesh)
 	{
-		TArray<TWeakObjectPtr<UObject>> Skeletons;
+		TArray<TSoftObjectPtr<UObject>> Skeletons;
 		Skeletons.Add(PersonaToolkit->GetSkeleton());
 		AnimationEditorUtils::CreateAnimationAssets(Skeletons, UAnimSequence::StaticClass(), FString("_PreviewMesh"), FAnimAssetCreated::CreateSP(this, &FAnimationEditor::ExportToFBX, true), AnimationAsset, true);
 	}
@@ -679,7 +705,7 @@ bool FAnimationEditor::ExportToFBX(const TArray<UObject*> AssetsToExport, bool b
 		FPersonaModule& PersonaModule = FModuleManager::GetModuleChecked<FPersonaModule>("Persona");
 		
 		
-		AnimSequenceExportResult = PersonaModule.ExportToFBX(AnimSequences, GetPersonaToolkit()->GetPreviewScene()->GetPreviewMeshComponent()->SkeletalMesh);
+		AnimSequenceExportResult = PersonaModule.ExportToFBX(AnimSequences, GetPersonaToolkit()->GetPreviewScene()->GetPreviewMeshComponent()->GetSkeletalMeshAsset());
 	}
 	return AnimSequenceExportResult;
 }
@@ -700,13 +726,14 @@ void FAnimationEditor::OnRemoveBoneTrack()
 {
 	if ( FMessageDialog::Open(EAppMsgType::YesNo, LOCTEXT("WarningOnRemovingBoneTracks", "This will clear all bone transform of the animation, source data, and edited layer information. This doesn't remove notifies, and curves. Do you want to continue?")) == EAppReturnType::Yes)
 	{
-		FScopedTransaction ScopedTransaction(LOCTEXT("RemoveAnimation", "Remove Track"));
-
 		UAnimSequence* AnimSequence = Cast<UAnimSequence>(AnimationAsset);
 		if (AnimSequence)
 		{
-			AnimSequence->Modify();
-			AnimSequence->RemoveAllTracks();
+			IAnimationDataController& Controller = AnimSequence->GetController();
+			IAnimationDataController::FScopedBracket ScopedBracket(Controller, LOCTEXT("OnRemoveBoneTrack_Bracket", "Removing all Bone Animation and Transform Curve Tracks"));
+
+			Controller.RemoveAllBoneTracks();
+			Controller.RemoveAllCurvesOfType(ERawCurveTrackTypes::RCT_Transform);			
 		}
 	}
 }
@@ -718,29 +745,6 @@ TSharedRef< SWidget > FAnimationEditor::GenerateExportAssetMenu() const
 	FillExportAssetMenu(MenuBuilder);
 	return MenuBuilder.MakeWidget();
 }
-
-void FAnimationEditor::FillCopyToSoundWaveMenu(FMenuBuilder& MenuBuilder) const
-{
-	FAssetPickerConfig AssetPickerConfig;
-	AssetPickerConfig.Filter.ClassNames.Add(*USoundWave::StaticClass()->GetName());
-	AssetPickerConfig.bAllowNullSelection = false;
-	AssetPickerConfig.OnAssetSelected = FOnAssetSelected::CreateRaw(this, &FAnimationEditor::CopyCurveToSoundWave);
-	AssetPickerConfig.InitialAssetViewType = EAssetViewType::List;
-
-	FContentBrowserModule& ContentBrowserModule = FModuleManager::Get().LoadModuleChecked<FContentBrowserModule>(TEXT("ContentBrowser"));
-
-	MenuBuilder.AddWidget(
-		SNew(SBox)
-		.WidthOverride(300.0f)
-		.HeightOverride(300.0f)
-		[
-			ContentBrowserModule.Get().CreateAssetPicker(AssetPickerConfig)
-		],
-		FText::GetEmpty()
-	);
-
-}
-
 void FAnimationEditor::FillExportAssetMenu(FMenuBuilder& MenuBuilder) const
 {
 	MenuBuilder.BeginSection("AnimationExport", LOCTEXT("ExportAssetMenuHeading", "Export"));
@@ -788,13 +792,10 @@ void FAnimationEditor::CopyCurveToSoundWave(const FAssetData& SoundWaveAssetData
 	UCurveTable* CurveTable = SoundWave->GetInternalCurveData();
 
 	// iterate over curves in anim data
-	const int32 NumCurves = Sequence->RawCurveData.FloatCurves.Num();
-	for (int32 CurveIdx = 0; CurveIdx < NumCurves; CurveIdx++)
+	for (const FFloatCurve& FloatCurve : Sequence->GetDataModel()->GetFloatCurves())
 	{
-		FFloatCurve& AnimCurve = Sequence->RawCurveData.FloatCurves[CurveIdx];
-
-		FRichCurve* Curve = FindOrAddCurve(CurveTable, AnimCurve.Name.DisplayName);
-		*Curve = AnimCurve.FloatCurve; // copy data
+		FRichCurve* Curve = FindOrAddCurve(CurveTable, FloatCurve.GetName());
+		*Curve = FloatCurve.FloatCurve; // copy data
 	}
 
 	// we will need to add a curve to tell us the time we want to start playing audio
@@ -835,7 +836,7 @@ void FAnimationEditor::ConditionalRefreshEditor(UObject* InObject)
 
 			for (FAnimSegment& Segment : Slot.AnimTrack.AnimSegments)
 			{
-				if (Segment.AnimReference == InObject)
+				if (Segment.GetAnimReference() == InObject)
 				{
 					bInterestingAsset = true;
 					break;
@@ -877,7 +878,7 @@ void FAnimationEditor::HandleAnimationSequenceBrowserCreated(const TSharedRef<IA
 bool FAnimationEditor::RecordMeshToAnimation(USkeletalMeshComponent* PreviewComponent, UAnimSequence* NewAsset) const
 {
 	ISequenceRecorder& RecorderModule = FModuleManager::Get().LoadModuleChecked<ISequenceRecorder>("SequenceRecorder");
-	return RecorderModule.RecordSingleNodeInstanceToAnimation(PreviewComponent, NewAsset);
+	return RecorderModule.RecordSingleNodeInstanceToAnimation(PreviewComponent, NewAsset, /*bShowMessage*/false);
 }
 
 #undef LOCTEXT_NAMESPACE

@@ -1,7 +1,6 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "EditorUtilityBlueprint.h"
-#include "Modules/ModuleManager.h"
 
 /////////////////////////////////////////////////////
 // UEditorUtilityBlueprint
@@ -19,9 +18,4 @@ bool UEditorUtilityBlueprint::SupportedByDefaultBlueprintFactory() const
 bool UEditorUtilityBlueprint::AlwaysCompileOnLoad() const
 {
 	return true;
-}
-
-bool UEditorUtilityBlueprint::CanRecompileWhilePlayingInEditor() const
-{
-	return false;
 }

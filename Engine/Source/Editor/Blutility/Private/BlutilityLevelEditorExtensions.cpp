@@ -1,100 +1,146 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "BlutilityLevelEditorExtensions.h"
-#include "Modules/ModuleManager.h"
-#include "Misc/PackageName.h"
-#include "Textures/SlateIcon.h"
-#include "Framework/Commands/UIAction.h"
-#include "Framework/MultiBox/MultiBoxExtender.h"
-#include "Framework/MultiBox/MultiBoxBuilder.h"
-#include "EditorStyleSet.h"
+
 #include "ActorActionUtility.h"
-#include "EditorUtilityBlueprint.h"
-#include "LevelEditor.h"
-#include "BlueprintEditorModule.h"
+#include "Algo/AnyOf.h"
+#include "AssetRegistry/AssetData.h"
 #include "BlutilityMenuExtensions.h"
+#include "Containers/Array.h"
+#include "Containers/Map.h"
+#include "Containers/Set.h"
+#include "CoreTypes.h"
+#include "Delegates/Delegate.h"
+#include "EditorUtilityAssetPrototype.h"
+#include "EditorUtilityBlueprint.h"
+#include "EditorUtilityWidgetProjectSettings.h"
+#include "Framework/MultiBox/MultiBoxExtender.h"
 #include "GameFramework/Actor.h"
+#include "HAL/PlatformCrt.h"
+#include "IAssetTools.h"
+#include "LevelEditor.h"
+#include "Logging/MessageLog.h"
+#include "Misc/NamePermissionList.h"
+#include "Modules/ModuleManager.h"
+#include "Selection.h"
+#include "Templates/Casts.h"
+#include "Templates/SharedPointer.h"
+#include "Templates/SubclassOf.h"
+#include "ToolMenus.h"
+#include "UObject/Class.h"
+#include "UObject/NameTypes.h"
+#include "UObject/UObjectIterator.h"
+
+class FUICommandList;
 
 #define LOCTEXT_NAMESPACE "BlutilityLevelEditorExtensions"
 
-FDelegateHandle LevelViewportExtenderHandle;
-
-class FBlutilityLevelEditorExtensions_Impl
+void FBlutilityLevelEditorExtensions::InstallHooks()
 {
-public:
-	static TSharedRef<FExtender> OnExtendLevelEditorActorContextMenu(const TSharedRef<FUICommandList> CommandList, const TArray<AActor*> SelectedActors)
-	{
-		TSharedRef<FExtender> Extender(new FExtender());
+	UToolMenus::RegisterStartupCallback(
+		FSimpleMulticastDelegate::FDelegate::CreateStatic(&FBlutilityLevelEditorExtensions::RegisterMenus));
+}
 
-		// Run thru the assets to determine if any meet our criteria
-		TArray<IEditorUtilityExtension*> SupportedUtils;
+void FBlutilityLevelEditorExtensions::RegisterMenus()
+{
+	// Mark us as the owner of everything we add.
+	FToolMenuOwnerScoped OwnerScoped("FBlutilityLevelEditorExtensions");
+
+	UToolMenu* const Menu = UToolMenus::Get()->ExtendMenu("LevelEditor.ActorContextMenu");
+	if (!Menu)
+	{
+		return;
+	}
+
+	FToolMenuSection& Section = Menu->FindOrAddSection("ActorOptions");
+	Section.AddDynamicEntry("BlutilityLevelEditorExtensions", FNewToolMenuSectionDelegate::CreateLambda([](FToolMenuSection& InSection)
+	{
+		TArray<AActor*> SelectedActors;
+		GEditor->GetSelectedActors()->GetSelectedObjects<AActor>(SelectedActors);
+
+		TMap<TSharedRef<FAssetActionUtilityPrototype>, TSet<int32>> UtilityAndSelectionIndices;
+
+		// Run through the actors to determine if any meet our criteria.
+		TArray<AActor*> SupportedActors;
 		if (SelectedActors.Num() > 0)
 		{
-			// Check blueprint utils (we need to load them to query their validity against these actors)
-			TArray<FAssetData> UtilAssets;
-			FBlutilityMenuExtensions::GetBlutilityClasses(UtilAssets, UActorActionUtility::StaticClass()->GetFName());
-			if (UtilAssets.Num() > 0)
+			FMessageLog EditorErrors("EditorErrors");
+
+			auto ProcessActorAction = [&UtilityAndSelectionIndices, &SelectedActors, &SupportedActors, &EditorErrors](const TSharedRef<FAssetActionUtilityPrototype>& ActionUtilityPrototype)
 			{
-				for (AActor* Actor : SelectedActors)
-				{			
-					if(Actor)
+				if (ActionUtilityPrototype->IsLatestVersion())
+				{
+					TArray<TSoftClassPtr<UObject>> SupportedClassPtrs = ActionUtilityPrototype->GetSupportedClasses();
+					if (SupportedClassPtrs.Num() > 0)
 					{
-						for(FAssetData& UtilAsset : UtilAssets)
+						for (AActor* Actor : SelectedActors)
 						{
-							if(UEditorUtilityBlueprint* Blueprint = Cast<UEditorUtilityBlueprint>(UtilAsset.GetAsset()))
+							if (Actor)
 							{
-								if(UClass* BPClass = Blueprint->GeneratedClass.Get())
+								UClass* ActorClass = Actor->GetClass();
+								const bool bPassesClassFilter = 
+									Algo::AnyOf(SupportedClassPtrs, [ActorClass](TSoftClassPtr<UObject> ClassPtr){ return ActorClass->IsChildOf(ClassPtr.Get()); });
+
+								if (bPassesClassFilter)
 								{
-									if(UActorActionUtility* DefaultObject = Cast<UActorActionUtility>(BPClass->GetDefaultObject()))
-									{
-										UClass* SupportedClass = DefaultObject->GetSupportedClass();
-										if(SupportedClass == nullptr || (SupportedClass && Actor->GetClass()->IsChildOf(SupportedClass)))
-										{
-											SupportedUtils.AddUnique(DefaultObject);
-										}
-									}
+									const int32 Index = SupportedActors.AddUnique(Actor);
+									UtilityAndSelectionIndices.FindOrAdd(ActionUtilityPrototype).Add(Index);
 								}
 							}
 						}
 					}
 				}
+				else
+                {
+					const FAssetData& BlutilityAssetData =  ActionUtilityPrototype->GetUtilityBlueprintAsset();
+					if (IAssetTools::Get().GetAssetClassPathPermissionList(EAssetClassAction::ViewAsset)->PassesFilter(BlutilityAssetData.AssetClassPath.ToString()))
+					{
+						EditorErrors.NewPage(LOCTEXT("ScriptedActions", "Scripted Actions"));
+						TSharedRef<FTokenizedMessage> ErrorMessage = EditorErrors.Error();
+						ErrorMessage->AddToken(FAssetNameToken::Create(BlutilityAssetData.GetObjectPathString(), FText::FromString(BlutilityAssetData.GetObjectPathString())));
+						ErrorMessage->AddToken(FTextToken::Create(LOCTEXT("NeedsToBeUpdated", "needs to be re-saved and possibly upgraded.")));
+					}
+                }
+			};
+
+			// Check blueprint utils (we need to load them to query their validity against these assets)
+			TArray<FAssetData> UtilAssets;
+			FBlutilityMenuExtensions::GetBlutilityClasses(UtilAssets, UActorActionUtility::StaticClass()->GetClassPathName());
+
+			// Process asset based utilities
+            for (const FAssetData& UtilAsset : UtilAssets)
+            {
+            	if (const UClass* ParentClass = UBlueprint::GetBlueprintParentClassFromAssetTags(UtilAsset))
+            	{
+            		// We only care about UEditorUtilityBlueprint's that are compiling subclasses of UActorActionUtility
+            		if (ParentClass->IsChildOf(UActorActionUtility::StaticClass()))
+            		{
+            			ProcessActorAction(MakeShared<FAssetActionUtilityPrototype>(UtilAsset));
+					}
+				}
+			}
+
+			// Don't warn errors if searching generated classes, since not all utilities may be updated to work with generated classes yet (Must be done piecemeal).
+			const UEditorUtilityWidgetProjectSettings* EditorUtilitySettings = GetDefault<UEditorUtilityWidgetProjectSettings>();
+			if (!EditorUtilitySettings->bSearchGeneratedClassesForScriptedActions)
+			{
+				EditorErrors.Notify(LOCTEXT("SomeProblemsWithActorActionUtility", "There were some problems with some ActorActionUtility Blueprints."));
 			}
 		}
 
-		if (SupportedUtils.Num() > 0)
+		if (SupportedActors.Num() > 0)
 		{
-			// Add asset actions extender
-			Extender->AddMenuExtension(
-				"ActorControl",
-				EExtensionHook::After,
-				CommandList,
-				FMenuExtensionDelegate::CreateStatic(&FBlutilityMenuExtensions::CreateBlutilityActionsMenu, SupportedUtils));
+			FBlutilityMenuExtensions::CreateActorBlutilityActionsMenu(InSection, UtilityAndSelectionIndices, SupportedActors);
 		}
-
-		return Extender;
-	}
-};
-
-void FBlutilityLevelEditorExtensions::InstallHooks()
-{
-	FLevelEditorModule& LevelEditorModule = FModuleManager::Get().LoadModuleChecked<FLevelEditorModule>("LevelEditor");
-	auto& MenuExtenders = LevelEditorModule.GetAllLevelViewportContextMenuExtenders();
-
-	MenuExtenders.Add(FLevelEditorModule::FLevelViewportMenuExtender_SelectedActors::CreateStatic(&FBlutilityLevelEditorExtensions_Impl::OnExtendLevelEditorActorContextMenu));
-	LevelViewportExtenderHandle = MenuExtenders.Last().GetHandle();
+	}));
 }
 
 void FBlutilityLevelEditorExtensions::RemoveHooks()
 {
-	if (LevelViewportExtenderHandle.IsValid())
-	{
-		FLevelEditorModule* LevelEditorModule = FModuleManager::Get().GetModulePtr<FLevelEditorModule>("LevelEditor");
-		if (LevelEditorModule)
-		{
-			typedef FLevelEditorModule::FLevelViewportMenuExtender_SelectedActors DelegateType;
-			LevelEditorModule->GetAllLevelViewportContextMenuExtenders().RemoveAll([=](const DelegateType& In) { return In.GetHandle() == LevelViewportExtenderHandle; });
-		}
-	}
+	// Remove our startup delegate in case it's still around.
+	UToolMenus::UnRegisterStartupCallback("FBlutilityLevelEditorExtensions");
+	// Remove everything we added to UToolMenus.
+	UToolMenus::UnregisterOwner("FBlutilityLevelEditorExtensions");
 }
 
 #undef LOCTEXT_NAMESPACE

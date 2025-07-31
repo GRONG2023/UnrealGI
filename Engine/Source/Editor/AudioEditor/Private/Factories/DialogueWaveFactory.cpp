@@ -1,8 +1,16 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Factories/DialogueWaveFactory.h"
+
+#include "Containers/UnrealString.h"
+#include "Misc/AssertionMacros.h"
 #include "Sound/DialogueWave.h"
 #include "Sound/SoundWave.h"
+#include "Templates/SubclassOf.h"
+
+class FFeedbackContext;
+class UClass;
+class UObject;
 
 UDialogueWaveFactory::UDialogueWaveFactory(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -19,7 +27,7 @@ UObject* UDialogueWaveFactory::FactoryCreateNew(UClass* Class, UObject* InParent
 
 	if (InitialSoundWave)
 	{
-		DialogueWave->SpokenText = InitialSoundWave->SpokenText;
+		DialogueWave->SpokenText = InitialSoundWave->SpokenText_DEPRECATED;
 		DialogueWave->bMature = InitialSoundWave->bMature;
 	}
 

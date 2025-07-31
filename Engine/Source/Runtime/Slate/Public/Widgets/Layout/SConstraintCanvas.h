@@ -22,142 +22,163 @@ class FSlateWindowElementList;
  * ConstraintCanvas is a layout widget that allows you to arbitrary position and size child widgets in a 
  * relative coordinate space.  Additionally it permits anchoring widgets.
  */
-class SLATE_API SConstraintCanvas : public SPanel
+class SConstraintCanvas : public SPanel
 {
 public:
 
 	/**
 	 * ConstraintCanvas slots allow child widgets to be positioned and sized
 	 */
-	class FSlot : public TSlotBase<FSlot>
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS
+	class SLATE_API FSlot : public TSlotBase<FSlot>
 	{
-	public:		
-		FSlot& Offset( const TAttribute<FMargin>& InOffset )
-		{
-			SetAttribute(OffsetAttr, InOffset, EInvalidateWidgetReason::Layout);
-			return *this;
-		}
-
-		FSlot& Anchors( const TAttribute<FAnchors>& InAnchors )
-		{
-			SetAttribute(AnchorsAttr, InAnchors, EInvalidateWidgetReason::Layout);
-			return *this;
-		}
-
-		FSlot& Alignment(const TAttribute<FVector2D>& InAlignment)
-		{
-			SetAttribute(AlignmentAttr, InAlignment, EInvalidateWidgetReason::Layout);
-			return *this;
-		}
-
-		FSlot& AutoSize(const TAttribute<bool>& InAutoSize)
-		{
-			SetAttribute(AutoSizeAttr, InAutoSize, EInvalidateWidgetReason::Layout);
-			return *this;
-		}
-
-		FSlot& ZOrder(const TAttribute<float>& InZOrder)
-		{
-			// Layout isn't entirely correct here, but Paint wouldn't be either.
-			// We need the parent to redraw the children because the logical order didn't change
-			// but the paint order may have if ZOrder changed, so the painted elements need to
-			// be resorted.
-			SetAttribute(ZOrderAttr, InZOrder, EInvalidateWidgetReason::Layout);
-			return *this;
-		}
-
-		FSlot& Expose( FSlot*& OutVarToInit )
-		{
-			OutVarToInit = this;
-			return *this;
-		}
-
-		/** Offset */
-		TAttribute<FMargin> OffsetAttr;
-
-		/** Anchors */
-		TAttribute<FAnchors> AnchorsAttr;
-
-		/** Size */
-		TAttribute<FVector2D> AlignmentAttr;
-
-		/** Auto-Size */
-		TAttribute<bool> AutoSizeAttr;
-
-		/** Z-Order */
-		TAttribute<float> ZOrderAttr;
-
+	public:
 		/** Default values for a slot. */
 		FSlot()
 			: TSlotBase<FSlot>()
-			, OffsetAttr( FMargin( 0, 0, 1, 1 ) )
-			, AnchorsAttr( FAnchors( 0.0f, 0.0f ) )
-			, AlignmentAttr( FVector2D( 0.5f, 0.5f ) )
-			, AutoSizeAttr( false )
-			, ZOrderAttr( 0 )
+			, OffsetAttr(FMargin(0, 0, 1, 1))
+			, AnchorsAttr(FAnchors(0.0f, 0.0f))
+			, AlignmentAttr(FVector2D(0.5f, 0.5f))
+			, AutoSizeAttr(false)
+			, ZOrder(0)
 		{ }
+
+		SLATE_SLOT_BEGIN_ARGS(FSlot, TSlotBase<FSlot>)
+			SLATE_ATTRIBUTE(FMargin, Offset)
+			SLATE_ATTRIBUTE(FAnchors, Anchors)
+			SLATE_ATTRIBUTE(FVector2D, Alignment)
+			SLATE_ATTRIBUTE(bool, AutoSize)
+			SLATE_ARGUMENT(TOptional<float>, ZOrder)
+		SLATE_SLOT_END_ARGS()
+
+		void Construct(const FChildren& SlotOwner, FSlotArguments&& InArgs);
+
+		void SetOffset( const TAttribute<FMargin>& InOffset )
+		{
+			SetAttribute(OffsetAttr, InOffset, EInvalidateWidgetReason::Layout);
+		}
+
+		FMargin GetOffset() const
+		{
+			return OffsetAttr.Get();
+		}
+
+		void SetAnchors( const TAttribute<FAnchors>& InAnchors )
+		{
+			SetAttribute(AnchorsAttr, InAnchors, EInvalidateWidgetReason::Layout);
+		}
+
+		FAnchors GetAnchors() const
+		{
+			return AnchorsAttr.Get();
+		}
+
+		void SetAlignment(const TAttribute<FVector2D>& InAlignment)
+		{
+			SetAttribute(AlignmentAttr, InAlignment, EInvalidateWidgetReason::Layout);
+		}
+
+		FVector2D GetAlignment() const
+		{
+			return AlignmentAttr.Get();
+		}
+
+		void SetAutoSize(const TAttribute<bool>& InAutoSize)
+		{
+			SetAttribute(AutoSizeAttr, InAutoSize, EInvalidateWidgetReason::Layout);
+		}
+
+		bool GetAutoSize() const
+		{
+			return AutoSizeAttr.Get();
+		}
+
+		void SetZOrder(float InZOrder);
+
+		float GetZOrder() const
+		{
+			return ZOrder;
+		}
+
+	public:
+		/** Offset */
+		UE_DEPRECATED(5.0, "Direct access to OffsetAttr is now deprecated. Use the getter or setter.")
+		TAttribute<FMargin> OffsetAttr;
+
+		/** Anchors */
+		UE_DEPRECATED(5.0, "Direct access to AnchorsAttr is now deprecated. Use the getter or setter.")
+		TAttribute<FAnchors> AnchorsAttr;
+
+		/** Size */
+		UE_DEPRECATED(5.0, "Direct access to AlignmentAttr is now deprecated. Use the getter or setter.")
+		TAttribute<FVector2D> AlignmentAttr;
+
+		/** Auto-Size */
+		UE_DEPRECATED(5.0, "Direct access to AutoSizeAttr is now deprecated. Use the getter or setter.")
+		TAttribute<bool> AutoSizeAttr;
+
+#if WITH_EDITORONLY_DATA
+		/** Z-Order */
+		UE_DEPRECATED(5.0, "Direct access to ZOrderAttr is now deprecated. Use the getter or setter.")
+		TAttribute<float> ZOrderAttr;
+#endif
+	private:
+		/** Z-Order */
+		float ZOrder;
 	};
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 	SLATE_BEGIN_ARGS( SConstraintCanvas )
 		{
 			_Visibility = EVisibility::SelfHitTestInvisible;
 		}
 
-		SLATE_SUPPORTS_SLOT( SConstraintCanvas::FSlot )
+		SLATE_SLOT_ARGUMENT( FSlot, Slots)
 
 	SLATE_END_ARGS()
 
-	SConstraintCanvas();
+	SLATE_API SConstraintCanvas();
 
 	/**
 	 * Construct this widget
 	 *
 	 * @param	InArgs	The declaration data for this widget
 	 */
-	void Construct( const FArguments& InArgs );
+	SLATE_API void Construct( const FArguments& InArgs );
 
-	static FSlot& Slot()
-	{
-		return *(new FSlot());
-	}
+	static SLATE_API FSlot::FSlotArguments Slot();
 
+	using FScopedWidgetSlotArguments = TPanelChildren<FSlot>::FScopedWidgetSlotArguments;
 	/**
 	 * Adds a content slot.
 	 *
 	 * @return The added slot.
 	 */
-	FSlot& AddSlot()
-	{
-		Invalidate(EInvalidateWidget::Layout);
-
-		SConstraintCanvas::FSlot& NewSlot = *(new FSlot());
-		this->Children.Add( &NewSlot );
-		return NewSlot;
-	}
+	SLATE_API FScopedWidgetSlotArguments AddSlot();
 
 	/**
 	 * Removes a particular content slot.
 	 *
 	 * @param SlotWidget The widget in the slot to remove.
 	 */
-	int32 RemoveSlot( const TSharedRef<SWidget>& SlotWidget );
+	SLATE_API int32 RemoveSlot( const TSharedRef<SWidget>& SlotWidget );
 
 	/**
 	 * Removes all slots from the panel.
 	 */
-	void ClearChildren();
+	SLATE_API void ClearChildren();
 
 public:
 
 	// Begin SWidget overrides
-	virtual void OnArrangeChildren( const FGeometry& AllottedGeometry, FArrangedChildren& ArrangedChildren ) const override;
-	virtual int32 OnPaint( const FPaintArgs& Args, const FGeometry& AllottedGeometry, const FSlateRect& MyCullingRect, FSlateWindowElementList& OutDrawElements, int32 LayerId, const FWidgetStyle& InWidgetStyle, bool bParentEnabled ) const override;
-	virtual FChildren* GetChildren() override;
+	SLATE_API virtual void OnArrangeChildren( const FGeometry& AllottedGeometry, FArrangedChildren& ArrangedChildren ) const override;
+	SLATE_API virtual int32 OnPaint( const FPaintArgs& Args, const FGeometry& AllottedGeometry, const FSlateRect& MyCullingRect, FSlateWindowElementList& OutDrawElements, int32 LayerId, const FWidgetStyle& InWidgetStyle, bool bParentEnabled ) const override;
+	SLATE_API virtual FChildren* GetChildren() override;
 	// End SWidget overrides
 
 protected:
 	// Begin SWidget overrides.
-	virtual FVector2D ComputeDesiredSize(float) const override;
+	SLATE_API virtual FVector2D ComputeDesiredSize(float) const override;
 	// End SWidget overrides.
 
 private:
@@ -166,7 +187,7 @@ private:
 	typedef TArray<bool, TInlineAllocator<16>> FArrangedChildLayers;
 
 	/** Like ArrangeChildren but also generates an array of layering information (see FArrangedChildLayers). */
-	void ArrangeLayeredChildren(const FGeometry& AllottedGeometry, FArrangedChildren& ArrangedChildren, FArrangedChildLayers& ArrangedChildLayers) const;
+	SLATE_API void ArrangeLayeredChildren(const FGeometry& AllottedGeometry, FArrangedChildren& ArrangedChildren, FArrangedChildLayers& ArrangedChildLayers) const;
 
 protected:
 

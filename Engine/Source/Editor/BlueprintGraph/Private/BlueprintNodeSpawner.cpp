@@ -1,12 +1,21 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "BlueprintNodeSpawner.h"
-#include "EdGraph/EdGraph.h"
-#include "UObject/Package.h"
-#include "K2Node.h"
-#include "K2Node_IfThenElse.h"
-#include "BlueprintNodeTemplateCache.h"
+
 #include "BlueprintNodeSpawnerUtils.h"
+#include "BlueprintNodeTemplateCache.h"
+#include "Containers/Array.h"
+#include "CoreTypes.h"
+#include "EdGraph/EdGraph.h"
+#include "EdGraph/EdGraphNode.h"
+#include "Internationalization/Internationalization.h"
+#include "K2Node.h"
+#include "Misc/AssertionMacros.h"
+#include "ProfilingDebugging/CpuProfilerTrace.h"
+#include "Styling/AppStyle.h"
+#include "UObject/Class.h"
+#include "UObject/Package.h"
+#include "UObject/UnrealType.h"
 
 /*******************************************************************************
  * Static UBlueprintNodeSpawner Helpers
@@ -99,6 +108,8 @@ void UBlueprintNodeSpawner::Prime()
 //------------------------------------------------------------------------------
 FBlueprintActionUiSpec const& UBlueprintNodeSpawner::PrimeDefaultUiSpec(UEdGraph* TargetGraph) const
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(UBlueprintNodeSpawner::PrimeDefaultUiSpec);
+
 	bool bTemplateNodeFetched = false;
 	UEdGraphNode* NodeTemplate = nullptr;
 	// @TODO: boo! const cast... all to make this callable from GetUiSpec()
@@ -203,7 +214,7 @@ FBlueprintActionUiSpec const& UBlueprintNodeSpawner::PrimeDefaultUiSpec(UEdGraph
 		if (!MenuSignature.Icon.IsSet() && (TargetGraph != nullptr))
 		{
 			// want to set it to something so we won't end up back in this condition
-			MenuSignature.Icon = FSlateIcon("EditorStyle", "GraphEditor.Default_16x");
+			MenuSignature.Icon = FSlateIcon(FAppStyle::GetAppStyleSetName(), "GraphEditor.Default_16x");
 		}
 		bTemplateNodeFetched = true;
 	}
@@ -253,6 +264,8 @@ FBlueprintNodeSignature UBlueprintNodeSpawner::GetSpawnerSignature() const
 //------------------------------------------------------------------------------
 FBlueprintActionUiSpec UBlueprintNodeSpawner::GetUiSpec(FBlueprintActionContext const& Context, FBindingSet const& Bindings) const
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(UBlueprintNodeSpawner::GetUiSpec);
+
 	FBlueprintActionUiSpec MenuSignature = PrimeDefaultUiSpec();
 	DynamicUiSignatureGetter.ExecuteIfBound(Context, Bindings, &MenuSignature);
 	return MenuSignature;
@@ -273,6 +286,8 @@ UEdGraphNode* UBlueprintNodeSpawner::GetCachedTemplateNode() const
 //------------------------------------------------------------------------------
 UEdGraphNode* UBlueprintNodeSpawner::GetTemplateNode(UEdGraph* TargetGraph, FBindingSet const& Bindings) const
 {       
+	TRACE_CPUPROFILER_EVENT_SCOPE(UBlueprintNodeSpawner::GetTemplateNode);
+	
 	UEdGraphNode* TemplateNode = BlueprintNodeSpawnerImpl::GetSharedTemplateCache()->GetNodeTemplate(this, TargetGraph);
 
 	if (TemplateNode && Bindings.Num() > 0) 
@@ -296,6 +311,8 @@ void UBlueprintNodeSpawner::ClearCachedTemplateNode() const
 
 bool UBlueprintNodeSpawner::IsTemplateNodeFilteredOut(FBlueprintActionFilter const& Filter) const
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(UBlueprintNodeSpawner::IsTemplateNodeFilteredOut);
+
 	bool bIsFilteredOut = false;
 	if(UK2Node* NodeTemplate = Cast<UK2Node>(GetTemplateNode()))
 	{
@@ -305,7 +322,7 @@ bool UBlueprintNodeSpawner::IsTemplateNodeFilteredOut(FBlueprintActionFilter con
 }
 
 //------------------------------------------------------------------------------
-UEdGraphNode* UBlueprintNodeSpawner::SpawnEdGraphNode(TSubclassOf<UEdGraphNode> InNodeClass, UEdGraph* ParentGraph, FBindingSet const& Bindings, FVector2D const Location, FCustomizeNodeDelegate PostSpawnDelegate) const
+UEdGraphNode* UBlueprintNodeSpawner::SpawnEdGraphNode(TSubclassOf<UEdGraphNode> InNodeClass, UEdGraph* ParentGraph, const FBindingSet& Bindings, FVector2D Location, FCustomizeNodeDelegate PostSpawnDelegate) const
 {
 	UEdGraphNode* NewNode = nullptr;
 	if (InNodeClass != nullptr)
@@ -316,8 +333,8 @@ UEdGraphNode* UBlueprintNodeSpawner::SpawnEdGraphNode(TSubclassOf<UEdGraphNode> 
 
 		// position the node before invoking PostSpawnDelegate (in case it 
 		// wishes to modify this positioning)
-		NewNode->NodePosX = Location.X;
-		NewNode->NodePosY = Location.Y;
+		NewNode->NodePosX = static_cast<int32>(Location.X);
+		NewNode->NodePosY = static_cast<int32>(Location.Y);
 
 		bool const bIsTemplateNode = FBlueprintNodeTemplateCache::IsTemplateOuter(ParentGraph);
 		PostSpawnDelegate.ExecuteIfBound(NewNode, bIsTemplateNode);

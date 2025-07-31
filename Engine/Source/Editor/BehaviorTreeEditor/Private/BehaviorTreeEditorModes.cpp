@@ -1,9 +1,14 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "BehaviorTreeEditorModes.h"
-#include "BehaviorTreeEditorTabs.h"
+
+#include "BehaviorTreeEditor.h"
 #include "BehaviorTreeEditorTabFactories.h"
+#include "BehaviorTreeEditorTabs.h"
 #include "BehaviorTreeEditorToolbar.h"
+#include "Framework/Docking/TabManager.h"
+#include "Misc/AssertionMacros.h"
+#include "Types/SlateEnums.h"
 
 /////////////////////////////////////////////////////
 // FBehaviorTreeEditorApplicationMode
@@ -19,17 +24,10 @@ FBehaviorTreeEditorApplicationMode::FBehaviorTreeEditorApplicationMode(TSharedPt
 	BehaviorTreeEditorTabFactories.RegisterFactory(MakeShareable(new FBehaviorTreeSearchSummoner(InBehaviorTreeEditor)));
 	BehaviorTreeEditorTabFactories.RegisterFactory(MakeShareable(new FBlackboardSummoner(InBehaviorTreeEditor)));
 
-	TabLayout = FTabManager::NewLayout( "Standalone_BehaviorTree_Layout_v1" )
+	TabLayout = FTabManager::NewLayout( "Standalone_BehaviorTree_Layout_v2" )
 	->AddArea
 	(
 		FTabManager::NewPrimaryArea() ->SetOrientation(Orient_Vertical)
-		->Split
-		(
-			FTabManager::NewStack()
-			->SetSizeCoefficient(0.1f)
-			->AddTab(InBehaviorTreeEditor->GetToolbarTabId(), ETabState::OpenedTab) 
-			->SetHideTabWell(true) 
-		)
 		->Split
 		(
 			FTabManager::NewSplitter() ->SetOrientation(Orient_Horizontal)
@@ -113,17 +111,10 @@ FBlackboardEditorApplicationMode::FBlackboardEditorApplicationMode(TSharedPtr<cl
 	BlackboardTabFactories.RegisterFactory(MakeShareable(new FBlackboardEditorSummoner(InBehaviorTreeEditor)));
 	BlackboardTabFactories.RegisterFactory(MakeShareable(new FBlackboardDetailsSummoner(InBehaviorTreeEditor)));
 
-	TabLayout = FTabManager::NewLayout( "Standalone_BlackboardEditor_Layout_v1" )
+	TabLayout = FTabManager::NewLayout( "Standalone_BlackboardEditor_Layout_v2" )
 	->AddArea
 	(
 		FTabManager::NewPrimaryArea() ->SetOrientation(Orient_Vertical)
-		->Split
-		(
-			FTabManager::NewStack()
-			->SetSizeCoefficient(0.1f)
-			->SetHideTabWell( true )
-			->AddTab(InBehaviorTreeEditor->GetToolbarTabId(), ETabState::OpenedTab)
-		)
 		->Split
 		(
 			FTabManager::NewSplitter() ->SetOrientation(Orient_Horizontal)

@@ -1,7 +1,13 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "UnloadedBlueprintData.h"
+
+#include "ClassViewerNode.h"
 #include "Engine/BlueprintGeneratedClass.h"
+#include "HAL/PlatformCrt.h"
+#include "UObject/Class.h"
+#include "UObject/Object.h"
+#include "UObject/WeakObjectPtrTemplates.h"
 
 
 FUnloadedBlueprintData::FUnloadedBlueprintData(TWeakPtr<FClassViewerNode> InClassViewerNode)
@@ -26,7 +32,7 @@ void FUnloadedBlueprintData::SetClassFlags(uint32 InFlags)
 
 bool FUnloadedBlueprintData::IsChildOf(const UClass* InClass) const
 {
-	TSharedPtr<FClassViewerNode> CurrentNode = ClassViewerNode.Pin()->ParentNode.Pin();
+	TSharedPtr<FClassViewerNode> CurrentNode = ClassViewerNode.Pin()->GetParentNode();
 
 	// Keep going through parents till you find an invalid.
 	while (CurrentNode.IsValid())
@@ -35,7 +41,7 @@ bool FUnloadedBlueprintData::IsChildOf(const UClass* InClass) const
 		{
 			return true;
 		}
-		CurrentNode = CurrentNode->ParentNode.Pin();
+		CurrentNode = CurrentNode->GetParentNode();
 	}
 
 	return false;
@@ -43,17 +49,18 @@ bool FUnloadedBlueprintData::IsChildOf(const UClass* InClass) const
 
 bool FUnloadedBlueprintData::ImplementsInterface(const UClass* InInterface) const
 {
+	FString InterfacePath = InInterface->GetPathName();
 	// Does this blueprint implement the interface directly?
 	for (const FString& DirectlyImplementedInterface : ImplementedInterfaces)
 	{
-		if (DirectlyImplementedInterface == InInterface->GetName())
+		if (DirectlyImplementedInterface == InterfacePath)
 		{
 			return true;
 		}
 	}
 
 	// If not, does a parent class implement the interface?
-	TSharedPtr<FClassViewerNode> CurrentNode = ClassViewerNode.Pin()->ParentNode.Pin();
+	TSharedPtr<FClassViewerNode> CurrentNode = ClassViewerNode.Pin()->GetParentNode();
 	while (CurrentNode.IsValid())
 	{
 		if (CurrentNode->Class.IsValid() && CurrentNode->Class->ImplementsInterface(InInterface))
@@ -64,7 +71,7 @@ bool FUnloadedBlueprintData::ImplementsInterface(const UClass* InInterface) cons
 		{
 			return true;
 		}
-		CurrentNode = CurrentNode->ParentNode.Pin();
+		CurrentNode = CurrentNode->GetParentNode();
 	}
 
 	return false;
@@ -78,7 +85,7 @@ bool FUnloadedBlueprintData::IsA(const UClass* InClass) const
 
 const UClass* FUnloadedBlueprintData::GetClassWithin() const
 {
-	TSharedPtr<FClassViewerNode> CurrentNode = ClassViewerNode.Pin()->ParentNode.Pin();
+	TSharedPtr<FClassViewerNode> CurrentNode = ClassViewerNode.Pin()->GetParentNode();
 
 	while (CurrentNode.IsValid())
 	{
@@ -90,7 +97,7 @@ const UClass* FUnloadedBlueprintData::GetClassWithin() const
 			return CurrentNode->Class->ClassWithin;
 		}
 
-		CurrentNode = CurrentNode->ParentNode.Pin();
+		CurrentNode = CurrentNode->GetParentNode();
 	}
 
 	return nullptr;
@@ -98,7 +105,7 @@ const UClass* FUnloadedBlueprintData::GetClassWithin() const
 
 const UClass* FUnloadedBlueprintData::GetNativeParent() const
 {
-	TSharedPtr<FClassViewerNode> CurrentNode = ClassViewerNode.Pin()->ParentNode.Pin();
+	TSharedPtr<FClassViewerNode> CurrentNode = ClassViewerNode.Pin()->GetParentNode();
 
 	while (CurrentNode.IsValid())
 	{
@@ -110,7 +117,7 @@ const UClass* FUnloadedBlueprintData::GetNativeParent() const
 			return CurrentNode->Class.Get();
 		}
 
-		CurrentNode = CurrentNode->ParentNode.Pin();
+		CurrentNode = CurrentNode->GetParentNode();
 	}
 
 	return nullptr;
@@ -130,10 +137,20 @@ FName FUnloadedBlueprintData::GetClassPath() const
 {
 	if (ClassViewerNode.IsValid())
 	{
-		return ClassViewerNode.Pin()->ClassPath;
+		return FName(*ClassViewerNode.Pin()->ClassPath.ToString());
 	}
 
 	return FName();
+}
+
+FTopLevelAssetPath FUnloadedBlueprintData::GetClassPathName() const
+{
+	if (ClassViewerNode.IsValid())
+	{
+		return ClassViewerNode.Pin()->ClassPath;
+	}
+
+	return FTopLevelAssetPath();
 }
 
 const TWeakPtr<FClassViewerNode>& FUnloadedBlueprintData::GetClassViewerNode() const

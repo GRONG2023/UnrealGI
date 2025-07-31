@@ -1,8 +1,18 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "BehaviorTreeGraphNode_Task.h"
+
+#include "AIGraphTypes.h"
+#include "BehaviorTreeColors.h"
 #include "BehaviorTree/BTNode.h"
 #include "BehaviorTreeEditorTypes.h"
+#include "BehaviorTreeGraph.h"
+#include "Containers/UnrealString.h"
+#include "HAL/PlatformMath.h"
+#include "Internationalization/Internationalization.h"
+#include "Templates/Casts.h"
+
+class UToolMenu;
 
 UBehaviorTreeGraphNode_Task::UBehaviorTreeGraphNode_Task(const FObjectInitializer& ObjectInitializer) : Super(ObjectInitializer)
 {
@@ -34,5 +44,14 @@ FText UBehaviorTreeGraphNode_Task::GetNodeTitle(ENodeTitleType::Type TitleType) 
 void UBehaviorTreeGraphNode_Task::GetNodeContextMenuActions(UToolMenu* Menu, UGraphNodeContextMenuContext* Context) const
 {
 	AddContextMenuActionsDecorators(Menu, "BehaviorTreeGraphNode", Context);
-	AddContextMenuActionsServices(Menu, "BehaviorTreeGraphNode", Context);
+
+	if (GetOwnerBehaviorTreeGraph()->DoesSupportServices())
+	{
+		AddContextMenuActionsServices(Menu, "BehaviorTreeGraphNode", Context);
+	}
+}
+
+FLinearColor UBehaviorTreeGraphNode_Task::GetBackgroundColor(bool bIsActiveForDebugger) const
+{
+	return BehaviorTreeColors::NodeBody::Task;
 }

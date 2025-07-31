@@ -2,21 +2,33 @@
 
 
 #include "K2Node_MakeContainer.h"
-#include "EdGraph/EdGraphPin.h"
-#include "Engine/Blueprint.h"
-#include "Framework/Commands/UIAction.h"
-#include "Framework/MultiBox/MultiBoxBuilder.h"
-#include "EdGraphSchema_K2.h"
-#include "EdGraph/EdGraphNodeUtils.h"
-#include "Kismet2/BlueprintEditorUtils.h"
 
-#include "ScopedTransaction.h"
+#include "BPTerminal.h"
+#include "BlueprintActionDatabaseRegistrar.h"
+#include "BlueprintNodeSpawner.h"
+#include "Containers/EnumAsByte.h"
+#include "Containers/Map.h"
+#include "Containers/UnrealString.h"
+#include "EdGraph/EdGraph.h"
+#include "EdGraph/EdGraphPin.h"
+#include "EdGraphSchema_K2.h"
 #include "EdGraphUtilities.h"
+#include "Engine/Blueprint.h"
+#include "Internationalization/Internationalization.h"
+#include "Internationalization/Text.h"
+#include "Kismet2/BlueprintEditorUtils.h"
+#include "KismetCastingUtils.h"
 #include "KismetCompiledFunctionContext.h"
 #include "KismetCompilerMisc.h"
-#include "BlueprintNodeSpawner.h"
-#include "EditorCategoryUtils.h"
-#include "BlueprintActionDatabaseRegistrar.h"
+#include "ScopedTransaction.h"
+#include "Templates/Casts.h"
+#include "Templates/Function.h"
+#include "Templates/SubclassOf.h"
+#include "Templates/UnrealTemplate.h"
+#include "UObject/Class.h"
+#include "UObject/Object.h"
+#include "UObject/WeakObjectPtr.h"
+#include "UObject/WeakObjectPtrTemplates.h"
 
 #define LOCTEXT_NAMESPACE "MakeArrayNode"
 
@@ -36,6 +48,33 @@ void FKCHandler_MakeContainer::RegisterNets(FKismetFunctionContext& Context, UEd
 
 void FKCHandler_MakeContainer::Compile(FKismetFunctionContext& Context, UEdGraphNode* Node)
 {
+	TArray<FBPTerminal*> RHSTerms;
+
+	for (UEdGraphPin* Pin : Node->Pins)
+	{
+		if (Pin && Pin->Direction == EGPD_Input)
+		{
+			FBPTerminal** InputTerm = Context.NetMap.Find(FEdGraphUtilities::GetNetFromPin(Pin));
+			if (InputTerm)
+			{
+				FBPTerminal* RHSTerm = *InputTerm;
+
+				{
+					using namespace UE::KismetCompiler;
+
+					FBPTerminal* ImplicitCastEntry =
+						CastingUtils::InsertImplicitCastStatement(Context, Pin, RHSTerm);
+
+					if (ImplicitCastEntry)
+					{
+						RHSTerm = ImplicitCastEntry;
+					}
+				}
+				RHSTerms.Add(RHSTerm);
+			}
+		}
+	}
+
 	UK2Node_MakeContainer* ContainerNode = CastChecked<UK2Node_MakeContainer>(Node);
 	UEdGraphPin* OutputPin = ContainerNode->GetOutputPin();
 
@@ -45,18 +84,7 @@ void FKCHandler_MakeContainer::Compile(FKismetFunctionContext& Context, UEdGraph
 	FBlueprintCompiledStatement& CreateContainerStatement = Context.AppendStatementForNode(Node);
 	CreateContainerStatement.Type = CompiledStatementType;
 	CreateContainerStatement.LHS = *ContainerTerm;
-
-	for (UEdGraphPin* Pin : Node->Pins)
-	{
-		if(Pin && Pin->Direction == EGPD_Input)
-		{
-			FBPTerminal** InputTerm = Context.NetMap.Find(FEdGraphUtilities::GetNetFromPin(Pin));
-			if( InputTerm )
-			{
-				CreateContainerStatement.RHS.Add(*InputTerm);
-			}
-		}
-	}
+	CreateContainerStatement.RHS = MoveTemp(RHSTerms);
 }
 
 /////////////////////////////////////////////////////
@@ -276,7 +304,7 @@ void UK2Node_MakeContainer::NotifyPinConnectionListChanged(UEdGraphPin* Pin)
 	if (bNotifyGraphChanged)
 	{
 		PropagatePinType();
-		GetGraph()->NotifyGraphChanged();
+		GetGraph()->NotifyNodeChanged(this);
 	}
 }
 
@@ -360,7 +388,7 @@ void UK2Node_MakeContainer::PropagatePinType()
 		{
 			if (UEdGraph* Graph = OwningNode->GetGraph())
 			{
-				Graph->NotifyGraphChanged();
+				Graph->NotifyNodeChanged(this);
 			}
 		}
 	}
@@ -568,7 +596,7 @@ void UK2Node_MakeContainer::RemoveInputPin(UEdGraphPin* Pin)
 		if (Pins.Find(PinToRemove, PinRemovalIndex))
 		{
 			Pins.RemoveAt(PinRemovalIndex);
-			PinToRemove->MarkPendingKill();
+			PinToRemove->MarkAsGarbage();
 		}
 	};
 

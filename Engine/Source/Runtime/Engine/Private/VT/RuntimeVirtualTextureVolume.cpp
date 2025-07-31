@@ -2,8 +2,12 @@
 
 #include "VT/RuntimeVirtualTextureVolume.h"
 
+#include "Async/TaskGraphInterfaces.h"
 #include "Components/BoxComponent.h"
 #include "Components/RuntimeVirtualTextureComponent.h"
+#include "UObject/FortniteMainBranchObjectVersion.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(RuntimeVirtualTextureVolume)
 
 ARuntimeVirtualTextureVolume::ARuntimeVirtualTextureVolume(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -22,6 +26,8 @@ ARuntimeVirtualTextureVolume::ARuntimeVirtualTextureVolume(const FObjectInitiali
 	Box->CanCharacterStepUpOn = ECanBeCharacterBase::ECB_No;
 	Box->SetGenerateOverlapEvents(false);
 	Box->SetupAttachment(VirtualTextureComponent);
+
+	bIsSpatiallyLoaded = false;
 #endif
 }
 
@@ -37,3 +43,4 @@ void ARuntimeVirtualTextureVolume::Serialize(FArchive& Ar)
 		VirtualTextureComponent->SetRelativeTransform(TransformFix * VirtualTextureComponent->GetRelativeTransform());
 	}
 }
+

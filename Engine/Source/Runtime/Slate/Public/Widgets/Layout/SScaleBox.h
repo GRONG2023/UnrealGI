@@ -17,7 +17,7 @@ class FSlateWindowElementList;
 UENUM(BlueprintType)
 namespace EStretchDirection
 {
-	enum Type
+	enum Type : int
 	{
 		/** Will scale the content up or down. */
 		Both,
@@ -31,7 +31,7 @@ namespace EStretchDirection
 UENUM(BlueprintType)
 namespace EStretch
 {
-	enum Type
+	enum Type : int
 	{
 		/** Does not scale the content. */
 		None,
@@ -62,7 +62,9 @@ namespace EStretch
 		/** Scales the content according to the size of the safe zone currently applied to the viewport. */
 		ScaleBySafeZone,
 		/** Scales the content by the scale specified by the user. */
-		UserSpecified
+		UserSpecified,
+		/** Scales the content by the scale specified by the user and also clips. */
+		UserSpecifiedWithClipping
 	};
 }
 
@@ -71,8 +73,10 @@ namespace EStretch
  * you needed to have a background image scale to fill an area but not become distorted with different aspect ratios, or if you need
  * to auto fit some text to an area, this is the control for you.
  */
-class SLATE_API SScaleBox : public SCompoundWidget
+class SScaleBox : public SCompoundWidget
 {
+	SLATE_DECLARE_WIDGET_API(SScaleBox, SCompoundWidget, SLATE_API)
+
 public:
 	SLATE_BEGIN_ARGS(SScaleBox)
 	: _Content()
@@ -111,76 +115,87 @@ public:
 
 	SLATE_END_ARGS()
 
+protected:
 	/** Constructor */
-	SScaleBox()
-	{
-		SetCanTick(false);
-		bCanSupportFocus = false;
-	}
+	SLATE_API SScaleBox();
 
-	virtual ~SScaleBox();
+public:
+	SLATE_API virtual ~SScaleBox();
 
-	void Construct(const FArguments& InArgs);
+	SLATE_API void Construct(const FArguments& InArgs);
 	
 	// SWidget interface
-	virtual void OnArrangeChildren(const FGeometry& AllottedGeometry, FArrangedChildren& ArrangedChildren) const override;
-	virtual int32 OnPaint(const FPaintArgs& Args, const FGeometry& AllottedGeometry, const FSlateRect& MyCullingRect, FSlateWindowElementList& OutDrawElements, int32 LayerId, const FWidgetStyle& InWidgetStyle, bool bParentEnabled) const override;
+	SLATE_API virtual void OnArrangeChildren(const FGeometry& AllottedGeometry, FArrangedChildren& ArrangedChildren) const override;
+	SLATE_API virtual int32 OnPaint(const FPaintArgs& Args, const FGeometry& AllottedGeometry, const FSlateRect& MyCullingRect, FSlateWindowElementList& OutDrawElements, int32 LayerId, const FWidgetStyle& InWidgetStyle, bool bParentEnabled) const override;
 	// End SWidget of interface
 
 	/** See Content slot */
-	void SetContent(TSharedRef<SWidget> InContent);
+	SLATE_API void SetContent(TSharedRef<SWidget> InContent);
 
 	/** See HAlign argument */
-	void SetHAlign(EHorizontalAlignment HAlign);
+	SLATE_API void SetHAlign(EHorizontalAlignment HAlign);
 
 	/** See VAlign argument */
-	void SetVAlign(EVerticalAlignment VAlign);
+	SLATE_API void SetVAlign(EVerticalAlignment VAlign);
 
 	/** See StretchDirection argument */
-	void SetStretchDirection(EStretchDirection::Type InStretchDirection);
+	SLATE_API void SetStretchDirection(EStretchDirection::Type InStretchDirection);
 
 	/** See Stretch argument */
-	void SetStretch(EStretch::Type InStretch);
+	SLATE_API void SetStretch(EStretch::Type InStretch);
 
 	/** See UserSpecifiedScale argument */
-	void SetUserSpecifiedScale(float InUserSpecifiedScale);
+	SLATE_API void SetUserSpecifiedScale(float InUserSpecifiedScale);
 
 	/** Set IgnoreInheritedScale argument */
-	void SetIgnoreInheritedScale(bool InIgnoreInheritedScale);
+	SLATE_API void SetIgnoreInheritedScale(bool InIgnoreInheritedScale);
 
 #if WITH_EDITOR
-	void SetOverrideScreenInformation(TOptional<FVector2D> InScreenSize);
+	SLATE_API void SetOverrideScreenInformation(TOptional<FVector2D> InScreenSize);
 #endif
 	
 protected:
 	// Begin SWidget overrides.
-	virtual bool CustomPrepass(float LayoutScaleMultiplier) override;
-	virtual FVector2D ComputeDesiredSize(float InScale) const override;
-	virtual float GetRelativeLayoutScale(int32 ChildIndex, float LayoutScaleMultiplier) const override;
+	SLATE_API virtual bool CustomPrepass(float LayoutScaleMultiplier) override;
+	SLATE_API virtual FVector2D ComputeDesiredSize(float InScale) const override;
+	SLATE_API virtual float GetRelativeLayoutScale(int32 ChildIndex, float LayoutScaleMultiplier) const override;
 	// End SWidget overrides.
 
-	bool DoesScaleRequireNormalizingPrepassOrLocalGeometry() const;
-	bool IsDesiredSizeDependentOnAreaAndScale() const;
-	float ComputeContentScale(const FGeometry& PaintGeometry) const;
+	SLATE_API bool DoesScaleRequireNormalizingPrepassOrLocalGeometry() const;
+	SLATE_API bool IsDesiredSizeDependentOnAreaAndScale() const;
+	SLATE_API float ComputeContentScale(const FGeometry& PaintGeometry) const;
 
-	void RefreshSafeZoneScale();
+	SLATE_API void RefreshSafeZoneScale();
+	SLATE_API void HandleSafeFrameChangedEvent();
 
 #if WITH_EDITOR
-	void DebugSafeAreaUpdated(const FMargin& NewSafeZone, bool bShouldRecacheMetrics);
+	SLATE_API void DebugSafeAreaUpdated(const FMargin& NewSafeZone, bool bShouldRecacheMetrics);
 #endif
 
 protected:
+#if WITH_EDITORONLY_DATA
+	UE_DEPRECATED(5.0, "Direct access to StretchDirection is now deprecated. Use the setter or getter.")
+	TSlateDeprecatedTAttribute<EStretchDirection::Type> StretchDirection;
+	UE_DEPRECATED(5.0, "Direct access to Stretch is now deprecated. Use the setter or getter.")
+	TSlateDeprecatedTAttribute<EStretch::Type> Stretch;
+	UE_DEPRECATED(5.0, "Direct access to UserSpecifiedScale is now deprecated. Use the setter or getter.")
+	TSlateDeprecatedTAttribute<float> UserSpecifiedScale;
+	UE_DEPRECATED(5.0, "Direct access to IgnoreInheritedScale is now deprecated. Use the setter or getter.")
+	TSlateDeprecatedTAttribute<bool> IgnoreInheritedScale;
+#endif
+
+private:
 	/** The allowed direction of stretching of the content */
-	TAttribute<EStretchDirection::Type> StretchDirection;
+	TSlateAttribute<EStretchDirection::Type> StretchDirectionAttribute;
 
 	/** The method of scaling that is applied to the content. */
-	TAttribute<EStretch::Type> Stretch;
+	TSlateAttribute<EStretch::Type> StretchAttribute;
 
 	/** Optional scale that can be specified by the User */
-	TAttribute<float> UserSpecifiedScale;
+	TSlateAttribute<float> UserSpecifiedScaleAttribute;
 
 	/** Optional bool to ignore the inherited scale */
-	TAttribute<bool> IgnoreInheritedScale;
+	TSlateAttribute<bool> IgnoreInheritedScaleAttribute;
 
 	/** Computed scale when scaled by safe zone padding */
 	float SafeZoneScale;

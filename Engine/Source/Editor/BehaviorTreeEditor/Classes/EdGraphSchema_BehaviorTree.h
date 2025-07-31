@@ -2,15 +2,34 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
-#include "EdGraph/EdGraphSchema.h"
-#include "AIGraphTypes.h"
 #include "AIGraphSchema.h"
+#include "AIGraphTypes.h"
+#include "BehaviorTreeGraphNode_CompositeDecorator.h"
+#include "Containers/Array.h"
+#include "CoreMinimal.h"
+#include "EdGraph/EdGraphSchema.h"
+#include "HAL/Platform.h"
+#include "Internationalization/Text.h"
+#include "Math/Color.h"
+#include "Math/Vector2D.h"
+#include "Templates/UnrealTemplate.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/UObjectGlobals.h"
+
 #include "EdGraphSchema_BehaviorTree.generated.h"
 
 class FSlateRect;
+class UBehaviorTreeGraphNode_CompositeDecorator;
+class UBehaviorTreeGraphNode_Decorator;
+class UBehaviorTreeGraphNode_Service;
+class UBehaviorTreeGraphNode_Task;
+class UClass;
 class UEdGraph;
+class UEdGraphNode;
+class UEdGraphPin;
+class UObject;
+struct FEdGraphPinType;
+struct FGraphNodeClassData;
 
 /** Action to auto arrange the graph */
 USTRUCT()
@@ -30,8 +49,8 @@ struct FBehaviorTreeSchemaAction_AutoArrange : public FEdGraphSchemaAction
 	//~ End FEdGraphSchemaAction Interface
 };
 
-UCLASS(MinimalAPI)
-class UEdGraphSchema_BehaviorTree : public UAIGraphSchema
+UCLASS()
+class BEHAVIORTREEEDITOR_API UEdGraphSchema_BehaviorTree : public UAIGraphSchema
 {
 	GENERATED_UCLASS_BODY()
 
@@ -50,6 +69,15 @@ class UEdGraphSchema_BehaviorTree : public UAIGraphSchema
 
 	virtual void GetGraphNodeContextActions(FGraphContextMenuBuilder& ContextMenuBuilder, int32 SubNodeFlags) const override;
 	virtual void GetSubNodeClasses(int32 SubNodeFlags, TArray<FGraphNodeClassData>& ClassData, UClass*& GraphNodeClass) const override;
+
+	TSubclassOf<UBehaviorTreeGraphNode_CompositeDecorator> CompositeDecoratorClass;
+	TSubclassOf<UBehaviorTreeGraphNode_Decorator> DecoratorClass;
+	TSubclassOf<UBehaviorTreeGraphNode_Task> TaskClass;
+	TSubclassOf<UBehaviorTreeGraphNode_Service> ServiceClass;
+
+protected:
+	virtual FGraphNodeClassHelper& GetClassCache() const;
+	virtual bool IsNodeSubtreeTask(const FGraphNodeClassData& NodeClass) const;
 
 private:
 	// ID for checking dirty status of node titles against, increases whenever 

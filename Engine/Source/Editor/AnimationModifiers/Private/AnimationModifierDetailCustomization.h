@@ -4,6 +4,9 @@
 
 #include "IDetailCustomization.h"
 #include "Input/Reply.h"
+#include "Templates/SharedPointer.h"
+
+class IDetailLayoutBuilder;
 class SButton;
 class UAnimationModifier;
 
@@ -16,6 +19,7 @@ public:
 	virtual void CustomizeDetails(IDetailLayoutBuilder& DetailBuilder) override;
 protected:
 	FReply OnUpdateRevisionButtonClicked();
+	FReply OnApplyButtonClicked(bool bForceApply);
 protected:
 	TSharedPtr<SButton> UpdateRevisionButton;
 	UAnimationModifier* ModifierInstance;

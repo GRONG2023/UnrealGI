@@ -2,6 +2,9 @@
 
 #include "ContentBrowserDataFilter.h"
 
+#include "ContentBrowserDataSubsystem.h"
+#include "Templates/Casts.h"
+
 FContentBrowserDataFilterList::FContentBrowserDataFilterList(const FContentBrowserDataFilterList& InOther)
 {
 	SetTo(InOther);
@@ -14,6 +17,17 @@ FContentBrowserDataFilterList& FContentBrowserDataFilterList::operator=(const FC
 		SetTo(InOther);
 	}
 	return *this;
+}
+
+TArray<const UScriptStruct*> FContentBrowserDataFilterList::GetFilterTypes() const
+{
+	TArray<const UScriptStruct*> Types;
+	Types.Reserve(TypedFilters.Num());
+	for (const FStructOnScope& Filter : TypedFilters)
+	{
+		Types.Add(CastChecked<const UScriptStruct>(Filter.GetStruct()));
+	}
+	return Types;
 }
 
 void* FContentBrowserDataFilterList::FindOrAddFilter(const UScriptStruct* InFilterType)
@@ -80,4 +94,43 @@ void FContentBrowserDataFilterList::SetTo(const FContentBrowserDataFilterList& I
 		FStructOnScope& Filter = TypedFilters.Emplace_GetRef(ScriptStructPtr);
 		ScriptStructPtr->CopyScriptStruct(Filter.GetStructMemory(), OtherFilter.GetStructMemory());
 	}
+}
+
+void FContentBrowserDataFilterCacheIDOwner::Initialaze(UContentBrowserDataSubsystem* InContentBrowserDataSubsystem)
+{
+	if (DataSource != InContentBrowserDataSubsystem)
+	{
+		ClearCachedData();
+
+		if (InContentBrowserDataSubsystem)
+		{
+			UContentBrowserDataSubsystem::FContentBrowserFilterCacheApi::InitializeCacheIDOwner(*InContentBrowserDataSubsystem, *this);
+		}
+	}
+}
+
+void FContentBrowserDataFilterCacheIDOwner::RemoveUnusedCachedData(TArrayView<const FName> InVirtualPathsInUse, const FContentBrowserDataFilter& DataFilter) const
+{
+	if (const UContentBrowserDataSubsystem* ContentBrowserDataSubsystem = DataSource.Get())
+	{
+		UContentBrowserDataSubsystem::FContentBrowserFilterCacheApi::RemoveUnusedCachedData(*ContentBrowserDataSubsystem,
+			*this,
+			InVirtualPathsInUse,
+			DataFilter);
+	}
+}
+
+void FContentBrowserDataFilterCacheIDOwner::ClearCachedData() const
+{
+	if (const UContentBrowserDataSubsystem* ContentBrowserDataSubsystem = DataSource.Get())
+	{
+		UContentBrowserDataSubsystem::FContentBrowserFilterCacheApi::ClearCachedData(*ContentBrowserDataSubsystem, *this);
+	}
+}
+
+void FContentBrowserDataFilterCacheIDOwner::Reset()
+{
+	ClearCachedData();
+	ID = INDEX_NONE;
+	DataSource.Reset();
 }

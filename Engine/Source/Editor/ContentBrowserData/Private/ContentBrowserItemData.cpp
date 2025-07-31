@@ -1,7 +1,13 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "ContentBrowserItemData.h"
+
+#include "Containers/StringView.h"
 #include "ContentBrowserDataSource.h"
+#include "ContentBrowserDataSubsystem.h"
+#include "Misc/AssertionMacros.h"
+#include "Templates/UnrealTemplate.h"
+#include "UObject/UnrealNames.h"
 
 FContentBrowserItemData::FContentBrowserItemData(UContentBrowserDataSource* InOwnerDataSource, EContentBrowserItemFlags InItemFlags, FName InVirtualPath, FName InItemName, FText InDisplayNameOverride, TSharedPtr<const IContentBrowserItemDataPayload> InPayload)
 	: OwnerDataSource(InOwnerDataSource)
@@ -42,6 +48,16 @@ bool FContentBrowserItemData::IsFile() const
 	return EnumHasAnyFlags(ItemFlags, EContentBrowserItemFlags::Type_File);
 }
 
+bool FContentBrowserItemData::IsPlugin() const
+{
+	return EnumHasAnyFlags(ItemFlags, EContentBrowserItemFlags::Category_Plugin);
+}
+
+bool FContentBrowserItemData::IsSupported() const
+{
+	return !EnumHasAnyFlags(ItemFlags, EContentBrowserItemFlags::Misc_Unsupported);
+}
+
 bool FContentBrowserItemData::IsTemporary() const
 {
 	return EnumHasAnyFlags(ItemFlags, EContentBrowserItemFlags::Temporary_MASK);
@@ -80,6 +96,38 @@ EContentBrowserItemFlags FContentBrowserItemData::GetItemTemporaryReason() const
 FName FContentBrowserItemData::GetVirtualPath() const
 {
 	return VirtualPath;
+}
+
+FName FContentBrowserItemData::GetInvariantPath() const
+{
+	if (UContentBrowserDataSource* DataSource = OwnerDataSource.Get())
+	{
+		if (!VirtualPath.IsNone())
+		{
+			FName ConvertedPath;
+			DataSource->TryConvertVirtualPath(VirtualPath, ConvertedPath);
+			return ConvertedPath;
+		}
+	}
+
+	return NAME_None;
+}
+
+FName FContentBrowserItemData::GetInternalPath() const
+{
+	if (UContentBrowserDataSource* DataSource = OwnerDataSource.Get())
+	{
+		if (!VirtualPath.IsNone())
+		{
+			FName ConvertedPath;
+			if (DataSource->TryConvertVirtualPath(VirtualPath, ConvertedPath) == EContentBrowserPathType::Internal)
+			{
+				return ConvertedPath;
+			}
+		}
+	}
+
+	return NAME_None;
 }
 
 FName FContentBrowserItemData::GetItemName() const

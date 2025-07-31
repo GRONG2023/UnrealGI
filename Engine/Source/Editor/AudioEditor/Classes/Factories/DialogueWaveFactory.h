@@ -6,12 +6,20 @@
 
 #pragma once
 
+#include "Containers/Array.h"
 #include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
 #include "Factories/Factory.h"
+#include "UObject/NameTypes.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/UObjectGlobals.h"
+
 #include "DialogueWaveFactory.generated.h"
 
+class FFeedbackContext;
+class UClass;
 class UDialogueVoice;
+class UObject;
 
 UCLASS(hidecategories=Object, MinimalAPI)
 class UDialogueWaveFactory : public UFactory
@@ -24,11 +32,11 @@ class UDialogueWaveFactory : public UFactory
 
 	/** An initial sound wave to place in the newly created dialogue wave */
 	UPROPERTY()
-	class USoundWave* InitialSoundWave;
+	TObjectPtr<class USoundWave> InitialSoundWave;
 
 	/** An initial speaking dialogue voice to place in the newly created dialogue wave */
 	UPROPERTY()
-	class UDialogueVoice* InitialSpeakerVoice;
+	TObjectPtr<class UDialogueVoice> InitialSpeakerVoice;
 
 	/** Whether an initial target dialogue voice should be set */
 	UPROPERTY()
@@ -36,7 +44,7 @@ class UDialogueWaveFactory : public UFactory
 
 	/** An initial target dialogue voices to place in the newly created dialogue wave */
 	UPROPERTY()
-	TArray<UDialogueVoice*> InitialTargetVoices;
+	TArray<TObjectPtr<UDialogueVoice>> InitialTargetVoices;
 };
 
 

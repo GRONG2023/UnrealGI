@@ -2,24 +2,42 @@
 
 #include "SoundSubmixGraph/SoundSubmixGraphSchema.h"
 
-#include "AssetData.h"
-#include "GraphEditorActions.h"
+#include "AssetRegistry/AssetData.h"
+#include "Containers/EnumAsByte.h"
+#include "Containers/Set.h"
+#include "EdGraph/EdGraph.h"
+#include "EdGraph/EdGraphNode.h"
+#include "EdGraph/EdGraphPin.h"
 #include "EdGraph/EdGraphSchema.h"
-#include "EdGraphUtilities.h"
+#include "Editor.h"
+#include "Editor/EditorEngine.h"
 #include "Framework/Commands/GenericCommands.h"
-#include "Framework/MultiBox/MultiBoxBuilder.h"
-#include "ToolMenus.h"
-
+#include "GraphEditorActions.h"
+#include "GraphEditorSettings.h"
+#include "HAL/PlatformCrt.h"
+#include "ISoundfieldEndpoint.h"
+#include "ISoundfieldFormat.h"
+#include "Internationalization/Internationalization.h"
+#include "Misc/AssertionMacros.h"
 #include "ScopedTransaction.h"
 #include "Sound/AudioSettings.h"
 #include "Sound/SoundSubmix.h"
-#include "SoundSubmixGraph/SoundSubmixGraphNode.h"
-#include "SoundSubmixGraph/SoundSubmixGraph.h"
+#include "SoundSubmixDefaultColorPalette.h"
 #include "SoundSubmixEditor.h"
 #include "SoundSubmixEditorUtilities.h"
-#include "Toolkits/AssetEditorManager.h"
-#include "ToolMenus.h"
-#include "SoundSubmixDefaultColorPalette.h"
+#include "SoundSubmixGraph/SoundSubmixGraph.h"
+#include "SoundSubmixGraph/SoundSubmixGraphNode.h"
+#include "Subsystems/AssetEditorSubsystem.h"
+#include "Templates/Casts.h"
+#include "Templates/SharedPointer.h"
+#include "Templates/UniquePtr.h"
+#include "ToolMenu.h"
+#include "ToolMenuSection.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/SoftObjectPath.h"
+
+class FSlateRect;
+class FSlateWindowElementList;
 
 #define LOCTEXT_NAMESPACE "SoundSubmixSchema"
 
@@ -114,14 +132,14 @@ bool USoundSubmixGraphSchema::ConnectionCausesLoop(const UEdGraphPin* InputPin, 
 				return true;
 			}
 
-			if (OutputNode->SoundSubmix->RecurseCheckChild(MasterSubmix))
+			if (SubmixUtils::FindInGraph(MasterSubmix, OutputNode->SoundSubmix, false))
 			{
 				return true;
 			}
 		}
 	}
 
-	return OutputNode->SoundSubmix->RecurseCheckChild(InputNode->SoundSubmix);
+	return SubmixUtils::FindInGraph(OutputNode->SoundSubmix, InputNode->SoundSubmix, false);
 }
 
 void USoundSubmixGraphSchema::GetAssetsGraphHoverMessage(const TArray<FAssetData>& Assets, const UEdGraph* HoverGraph, FString& OutTooltipText, bool& OutOkIcon) const
@@ -154,7 +172,7 @@ void USoundSubmixGraphSchema::GetAssetsGraphHoverMessage(const TArray<FAssetData
 
 	for (const FAssetData& Data : Assets)
 	{
-		if (!Data.GetClass()->IsChildOf(USoundSubmixBase::StaticClass()))
+		if (!Data.IsInstanceOf(USoundSubmixBase::StaticClass()))
 		{
 			OutOkIcon = false;
 			OutTooltipText = TEXT("Asset(s) must all be Submixes.");
@@ -208,6 +226,12 @@ const FPinConnectionResponse USoundSubmixGraphSchema::CanCreateConnection(const 
 	// Note- are input pin and output pin swapped here? Am I losing it?
 	USoundSubmixBase* InputSubmix = CastChecked<USoundSubmixGraphNode>(OutputPin->GetOwningNode())->SoundSubmix;
 	USoundSubmixBase* OutputSubmix = CastChecked<USoundSubmixGraphNode>(InputPin->GetOwningNode())->SoundSubmix;
+
+	// Forbid connecting dynamic submixes to other submixes.
+	if (InputSubmix->IsDynamic( false /*bIncludeAncestors*/ ))
+	{
+		return FPinConnectionResponse(CONNECT_RESPONSE_DISALLOW, LOCTEXT("SubmixIsDynamic", "Submix you are trying to connect from is dynamic and shouldn't have any static parents"));
+	}
 
 	// Check to see if this is an endpoint submix.
 	if (!InputSubmix->IsA<USoundSubmixWithParentBase>())
@@ -481,7 +505,7 @@ void USoundSubmixGraphSchema::DroppedAssetsOnGraph(const TArray<FAssetData>& Ass
 			// (to avoid modification of multiple graph editors representing the same branch of submixes)
 			if (SubmixEditor->GetGraph() != Graph)
 			{
-				Editor->CloseWindow();
+				Editor->CloseWindow(EAssetEditorCloseReason::AssetUnloadingOrInvalid);
 			}
 		}
 

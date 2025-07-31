@@ -8,12 +8,11 @@
 
 #include "CoreMinimal.h"
 #include "Stats/Stats.h"
-#include "UObject/GarbageCollection.h"	// Needed for UE_WITH_GC definition
 #include "UObject/UObjectGlobals.h"
 #include "UObject/Class.h"
 
 // UE_BUILD_SHIPPING has GShouldVerifyGCAssumptions=false by default
-#define VERIFY_DISREGARD_GC_ASSUMPTIONS			!(UE_BUILD_SHIPPING || UE_BUILD_TEST || !UE_WITH_GC)
+#define VERIFY_DISREGARD_GC_ASSUMPTIONS			!(UE_BUILD_SHIPPING)
 
 #if VERIFY_DISREGARD_GC_ASSUMPTIONS
 
@@ -22,6 +21,12 @@ void VerifyGCAssumptions();
 
 /** Verifies GC Cluster assumptions */
 void VerifyClustersAssumptions();
+
+/** Verifies Object and Internal flag mirroring assumptions */
+void VerifyObjectFlags();
+
+/** Verifies Reachability assumptions */
+void VerifyNoUnreachableObjects(int32 NumUnreachable);
 
 #endif // VERIFY_DISREGARD_GC_ASSUMPTIONS
 

@@ -8,19 +8,27 @@
 #include "Containers/BitArray.h"
 #include "Containers/List.h"
 #include "Templates/UniquePtr.h"
+#include "Async/TaskGraphInterfaces.h"
+#include "VirtualTexturing.h"
+
+#include <atomic>
 
 class FUploadingVirtualTexture;
 class IFileCacheHandle;
 
 class FVirtualTextureCodec : public TIntrusiveLinkedList<FVirtualTextureCodec>
 {
+	friend struct FTranscodeTask;
 public:
 	static void RetireOldCodecs();
 
 	~FVirtualTextureCodec();
 	void Init(IMemoryReadStreamRef& HeaderData);
 
-	inline bool IsComplete() const { return !CompletedEvent || CompletedEvent->IsComplete(); }
+	// Tracks completion of FCreateCodecTask.
+	inline bool IsCreationComplete() const { return !CompletedEvent || CompletedEvent->IsComplete(); }
+
+	inline bool IsIdle() const { return IsCreationComplete() && AllTranscodeTasksComplete(); }
 
 	void LinkGlobalHead();
 	void LinkGlobalTail();
@@ -35,6 +43,16 @@ public:
 	void* Contexts[VIRTUALTEXTURE_DATA_MAXLAYERS] = { nullptr };
 	uint32 ChunkIndex = 0u;
 	uint32 LastFrameUsed = 0u;
+
+protected:
+
+	// This codec may be used by transcode tasks (see FTranscodeTask),
+	// which must be all complete before the codec is released by RetireOldTasks().
+	inline bool AllTranscodeTasksComplete() const { return TaskRefs.load() == 0; }
+	inline void BeginTranscodeTask() const { TaskRefs.fetch_add(1); }
+	inline void EndTranscodeTask() const { TaskRefs.fetch_sub(1); }
+
+	mutable std::atomic<uint32> TaskRefs {};
 };
 
 struct FVTCodecAndStatus
@@ -55,21 +73,25 @@ struct FVTDataAndStatus
 class FUploadingVirtualTexture : public IVirtualTexture
 {
 public:
-	FUploadingVirtualTexture(FVirtualTextureBuiltData* InData, int32 FirstMipToUse);
+	FUploadingVirtualTexture(const FName& InName, FVirtualTextureBuiltData* InData, int32 FirstMipToUse);
 	virtual ~FUploadingVirtualTexture();
 
 	// IVirtualTexture interface
 	virtual uint32 GetLocalMipBias(uint8 vLevel, uint32 vAddress) const override;
-	virtual FVTRequestPageResult RequestPageData(const FVirtualTextureProducerHandle& ProducerHandle, uint8 LayerMask, uint8 vLevel, uint64 vAddress, EVTRequestPagePriority Priority) override;
-	virtual IVirtualTextureFinalizer* ProducePageData(FRHICommandListImmediate& RHICmdList,
+	virtual bool IsPageStreamed(uint8 vLevel, uint32 vAddress) const override { return true; }
+	virtual FVTRequestPageResult RequestPageData(FRHICommandList& RHICmdList, const FVirtualTextureProducerHandle& ProducerHandle, uint8 LayerMask, uint8 vLevel, uint64 vAddress, EVTRequestPagePriority Priority) override;
+	virtual IVirtualTextureFinalizer* ProducePageData(FRHICommandList& RHICmdList,
 		ERHIFeatureLevel::Type FeatureLevel,
 		EVTProducePageFlags Flags,
 		const FVirtualTextureProducerHandle& ProducerHandle, uint8 LayerMask, uint8 vLevel, uint64 vAddress,
 		uint64 RequestHandle,
 		const FVTProduceTargetLayer* TargetLayers) override;
+	virtual void GatherProducePageDataTasks(FVirtualTextureProducerHandle const& ProducerHandle, FGraphEventArray& InOutTasks) const override;
+	virtual void GatherProducePageDataTasks(uint64 RequestHandle, FGraphEventArray& InOutTasks) const override;
 	virtual void DumpToConsole(bool verbose) override;
 	// End IVirtualTexture interface
 
+	inline const FName& GetName() const { return Name; }
 	inline const FVirtualTextureBuiltData* GetVTData() const { return Data; }
 
 	// gets the codec for the given chunk, data is not valid until returned OutCompletionEvents are complete
@@ -81,6 +103,7 @@ public:
 private:
 	friend class FVirtualTextureCodec;
 
+	FName Name;
 	FVirtualTextureBuiltData* Data;
 	TArray< TUniquePtr<IFileCacheHandle> > HandlePerChunk;
 	TArray< TUniquePtr<FVirtualTextureCodec> > CodecPerChunk;

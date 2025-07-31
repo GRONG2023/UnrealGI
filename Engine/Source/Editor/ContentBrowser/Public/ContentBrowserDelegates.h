@@ -2,11 +2,11 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "AssetData.h"
+#include "AssetRegistry/AssetData.h"
+#include "IAssetTypeActions.h"
 #include "Input/Reply.h"
 #include "Framework/MultiBox/MultiBoxExtender.h"
 #include "Widgets/SToolTip.h"
-#include "Developer/AssetTools/Public/IAssetTypeActions.h"
 #include "Containers/ArrayView.h"
 #include "ContentBrowserDataLegacyBridge.h"
 
@@ -36,6 +36,9 @@ DECLARE_DELEGATE_RetVal_OneParam( TSharedRef< SToolTip >, FConstructToolTipForAs
 
 /** Called to check if an asset should be filtered out by external code. Return true to exclude the asset from the view. */
 DECLARE_DELEGATE_RetVal_OneParam(bool, FOnShouldFilterAsset, const FAssetData& /*AssetData*/);
+
+/** Called to check if an item should be filtered out by external code. Return true to exclude the item from the view. */
+DECLARE_DELEGATE_RetVal_OneParam(bool, FOnShouldFilterItem, const FContentBrowserItem& /*AssetItem*/);
 
 /** Called to check if an asset tag should be display in details view. Return false to exclude the asset from the view. */
 DECLARE_DELEGATE_RetVal_TwoParams(bool, FOnShouldDisplayAssetTag, FName /*AssetType*/, FName /*TagName*/);
@@ -107,6 +110,9 @@ DECLARE_DELEGATE_RetVal_TwoParams(FText, FOnGetCustomAssetColumnDisplayText, FAs
 /** Called to generate extra state information icons or tooltips on asset items. */
 DECLARE_DELEGATE_RetVal_OneParam(TSharedRef<SWidget>, FOnGenerateAssetViewExtraStateIndicators, const FAssetData& /*AssetData*/);
 
+/** Called to generate state information icons for path view items. */
+DECLARE_DELEGATE_RetVal_OneParam(TSharedPtr<SWidget>, FPathViewStateIconGenerator, const FContentBrowserItem& /*ContentBrowserItem*/);
+
 /** Called when an asset item visualizes its tooltip */
 DECLARE_DELEGATE_RetVal_TwoParams(bool, FOnVisualizeAssetToolTip, const TSharedPtr<SWidget>& /*ToolTipContent*/, FAssetData& /*AssetData*/);
 
@@ -121,6 +127,9 @@ DECLARE_DELEGATE_OneParam(FOnAssetsChosenForOpen, const TArray<FAssetData>& /*Se
 
 /** Called from the Asset Dialog when an asset name is chosen in non-modal Save dialogs */
 DECLARE_DELEGATE_OneParam(FOnObjectPathChosenForSave, const FString& /*ObjectPath*/);
+
+/** Called when custom behavior is needed for allowing folders to toggle their private content edit state */
+DECLARE_DELEGATE_RetVal_OneParam(bool, FIsFolderShowPrivateContentToggleableDelegate, const FStringView /*VirtualFolderPath*/);
 
 /** Contains the delegates used to handle a custom drag-and-drop in the asset view */
 struct FAssetViewDragAndDropExtender

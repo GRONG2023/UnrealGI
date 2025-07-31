@@ -2,21 +2,46 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
-#include "EdGraph/EdGraphNode.h"
-#include "UObject/LinkerLoad.h"
+#include "BlueprintActionFilter.h"
 #include "BlueprintNodeSignature.h"
+#include "Containers/Array.h"
+#include "Containers/Map.h"
+#include "Containers/Set.h"
+#include "Containers/UnrealString.h"
+#include "CoreMinimal.h"
+#include "Delegates/Delegate.h"
+#include "EdGraph/EdGraphNode.h"
+#include "Engine/Blueprint.h"
+#include "HAL/PlatformMath.h"
+#include "Internationalization/Text.h"
+#include "Math/Color.h"
+#include "Templates/SubclassOf.h"
+#include "UObject/LinkerLoad.h"
+#include "UObject/NameTypes.h"
+#include "UObject/Object.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/UObjectGlobals.h"
+
 #include "K2Node.generated.h"
 
 class AActor;
+class FArchive;
 class FBlueprintActionDatabaseRegistrar;
+class FCompilerResultsLog;
+class FKismetCompilerContext;
+class FProperty;
 class UActorComponent;
 class UBlueprint;
+class UClass;
 class UDynamicBlueprintBinding;
 class UEdGraph;
 class UEdGraphPin;
 class UEdGraphSchema;
+class UFunction;
+class UK2Node;
+class UStruct;
+struct FMemberReference;
+template <typename KeyType, typename ValueType> struct TKeyValuePair;
 
 DECLARE_MULTICAST_DELEGATE_ThreeParams(FOnUserDefinedPinRenamed, UK2Node*, FName, FName);
 
@@ -199,7 +224,7 @@ public:
 	BLUEPRINTGRAPH_API virtual bool CanSplitPin(const UEdGraphPin* Pin) const override;
 	BLUEPRINTGRAPH_API virtual UEdGraphPin* GetPassThroughPin(const UEdGraphPin* FromPin) const override;
 	BLUEPRINTGRAPH_API virtual bool IsInDevelopmentMode() const override;
-	BLUEPRINTGRAPH_API virtual void ValidateNodeDuringCompilation(class FCompilerResultsLog& MessageLog) const override;
+	BLUEPRINTGRAPH_API virtual void ValidateNodeDuringCompilation(FCompilerResultsLog& MessageLog) const override;
 	BLUEPRINTGRAPH_API virtual FString GetPinMetaData(FName InPinName, FName InKey) override;
 	// End of UEdGraphNode interface
 
@@ -215,14 +240,8 @@ public:
 	/** Returns whether this node is considered 'pure' by the compiler */
 	virtual bool IsNodePure() const { return false; }
 
-	/** 
-	 * Returns whether or not this node has dependencies on an external structure 
-	 * If OptionalOutput isn't null, it should be filled with the known dependencies objects (Classes, Structures, Functions, etc).
-	 */
-	virtual bool HasExternalDependencies(TArray<class UStruct*>* OptionalOutput = nullptr) const { return false; }
-
 	/** Returns whether this node can have breakpoints placed on it in the debugger */
-	virtual bool CanPlaceBreakpoints() const { return !IsNodePure(); }
+	BLUEPRINTGRAPH_API virtual bool CanPlaceBreakpoints() const;
 
 	/** Return whether to draw this node as an entry */
 	virtual bool DrawNodeAsEntry() const { return false; }
@@ -247,13 +266,13 @@ public:
 	 */
 	virtual bool IsActionFilteredOut(class FBlueprintActionFilter const& Filter) { return false; }
 
-	/** Should draw as a bead with no location of it's own */
+	UE_DEPRECATED(5.4, "ShouldDrawAsBead is deprecated")
 	virtual bool ShouldDrawAsBead() const { return false; }
 
 	/** Return whether the node's properties display in the blueprint details panel */
 	virtual bool ShouldShowNodeProperties() const { return false; }
 
-	/** Return whether the node's execution pins should support the remove execution pin action */
+	/** Return whether the node's execution pins should support the insert execution pin action */
 	virtual bool CanEverInsertExecutionPin() const { return false; }
 
 	/** Return whether the node's execution pins should support the remove execution pin action */
@@ -307,8 +326,11 @@ public:
 	/** Get the Blueprint object to which this node belongs */
 	BLUEPRINTGRAPH_API UBlueprint* GetBlueprint() const;
 
-	/** Get the input execution pin if this node is impure (will return NULL when IsNodePure() returns true) */
+	/** Get the input execution pin of this node (if one exists)*/
 	BLUEPRINTGRAPH_API UEdGraphPin* GetExecPin() const;
+
+	/** Get the output then pin of this node (if one exists)*/
+	BLUEPRINTGRAPH_API UEdGraphPin* GetThenPin() const;
 
 	/**
 	 * If this node references an actor in the level that should be selectable by "Find Actors In Level," this will return a reference to that actor
@@ -351,10 +373,10 @@ public:
 	BLUEPRINTGRAPH_API virtual bool IsConnectionDisallowed(const UEdGraphPin* MyPin, const UEdGraphPin* OtherPin, FString& OutReason) const { return false; }
 
 	/** This function if used for nodes that needs CDO for validation (Called before expansion)*/
-	BLUEPRINTGRAPH_API virtual void EarlyValidation(class FCompilerResultsLog& MessageLog) const;
+	BLUEPRINTGRAPH_API virtual void EarlyValidation(FCompilerResultsLog& MessageLog) const;
 
 	/** This function returns an arbitrary number of attributes that describe this node for analytics events */
-	BLUEPRINTGRAPH_API virtual void GetNodeAttributes( TArray<TKeyValuePair<FString, FString>>& OutNodeAttributes ) const;
+	BLUEPRINTGRAPH_API virtual void GetNodeAttributes(TArray<TKeyValuePair<FString, FString>>& OutNodeAttributes) const;
 
 	/** Called before compilation begins, giving a blueprint time to force the linker to load data */
 	BLUEPRINTGRAPH_API virtual void PreloadRequiredAssets() { }
@@ -409,6 +431,21 @@ public:
 	/** Return whether this node references the specified variable, give the supplied scope. Used when variable types are changed. */
 	virtual bool ReferencesVariable(const FName& InVarName, const UStruct* InScope) const { return false; }
 
+	/** Handle when a function is renamed in the Blueprint Palette */
+	virtual void HandleFunctionRenamed(UBlueprint* InBlueprint, UClass* InFunctionClass, UEdGraph* InGraph, const FName& InOldFuncName, const FName& InNewFuncName) {}
+	
+	/** Return whether this node references the specified function, identified by a name and guid pair **/
+	virtual bool ReferencesFunction(const FName& InFunctionName, const UStruct* InScope) const { return false; };
+
+	/** 
+	 * Replace any member references of source with replacement 
+	 * @param	InBlueprint		The blueprint that the source reference is from
+	 * @param	InReplacementBlueprint	The blueprint that the replacement reference is from
+	 * @param	InSource		The reference to be replaced
+	 * @param	InReplacement		The reference to replace with
+	 */
+	virtual void ReplaceReferences(UBlueprint* InBlueprint, UBlueprint* InReplacementBlueprint, const FMemberReference& InSource, const FMemberReference& InReplacement) {}
+
 	/** Helper function for ExpandNode(), allowing other contexts to call pin expansion alone */
 	BLUEPRINTGRAPH_API void ExpandSplitPins(FKismetCompilerContext& CompilerContext, UEdGraph* SourceGraph);
 
@@ -421,7 +458,9 @@ protected:
 		/* The pins match by name or redirect and have the same type (or we're ok with the mismatched type) */
 		ERedirectType_Name,
 		/* The pins match via a redirect and the value needs to also be redirected */
-		ERedirectType_Value
+		ERedirectType_Value,
+		/* The pins differ by type and have a default value*/
+		ERedirectType_DefaultValue,
 	};
 
 	// Handles the actual reconstruction (copying data, links, name, etc...) from two pins that have already been matched together
@@ -459,10 +498,47 @@ protected:
 	 * Sends a message to the owning blueprint's CurrentMessageLog, if there is one available.  Otherwise, defaults to logging to the normal channels.
 	 * Should use this for node actions that happen during compilation!
 	 */
-	void Message_Note(const FString& Message);
-	void Message_Warn(const FString& Message);
-	void Message_Error(const FString& Message);
+	template<typename... ArgTypes>
+	void Message_Note(const FString& Message, ArgTypes... Args) const
+	{
+		UBlueprint* OwningBP = GetBlueprint();
+		if (OwningBP)
+		{
+			OwningBP->Message_Note(Message, Forward<ArgTypes>(Args)...);
+		}
+		else
+		{
+			UE_LOG(LogBlueprint, Log, TEXT("%s"), *Message);
+		}
+	}
 
+	template<typename... ArgTypes>
+	void Message_Warn(const FString& Message, ArgTypes... Args) const
+	{
+		UBlueprint* OwningBP = GetBlueprint();
+		if (OwningBP)
+		{
+			OwningBP->Message_Warn(Message, Forward<ArgTypes>(Args)...);
+		}
+		else
+		{
+			UE_LOG(LogBlueprint, Warning, TEXT("%s"), *Message);
+		}
+	}
+
+	template<typename... ArgTypes>
+	void Message_Error(const FString& Message, ArgTypes... Args) const
+	{
+		UBlueprint* OwningBP = GetBlueprint();
+		if (OwningBP)
+		{
+			OwningBP->Message_Error(Message, Forward<ArgTypes>(Args)...);
+		}
+		else
+		{
+			UE_LOG(LogBlueprint, Error, TEXT("%s"), *Message);
+		}
+	}
 
 	friend class FKismetCompilerContext;
 
@@ -489,7 +565,25 @@ private:
 	 * Utility function to write messages about orphan nodes in to the compiler log.
 	 * bStore indicates whether to write immediately to the log, or to store as a potential message to be committed once node pruning has completed
 	 */
-	void ValidateOrphanPins(class FCompilerResultsLog& MessageLog, bool bStore) const;
+	void ValidateOrphanPins(FCompilerResultsLog& MessageLog, bool bStore) const;
+	void ValidateOrphanPin(UEdGraphPin* Pin, FCompilerResultsLog& MessageLog, bool bStore) const;
+
+	/**
+	 * Checks that pins are type compatible with their links.
+	 * If there's a type mismatch (eg: due to a underlying type change), then we'll automatically
+	 * insert a conversion node into the graph if one exists between the two types.
+	 */
+	void ValidateLinkedPinTypes(UEdGraphPin* OutputPin, FCompilerResultsLog& MessageLog) const;
+
+	/**
+	 * If there's a type mismatch between old and new pins during rewiring *and* the old pin has a default value,
+	 * then we'll need a way to keep the old default value and convert it to the new type.
+	 * This function achieves that by inserting both a literal and a conversion node.
+	 * The literal node will use the original default value.
+	 * 
+	 * Returns true if the conversion was successful.
+	 */
+	bool TryInsertDefaultValueConversionNode(const UEdGraphPin& OldPin, UEdGraphPin& NewPin) const;
 
 public:
 

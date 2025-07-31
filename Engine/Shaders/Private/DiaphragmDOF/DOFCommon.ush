@@ -7,6 +7,7 @@
 #pragma once
 
 #include "../Common.ush"
+#include "../ScreenPass.ush"
 
 // Piggy back on existing Circle DOF code.
 #include "../CircleDOFCommon.ush"
@@ -108,6 +109,9 @@
 /** Amount of error tolerated to quick fast gathering in. */
 #define FAST_GATHERING_COC_ERROR 0.05
 
+/** Whether to output a debug texture for passes. */
+#define DEBUG_OUTPUT 0
+
 
 //------------------------------------------------------- COMPILE TIME CONSTANTS.
 
@@ -142,32 +146,69 @@ static const int2 kOffsetsSquare3x3[9] = {
 };
 
 
+//------------------------------------------------------- PARAMETERS
+
+float CocInfinityRadius;
+float CocInFocusRadius;
+uint bCocEnableDynamicRadiusOffset;
+float CocMinRadius;
+float CocMaxRadius;
+float CocSqueeze;
+float CocInvSqueeze;
+
+float DepthBlurRadius;
+float DepthBlurExponent;
+
+Texture2D		DynamicRadiusOffsetLUT;
+SamplerState	DynamicRadiusOffsetLUTSampler;
+
+//------------------------------------------------------- DEBUG OUTPUT
+
+#if DEBUG_OUTPUT
+RWTexture2D<float4> DebugOutput;
+#endif
+
 
 //------------------------------------------------------- COMMON API.
 
-// is wrapping the DepthToCoc() function in this file for faster iteration
-// @return half res pixel radius
-float DepthToHalfResCocRadius(float4 CocModelParameters, float2 DepthBlurParameters, float SceneDepth)
+#if WITH_DYNAMIC_COC_OFFSET
+float GetCocOffset(float CocRadius)
 {
-	const float Focus = View.DepthOfFieldFocalDistance; // TODO: rename that guy to DepthOfFieldFocusDistance.
-	const float InfinityCocRadius = CocModelParameters.x;
-	const float MinCocRadius = CocModelParameters.y;
-	const float MaxCocRadius = CocModelParameters.z;
-	
-	// Radius from the circle of confusion.
-	float CocRadius = ((SceneDepth - Focus) / SceneDepth) * InfinityCocRadius;
-
-	// Depth blur's radius.
-	float DepthBlurAbsRadius = (1.0 - exp2(-SceneDepth * DepthBlurParameters.x)) * DepthBlurParameters.y;
-
-	float ReturnCoc = max(abs(CocRadius), DepthBlurAbsRadius);
-	if(CocRadius < 0.0) 
+	float DynamicOffset = 0.0;
+	BRANCH if (bCocEnableDynamicRadiusOffset)
 	{
-		// Near CoC is using negative values.
-		ReturnCoc = -ReturnCoc;
+		// The 1D LUT is indexed by ratio of object CoC to in-focus CoC, starting at ratio of 1 (since we only care about objects at or beyond the in-focus plane)
+		// and going to a maximum ratio calculated by the number of pixels in the LUT and the starting object and wall CoCs. By convention, the LUT has been
+		// computed with starting CoC of 32
+		float MaxRatio = (256 + 32) / 32;
+		float Ratio = CocInFocusRadius > 0 ? CocRadius / CocInFocusRadius : MaxRatio;
+		float2 TexCoords = float2((Ratio - 1) / (MaxRatio - 1), 0);
+		float Offset = DynamicRadiusOffsetLUT.SampleLevel(DynamicRadiusOffsetLUTSampler, TexCoords, 0).r * CocInFocusRadius;
+		DynamicOffset = -min(Offset, CocRadius);
 	}
 
-	return clamp(ReturnCoc, MinCocRadius, MaxCocRadius);
+	return DynamicOffset;
+}
+#endif
+
+// Returns the coc radius
+float SceneDepthToCocRadius(float SceneDepth)
+{
+	const float Focus = View.DepthOfFieldFocalDistance; // TODO: rename this to DepthOfFieldFocusDistance.
+	
+	// Radius from the circle of confusion.
+	float CocRadius = ((SceneDepth - Focus) / SceneDepth) * CocInfinityRadius;
+
+#if WITH_DYNAMIC_COC_OFFSET
+	CocRadius = CocRadius + GetCocOffset(CocRadius);
+#endif
+
+	// Depth blur's radius.
+	float DepthBlurAbsRadius = (1.0 - exp2(-SceneDepth * DepthBlurExponent)) * DepthBlurRadius;
+
+	float ReturnCoc = max(abs(CocRadius), DepthBlurAbsRadius) * sign(CocRadius);
+
+	return clamp(ReturnCoc, CocMinRadius, CocMaxRadius);
 }
 
 // Return whether this is front element from CocRadius.

@@ -7,19 +7,14 @@
 #include "PhysicsInterfaceDeclares.h"
 #include "BodySetupEnums.h"
 #include "PhysicsInterfaceTypesCore.h"
-
-#if WITH_CHAOS
 #include "Chaos/Serializable.h"
 
 namespace Chaos
 {
 	class FImplicitObjectUnion;
-
 	class FImplicitObject;
-
 	class FTriangleMeshImplicitObject;
 }
-#endif
 
 class UPhysicalMaterialMask;
 class UMaterialInterface;
@@ -35,12 +30,6 @@ class UMaterialInterface;
 
 struct FKAggregateGeom;
 
-namespace physx
-{
-	class PxShape;
-	class PxTriangleMesh;
-}
-
 struct FPhysicalMaterialMaskParams
 {
 	/** Physical materials mask */
@@ -52,23 +41,38 @@ struct FPhysicalMaterialMaskParams
 
 struct FGeometryAddParams
 {
+	FGeometryAddParams() = default;
+
+	FGeometryAddParams(const FGeometryAddParams& Other)
+	: bDoubleSided(Other.bDoubleSided)
+	, CollisionData(Other.CollisionData)
+	, CollisionTraceType(Other.CollisionTraceType)
+	, Scale(Other.Scale)
+	, SimpleMaterial(Other.SimpleMaterial)
+	, ComplexMaterials(Other.ComplexMaterials)
+	, ComplexMaterialMasks(Other.ComplexMaterialMasks)
+	, LocalTransform(Other.LocalTransform)
+	, WorldTransform(Other.WorldTransform)
+	, Geometry(Other.Geometry)
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS
+	, ChaosTriMeshes(Other.ChaosTriMeshes)
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS
+	, TriMeshGeometries(Other.TriMeshGeometries)
+	{}
+
 	bool bDoubleSided;
 	FBodyCollisionData CollisionData;
 	ECollisionTraceFlag CollisionTraceType;
 	FVector Scale;
 	UPhysicalMaterial* SimpleMaterial;
 	TArrayView<UPhysicalMaterial*> ComplexMaterials;
-#if WITH_CHAOS
 	TArrayView<FPhysicalMaterialMaskParams> ComplexMaterialMasks;
-#endif
 	FTransform LocalTransform;
 	FTransform WorldTransform;
 	FKAggregateGeom* Geometry;
-	// FPhysicsInterfaceTriMesh - Per implementation
-#if WITH_PHYSX
-	TArrayView<physx::PxTriangleMesh*> TriMeshes;
-#endif
-#if WITH_CHAOS
+
+	UE_DEPRECATED(5.4, "Please use TriMeshGeometries instead")
 	TArrayView<TSharedPtr<Chaos::FTriangleMeshImplicitObject, ESPMode::ThreadSafe>> ChaosTriMeshes;
-#endif
+
+	TArrayView<Chaos::FTriangleMeshImplicitObjectPtr> TriMeshGeometries;
 };

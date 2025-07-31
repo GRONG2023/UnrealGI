@@ -2,12 +2,22 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
+#include "Containers/Array.h"
 #include "Containers/Queue.h"
+#include "CoreMinimal.h"
+#include "CoreTypes.h"
+#include "Net/Common/Packets/PacketTraits.h"
 #include "PacketHandler.h"
+#include "Templates/SharedPointer.h"
 
-// Symmetric Stream cipher
-class RELIABILITYHANDLERCOMPONENT_API ReliabilityHandlerComponent : public HandlerComponent
+class FArchive;
+class FString;
+struct FBitReader;
+struct FBitWriter;
+
+
+class UE_DEPRECATED(5.3, "This handler is not supported. For fully-reliable data, use reliable RPCs or a separate connection with a reliable protocol.")
+RELIABILITYHANDLERCOMPONENT_API ReliabilityHandlerComponent : public HandlerComponent
 {
 public:
 	/* Initializes default data */

@@ -2,7 +2,7 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
+#include "Templates/SharedPointer.h"
 
 class FBehaviorTreeEditor;
 class FExtender;
@@ -18,6 +18,8 @@ public:
 	void AddDebuggerToolbar(TSharedPtr<FExtender> Extender);
 	void AddBehaviorTreeToolbar(TSharedPtr<FExtender> Extender);
 
+	void SetCreateActionsEnabled(bool bActionsEnabled);
+
 private:
 	void FillModesToolbar(FToolBarBuilder& ToolbarBuilder);
 	void FillDebuggerToolbar(FToolBarBuilder& ToolbarBuilder);
@@ -26,4 +28,7 @@ private:
 protected:
 	/** Pointer back to the blueprint editor tool that owns us */
 	TWeakPtr<FBehaviorTreeEditor> BehaviorTreeEditor;
+
+private:
+	bool bCreateActionsEnabled = true;
 };

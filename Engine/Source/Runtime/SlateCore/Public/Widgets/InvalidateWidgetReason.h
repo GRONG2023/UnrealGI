@@ -2,7 +2,10 @@
 
 #pragma once
 
+#include "Containers/UnrealString.h"
 #include "CoreMinimal.h"
+#include "CoreTypes.h"
+#include "Misc/EnumClassFlags.h"
 
 /**
  * The different types of invalidation that are possible for a widget.
@@ -27,17 +30,29 @@ enum class EInvalidateWidgetReason : uint8
 	Volatility = 1 << 2,
 
 	/**
-	 * A child was added or removed.   (this implies layout)
+	 * A child was added or removed.   (this implies prepass and layout)
 	 */
 	ChildOrder = 1 << 3,
 
-	/** A Widgets render transform changed */
+	/**
+	 * A Widgets render transform changed
+	 */
 	RenderTransform = 1 << 4,
 
 	/**
 	 * Changing visibility (this implies layout)
 	 */
 	Visibility = 1 << 5,
+
+	/**
+	 * Attributes got bound or unbound (it's used by the SlateAttributeMetaData)
+	 */
+	AttributeRegistration = 1 << 6,
+
+	/**
+	 * Re-cache desired size of all of this widget's children recursively (this implies layout)
+	 */
+	Prepass = 1 << 7,
 
 	/**
 	 * Use Paint invalidation if you're changing a normal property involving painting or sizing.
@@ -60,6 +75,10 @@ enum class EInvalidateWidgetReason : uint8
 };
 
 ENUM_CLASS_FLAGS(EInvalidateWidgetReason)
+
+SLATECORE_API FString LexToString(EInvalidateWidgetReason Reason);
+SLATECORE_API bool LexTryParseString(EInvalidateWidgetReason& OutMode, const TCHAR* InBuffer);
+SLATECORE_API void LexFromString(EInvalidateWidgetReason& OutMode, const TCHAR* InBuffer);
 
 // This typedefed because EInvalidateWidget will be deprecated soon
 typedef EInvalidateWidgetReason EInvalidateWidget;

@@ -10,6 +10,7 @@
 #include "Rendering/SlateRenderer.h"
 #include "Misc/CoreDelegates.h"
 #include "Async/TaskGraphInterfaces.h"
+#include "Types/SlateVector2.h"
 
 DECLARE_MULTICAST_DELEGATE_TwoParams(FOnDebugSafeZoneChanged, const FMargin&, bool);
 
@@ -52,6 +53,9 @@ class IWindowTitleBar
 {
 public:
 	virtual void Flash( ) = 0;
+	virtual void UpdateWindowMenu(TSharedPtr<SWidget> MenuContent) = 0;
+	virtual void UpdateBackgroundContent(TSharedPtr<SWidget> BackgroundContent) = 0;
+	virtual void SetAllowMenuBar(bool bInAllowMenuBar) = 0;
 };
 
 class FSlateApplicationBase;
@@ -75,7 +79,7 @@ private:
 private:	
 	FSlateApplicationBase* SlateApp;
 	// @see FSlateApplicationBase::LocateWidgetInWindow
-	FWidgetPath LocateWidgetInWindow(FVector2D ScreenspaceMouseCoordinate, const TSharedRef<SWindow>& Window, bool bIgnoreEnabledStatus, int32 UserIndex) const;
+	FWidgetPath LocateWidgetInWindow(FVector2f ScreenspaceMouseCoordinate, const TSharedRef<SWindow>& Window, bool bIgnoreEnabledStatus, int32 UserIndex) const;
 };
 
 /**
@@ -93,12 +97,12 @@ namespace SlateApplicationDefs
  * This class currently serves a temporary workaround for solving SlateCore dependencies to FSlateApplication.
  * It should probably be removed once FSlateApplication has been refactored into SlateCore.
  */
-class SLATECORE_API FSlateApplicationBase
+class FSlateApplicationBase
 {
 	friend class SWidget;
 public:
 
-	FSlateApplicationBase();
+	SLATECORE_API FSlateApplicationBase();
 	virtual ~FSlateApplicationBase() { }
 
 	/**
@@ -165,6 +169,13 @@ public:
 	virtual TSharedPtr<SWindow> GetActiveTopLevelWindow() const = 0;
 
 	/**
+	 * Gets the active regular top-level window.
+	 * A regular window is a non-menu, non-tooltip, non-cursor decorator window
+	 * @return The top level window, or nullptr if no Slate windows are currently active.
+	 */
+	virtual TSharedPtr<SWindow> GetActiveTopLevelRegularWindow() const = 0;
+
+	/**
 	 * Get a list of all top-level windows in the application, excluding virtual windows.
 	 *
 	 * @return An array of all current top-level SWindows.
@@ -177,6 +188,7 @@ public:
 	 * @return The icon.
 	 */
 	virtual const FSlateBrush* GetAppIcon( ) const = 0;
+	virtual const FSlateBrush* GetAppIconSmall() const = 0;
 
 	/**
 	 * Gets the ratio SlateUnit / ScreenPixel.
@@ -200,21 +212,21 @@ public:
 	 *
 	 * @return Cursor position.
 	 */
-	virtual FVector2D GetCursorPos( ) const = 0;
+	virtual UE::Slate::FDeprecateVector2DResult GetCursorPos( ) const = 0;
 
 	/**
 	* Gets the last known position of the cursor.
 	*
 	* @return Cursor position.
 	*/
-	virtual FVector2D GetLastCursorPos( ) const = 0;
+	virtual UE::Slate::FDeprecateVector2DResult GetLastCursorPos( ) const = 0;
 
 	/**
 	 * Gets the size of the cursor..
 	 *
 	 * @return Cursor size.
 	 */
-	virtual FVector2D GetCursorSize( ) const = 0;
+	virtual UE::Slate::FDeprecateVector2DResult GetCursorSize( ) const = 0;
 
 	/** 
 	 * Whether the software cursor is enabled for this application.  
@@ -235,16 +247,16 @@ public:
 	 *
 	 * @param OutDisplayMetrics Will contain the display metrics.
 	 */
-	void GetDisplayMetrics(FDisplayMetrics& OutDisplayMetrics);
+	SLATECORE_API void GetDisplayMetrics(FDisplayMetrics& OutDisplayMetrics);
 
 	/**
 	* Gets the application's cached display metrics.
 	*
 	* @param OutDisplayMetrics Will contain the display metrics.
 	*/
-	void GetCachedDisplayMetrics(FDisplayMetrics& OutDisplayMetrics) const;
+	SLATECORE_API void GetCachedDisplayMetrics(FDisplayMetrics& OutDisplayMetrics) const;
 
-	void GetSafeZoneSize(FMargin& SafeZone, const FVector2D& OverrideSize);
+	SLATECORE_API void GetSafeZoneSize(FMargin& SafeZone, const UE::Slate::FDeprecateVector2DParameter& OverrideSize);
 
 	/**
 	 * Get the highest level of window transparency support currently enabled by this application
@@ -284,7 +296,7 @@ protected:
 	 */
 	virtual TSharedPtr< SWidget > GetMouseCaptorImpl() const = 0;
 
-	void GetSafeZoneRatio(FMargin& SafeZoneRatio);
+	SLATECORE_API void GetSafeZoneRatio(FMargin& SafeZoneRatio);
 
 public:
 	/**
@@ -344,7 +356,7 @@ public:
 
 	/** @return a hittesting object that can perform hittests agains widgets. Only certain classes can make use of FHitTesting */
 	friend class FHitTesting;
-	const FHitTesting& GetHitTesting() const;
+	SLATECORE_API const FHitTesting& GetHitTesting() const;
 
 	/** 
 	 * Given the screen-space coordinate of the mouse cursor, searches for a string of widgets that are under the mouse.
@@ -354,7 +366,7 @@ public:
 	 *
 	 * @return The path to the widget.
 	 */
-	virtual FWidgetPath LocateWindowUnderMouse( FVector2D ScreenspaceMouseCoordinate, const TArray< TSharedRef<SWindow > >& Windows, bool bIgnoreEnabledStatus = false, int32 UserIndex = INDEX_NONE) = 0;
+	virtual FWidgetPath LocateWindowUnderMouse( UE::Slate::FDeprecateVector2DParameter ScreenspaceMouseCoordinate, const TArray< TSharedRef<SWindow > >& Windows, bool bIgnoreEnabledStatus = false, int32 UserIndex = INDEX_NONE) = 0;
 
 	/**
 	 * Calculates the tooltip window position.
@@ -363,7 +375,7 @@ public:
 	 * @param InSize The size of the tooltip window.
 	 * @return The suggested position.
 	 */
-	virtual FVector2D CalculateTooltipWindowPosition(const FSlateRect& InAnchorRect, const FVector2D& InSize, bool bAutoAdjustForDPIScale) const = 0;
+	virtual UE::Slate::FDeprecateVector2DResult CalculateTooltipWindowPosition(const FSlateRect& InAnchorRect, const UE::Slate::FDeprecateVector2DParameter& InSize, bool bAutoAdjustForDPIScale) const = 0;
 
 	/** @return true if 'WindowToTest' is being used to display the current tooltip and the tooltip is interactive. */
 	virtual bool IsWindowHousingInteractiveTooltip(const TSharedRef<const SWindow>& WindowToTest) const = 0;
@@ -402,7 +414,7 @@ public:
 	 * @return The new title bar widget.
 	 */
 	UE_DEPRECATED(4.26, "This version of MakeWindowTitleBar has been deprecated. Use the version that takes in an FWindowTitleBarArgs parameter instead.")
-	virtual TSharedRef<SWidget> MakeWindowTitleBar(const TSharedRef<SWindow>& Window, const TSharedPtr<SWidget>& CenterContent, EHorizontalAlignment CenterContentAlignment, TSharedPtr<IWindowTitleBar>& OutTitleBar) const;
+	SLATECORE_API virtual TSharedRef<SWidget> MakeWindowTitleBar(const TSharedRef<SWindow>& Window, const TSharedPtr<SWidget>& CenterContent, EHorizontalAlignment CenterContentAlignment, TSharedPtr<IWindowTitleBar>& OutTitleBar) const;
 
 	/**
 	 * Creates a title bar for the specified window.
@@ -463,6 +475,11 @@ public:
 	virtual TSharedPtr<SWidget> GetUserFocusedWidget(uint32 UserIndex) const = 0;
 
 	/**
+	 * @return the Widget that started a tick, paint, prepass or an event.
+	 */
+	virtual TSharedPtr<SWidget> GetCurrentDebugContextWidget() const = 0;
+
+	/**
 	 * Gets a delegate that is invoked when a global invalidate of all widgets should occur
 	 */
 	DECLARE_EVENT_OneParam(FSlateApplicationBase, FOnInvalidateAllWidgets, bool);
@@ -471,23 +488,23 @@ public:
 	DECLARE_EVENT_OneParam(FSlateApplicationBase, FOnGlobalInvalidationToggled, bool);
 	FOnGlobalInvalidationToggled& OnGlobalInvalidationToggled() { return OnGlobalInvalidationToggledEvent; }
 
-	void ToggleGlobalInvalidation(bool bIsGlobalInvalidationEnabled);
+	SLATECORE_API void ToggleGlobalInvalidation(bool bIsGlobalInvalidationEnabled);
 
 	/**
 	 * Notifies all invalidation panels that they should invalidate their contents
 	 * Note: this is a very expensive call and should only be done in non-performance critical situations
 	 */
-	void InvalidateAllWidgets(bool bClearResourcesImmediately) const;
+	SLATECORE_API void InvalidateAllWidgets(bool bClearResourcesImmediately) const;
 private:
 	/**
 	 * Implementation for active timer registration. See SWidget::RegisterActiveTimer.
 	 */
-	void RegisterActiveTimer( const TSharedRef<FActiveTimerHandle>& ActiveTimerHandle );
+	SLATECORE_API void RegisterActiveTimer( const TSharedRef<FActiveTimerHandle>& ActiveTimerHandle );
 
 	/**
 	 * Implementation for active timer registration. See SWidget::UnRegisterActiveTimer.
 	 */
-	void UnRegisterActiveTimer( const TSharedRef<FActiveTimerHandle>& ActiveTimerHandle );
+	SLATECORE_API void UnRegisterActiveTimer( const TSharedRef<FActiveTimerHandle>& ActiveTimerHandle );
 
 	/** The list of active timer handles. */
 	TArray<TWeakPtr<FActiveTimerHandle>> ActiveTimerHandles;
@@ -504,11 +521,14 @@ protected:
 	 * Used to determine if any active timer handles are ready to fire.
 	 * Means we need to tick slate even if no user interaction.
 	 */
-	bool AnyActiveTimersArePending();
+	SLATECORE_API bool AnyActiveTimersArePending();
 
 public:
-	const static uint32 CursorPointerIndex;
-	const static uint32 CursorUserIndex;
+	SLATECORE_API const static uint32 CursorPointerIndex;
+	SLATECORE_API const static uint32 CursorUserIndex;
+
+	/** The primary platform user for this application. They will own the mouse and cursor by default. Default ID is 0 */
+	SLATECORE_API const static FPlatformUserId SlateAppPrimaryPlatformUser;
 
 	/**
 	 * Returns the current instance of the application. The application should have been initialized before
@@ -578,11 +598,11 @@ protected:
 	virtual bool ShowUserFocus(const TSharedPtr<const SWidget> Widget) const = 0;
 
 	/** Given a window, locate a widget under the cursor in it; returns an invalid path if cursor is not over this window. */
-	virtual FWidgetPath LocateWidgetInWindow(FVector2D ScreenspaceMouseCoordinate, const TSharedRef<SWindow>& Window, bool bIgnoreEnabledStatus, int32 UserIndex) const = 0;
+	virtual FWidgetPath LocateWidgetInWindow(UE::Slate::FDeprecateVector2DParameter ScreenspaceMouseCoordinate, const TSharedRef<SWindow>& Window, bool bIgnoreEnabledStatus, int32 UserIndex) const = 0;
 	
-	void UpdateCustomSafeZone(const FMargin& NewSafeZoneRatio, bool bShouldRecacheMetrics);
+	SLATECORE_API void UpdateCustomSafeZone(const FMargin& NewSafeZoneRatio, bool bShouldRecacheMetrics);
 #if WITH_EDITOR
-	void SwapSafeZoneTypes();
+	SLATECORE_API void SwapSafeZoneTypes();
 #endif
 
 protected:
@@ -596,10 +616,10 @@ protected:
 protected:
 
 	// Holds a pointer to the current application.
-	static TSharedPtr<FSlateApplicationBase> CurrentBaseApplication;
+	static SLATECORE_API TSharedPtr<FSlateApplicationBase> CurrentBaseApplication;
 
 	// Holds a pointer to the platform application.
-	static TSharedPtr<class GenericApplication> PlatformApplication;
+	static SLATECORE_API TSharedPtr<class GenericApplication> PlatformApplication;
 
 	// Caches the application's display metrics
 	FDisplayMetrics CachedDisplayMetrics;
@@ -613,7 +633,7 @@ public:
 	 *
 	 * @return True if Slate is sleeping.
 	 */
-	bool IsSlateAsleep();
+	SLATECORE_API bool IsSlateAsleep();
 
 	TSharedPtr<ICursor> GetPlatformCursor()
 	{
@@ -625,9 +645,9 @@ public:
 		return PlatformApplication;
 	}
 
-	void ResetCustomSafeZone();
-	bool IsCustomSafeZoneSet() const;
-	void SetCustomSafeZone(const FMargin& InSafeZone);
+	SLATECORE_API void ResetCustomSafeZone();
+	SLATECORE_API bool IsCustomSafeZoneSet() const;
+	SLATECORE_API void SetCustomSafeZone(const FMargin& InSafeZone);
 	const FMargin& GetCustomSafeZone() const { return CustomSafeZoneRatio; }
 
 #if WITH_EDITORONLY_DATA

@@ -2,21 +2,32 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
 #include "BehaviorTreeGraphNode.h"
+#include "Containers/Array.h"
+#include "Containers/UnrealString.h"
+#include "CoreMinimal.h"
+#include "EdGraph/EdGraph.h"
+#include "EdGraph/EdGraphNode.h"
+#include "HAL/Platform.h"
+#include "Internationalization/Text.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/UObjectGlobals.h"
+
 #include "BehaviorTreeGraphNode_CompositeDecorator.generated.h"
 
+class UBehaviorTreeDecoratorGraph;
 class UEdGraph;
+class UObject;
 
 UCLASS()
-class UBehaviorTreeGraphNode_CompositeDecorator : public UBehaviorTreeGraphNode
+class BEHAVIORTREEEDITOR_API UBehaviorTreeGraphNode_CompositeDecorator : public UBehaviorTreeGraphNode
 {
 	GENERATED_UCLASS_BODY()
 
 	// The logic graph for this decorator (returning a boolean)
 	UPROPERTY()
-	class UEdGraph* BoundGraph;
+	TObjectPtr<class UEdGraph> BoundGraph;
 
 	UPROPERTY(EditAnywhere, Category=Description)
 	FString CompositeName;
@@ -31,10 +42,13 @@ class UBehaviorTreeGraphNode_CompositeDecorator : public UBehaviorTreeGraphNode
 
 	uint32 bHasBrokenInstances : 1;
 
+	TSubclassOf<UBehaviorTreeDecoratorGraph> GraphClass;
+
 	FString GetNodeTypeDescription() const;
 	virtual FText GetNodeTitle(ENodeTitleType::Type TitleType) const override;
 	virtual void AllocateDefaultPins() override;
 	virtual FText GetDescription() const override;
+	virtual FText GetTooltipText() const override;
 	virtual void PostPlacedNewNode() override;
 	virtual void PostLoad() override;
 	virtual UEdGraph* GetBoundGraph() const override { return BoundGraph; }
@@ -45,6 +59,7 @@ class UBehaviorTreeGraphNode_CompositeDecorator : public UBehaviorTreeGraphNode
 
 	virtual void PrepareForCopying() override;
 	virtual void PostCopyNode() override;
+	virtual void PostPasteNode() override;
 
 	int32 SpawnMissingNodes(const TArray<class UBTDecorator*>& NodeInstances, const TArray<struct FBTDecoratorLogic>& Operations, int32 StartIndex);
 	void CollectDecoratorData(TArray<class UBTDecorator*>& NodeInstances, TArray<struct FBTDecoratorLogic>& Operations) const;
@@ -57,6 +72,8 @@ class UBehaviorTreeGraphNode_CompositeDecorator : public UBehaviorTreeGraphNode
 
 	virtual void PostEditChangeProperty(struct FPropertyChangedEvent& PropertyChangedEvent) override;
 
+	virtual FLinearColor GetBackgroundColor(bool bIsActiveForDebugger) const override;
+
 	void ResetExecutionRange();
 
 	/** Execution index range of internal nodes, used by debugger */
@@ -68,7 +85,7 @@ protected:
 	virtual void ResetNodeOwner() override;
 
 	UPROPERTY()
-	class UBTCompositeNode* ParentNodeInstance;
+	TObjectPtr<class UBTCompositeNode> ParentNodeInstance;
 
 	uint8 ChildIndex;
 

@@ -3,12 +3,19 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
 #include "Factories/Factory.h"
+#include "UObject/NameTypes.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/UObjectGlobals.h"
+
 #include "BehaviorTreeFactory.generated.h"
 
+class FFeedbackContext;
+class UClass;
+class UObject;
+
 UCLASS()
-class UBehaviorTreeFactory : public UFactory
+class BEHAVIORTREEEDITOR_API UBehaviorTreeFactory : public UFactory
 {
 	GENERATED_UCLASS_BODY()
 

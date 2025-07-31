@@ -6,11 +6,11 @@
 #include "Debugging/ConsoleSlateDebuggerInvalidationRoot.h"
 #include "Debugging/ConsoleSlateDebuggerPaint.h"
 #include "Debugging/ConsoleSlateDebuggerUpdate.h"
+#include "Debugging/ConsoleSlateDebuggerBreak.h"
 #include "Modules/ModuleInterface.h"
 #include "Modules/ModuleManager.h"
 #include "SlateGlobals.h"
 #include "Types/SlateStructs.h"
-
 
 DEFINE_LOG_CATEGORY(LogSlate);
 DEFINE_LOG_CATEGORY(LogSlateStyles);
@@ -33,6 +33,7 @@ public:
 		SlateDebuggerInvalidationRoot = MakeUnique<FConsoleSlateDebuggerInvalidationRoot>();
 		SlateDebuggerPaint = MakeUnique<FConsoleSlateDebuggerPaint>();
 		SlateDebuggerUpdate = MakeUnique<FConsoleSlateDebuggerUpdate>();
+		SlateDebuggerBreak = MakeUnique<FConsoleSlateDebuggerBreak>();
 #endif
 	}
 
@@ -43,6 +44,7 @@ private:
 	TUniquePtr<FConsoleSlateDebuggerInvalidationRoot> SlateDebuggerInvalidationRoot;
 	TUniquePtr<FConsoleSlateDebuggerPaint> SlateDebuggerPaint;
 	TUniquePtr<FConsoleSlateDebuggerUpdate> SlateDebuggerUpdate;
+	TUniquePtr<FConsoleSlateDebuggerBreak> SlateDebuggerBreak;
 #endif
 };
 

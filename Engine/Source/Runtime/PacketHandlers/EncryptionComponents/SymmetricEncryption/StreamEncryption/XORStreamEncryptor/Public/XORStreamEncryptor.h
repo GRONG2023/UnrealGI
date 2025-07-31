@@ -3,7 +3,8 @@
 #include "StreamEncryptionHandlerComponent.h"
 
 /* XOR Stream Encryptor Module Interface */
-class FXORStreamEncryptorModuleInterface : public FStreamEncryptorModuleInterface
+class UE_DEPRECATED(5.3, "This component is not supported for encryption.")
+FXORStreamEncryptorModuleInterface : public FStreamEncryptorModuleInterface
 {
 public:
 	virtual StreamEncryptor* CreateStreamEncryptorInstance();
@@ -12,7 +13,8 @@ public:
 /*
 * XOR Block encryption
 */
-class XORSTREAMENCRYPTOR_API XORStreamEncryptor : public StreamEncryptor
+class UE_DEPRECATED(5.3, "This component is not supported for encryption.")
+XORSTREAMENCRYPTOR_API XORStreamEncryptor : public StreamEncryptor
 {
 public:
 	/* Initialized the encryptor */

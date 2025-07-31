@@ -2,6 +2,8 @@
 
 #include "ContentBrowserItem.h"
 #include "ContentBrowserDataSource.h"
+#include "IContentBrowserDataModule.h"
+#include "ContentBrowserDataSubsystem.h"
 
 #define LOCTEXT_NAMESPACE "ContentBrowserData"
 
@@ -288,6 +290,18 @@ bool FContentBrowserItem::IsFile() const
 	return PrimaryItemData && PrimaryItemData->IsFile();
 }
 
+bool FContentBrowserItem::IsInPlugin() const
+{
+	const FContentBrowserItemData* PrimaryItemData = GetPrimaryInternalItem();
+	return PrimaryItemData && PrimaryItemData->IsPlugin();
+}
+
+bool FContentBrowserItem::IsSupported() const
+{
+	const FContentBrowserItemData* PrimaryItemData = GetPrimaryInternalItem();
+	return PrimaryItemData && PrimaryItemData->IsSupported();
+}
+
 bool FContentBrowserItem::IsTemporary() const
 {
 	const FContentBrowserItemData* PrimaryItemData = GetPrimaryInternalItem();
@@ -340,6 +354,22 @@ FName FContentBrowserItem::GetVirtualPath() const
 		: FName();
 }
 
+FName FContentBrowserItem::GetInvariantPath() const
+{
+	const FContentBrowserItemData* PrimaryItemData = GetPrimaryInternalItem();
+	return PrimaryItemData
+		? PrimaryItemData->GetInvariantPath()
+		: FName();
+}
+
+FName FContentBrowserItem::GetInternalPath() const
+{
+	const FContentBrowserItemData* PrimaryItemData = GetPrimaryInternalItem();
+	return PrimaryItemData
+		? PrimaryItemData->GetInternalPath()
+		: FName();
+}
+
 FName FContentBrowserItem::GetItemName() const
 {
 	const FContentBrowserItemData* PrimaryItemData = GetPrimaryInternalItem();
@@ -363,6 +393,7 @@ public:
 	static bool CallDataSourceImpl(const FContentBrowserItem& Item, FuncType Func, ArgTypes&&... Args)
 	{
 		bool bResult = false;
+		static const FName RootPath = "/";
 
 		FContentBrowserItem::FItemDataArrayView ItemDataArray = Item.GetInternalItems();
 		for (const FContentBrowserItemData& ItemData : ItemDataArray)
@@ -370,7 +401,7 @@ public:
 			if (UContentBrowserDataSource* ItemDataSource = ItemData.GetOwnerDataSource())
 			{
 				// Test the mount point again, as dummy items may have been emitted to represent the mount point itself
-				if (ItemDataSource->IsVirtualPathUnderMountRoot(ItemData.GetVirtualPath()) && ItemDataSource->GetVirtualMountRoot() != ItemData.GetVirtualPath())
+				if (/*ItemDataSource->IsVirtualPathUnderMountRoot(ItemData.GetVirtualPath()) && */(RootPath != ItemData.GetVirtualPath()))
 				{
 					if (ObjectType* CastItemDataSource = Cast<ObjectType>(ItemDataSource))
 					{
@@ -423,6 +454,11 @@ bool FContentBrowserItem::CanPreview(FText* OutErrorMsg) const
 	return FContentBrowserItemHelper::CallDataSourceImpl<UContentBrowserDataSource>(*this, UE_PROJECTION_MEMBER(UContentBrowserDataSource, CanPreviewItem), OutErrorMsg);
 }
 
+bool FContentBrowserItem::CanView(FText* OutErrorMsg) const
+{
+	return FContentBrowserItemHelper::CallDataSourceImpl<UContentBrowserDataSource>(*this, UE_PROJECTION_MEMBER(UContentBrowserDataSource, CanViewItem), OutErrorMsg);
+}
+
 bool FContentBrowserItem::Preview() const
 {
 	return FContentBrowserItemHelper::CallDataSourceImpl<UContentBrowserDataSource>(*this, UE_PROJECTION_MEMBER(UContentBrowserDataSource, PreviewItem));
@@ -467,6 +503,8 @@ bool FContentBrowserItem::CanRename(const FString* InNewName, FText* OutErrorMsg
 
 bool FContentBrowserItem::Rename(const FString& InNewName, FContentBrowserItem* OutNewItem) const
 {
+	static const FName RootPath = "/";
+
 	FContentBrowserItem NewItem;
 
 	for (const FContentBrowserItemData& ItemData : ItemDataArray)
@@ -474,7 +512,7 @@ bool FContentBrowserItem::Rename(const FString& InNewName, FContentBrowserItem* 
 		if (UContentBrowserDataSource* ItemDataSource = ItemData.GetOwnerDataSource())
 		{
 			// Test the mount point again, as dummy items may have been emitted to represent the mount point itself
-			if (ItemDataSource->IsVirtualPathUnderMountRoot(ItemData.GetVirtualPath()) && ItemDataSource->GetVirtualMountRoot() != ItemData.GetVirtualPath())
+			if (ItemDataSource->IsVirtualPathUnderMountRoot(ItemData.GetVirtualPath()) && (ItemData.GetVirtualPath() != RootPath))
 			{
 				FContentBrowserItemData NewItemData;
 				if (ItemDataSource->RenameItem(ItemData, InNewName, NewItemData))
@@ -527,9 +565,16 @@ bool FContentBrowserItem::UpdateThumbnail(FAssetThumbnail& InThumbnail) const
 	return FContentBrowserItemHelper::CallDataSourceImpl<UContentBrowserDataSource>(*this, UE_PROJECTION_MEMBER(UContentBrowserDataSource, UpdateThumbnail), InThumbnail);
 }
 
-bool FContentBrowserItem::TryGetCollectionId(FName& OutCollectionId) const
+bool FContentBrowserItem::TryGetCollectionId(FSoftObjectPath& OutCollectionId) const
 {
 	return FContentBrowserItemHelper::CallDataSourceImpl<UContentBrowserDataSource>(*this, UE_PROJECTION_MEMBER(UContentBrowserDataSource, TryGetCollectionId), OutCollectionId);
+}
+
+bool FContentBrowserItem::TryGetCollectionId(FName& OutCollectionId) const
+{
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
+	return FContentBrowserItemHelper::CallDataSourceImpl<UContentBrowserDataSource>(*this, UE_PROJECTION_MEMBER(UContentBrowserDataSource, TryGetCollectionId), OutCollectionId);
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 }
 
 bool FContentBrowserItem::Legacy_TryGetPackagePath(FName& OutPackagePath) const

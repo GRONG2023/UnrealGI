@@ -7,12 +7,16 @@
 #include "UObject/LinkerLoad.h"
 #include "UObject/ConstructorHelpers.h"
 #include "Misc/Parse.h"
+#include "UObject/CoreRedirects.h"
 #include "UObject/PropertyHelper.h"
 
-// WARNING: This should always be the last include in any file that needs it (except .generated.h)
-#include "UObject/UndefineUPropertyMacros.h"
-
 IMPLEMENT_FIELD(FFieldPathProperty)
+
+FFieldPathProperty::FFieldPathProperty(FFieldVariant InOwner, const UECodeGen_Private::FFieldPathPropertyParams& Prop)
+	: FFieldPathProperty_Super(InOwner, (const UECodeGen_Private::FPropertyParamsBaseWithOffset&)Prop)
+{
+	PropertyClass = Prop.PropertyClassFunc();
+}
 
 #if WITH_EDITORONLY_DATA
 FFieldPathProperty::FFieldPathProperty(UField* InField)
@@ -24,7 +28,7 @@ FFieldPathProperty::FFieldPathProperty(UField* InField)
 }
 #endif // WITH_EDITORONLY_DATA
 
-EConvertFromTypeResult FFieldPathProperty::ConvertFromType(const FPropertyTag& Tag, FStructuredArchive::FSlot Slot, uint8* Data, UStruct* DefaultsStruct)
+EConvertFromTypeResult FFieldPathProperty::ConvertFromType(const FPropertyTag& Tag, FStructuredArchive::FSlot Slot, uint8* Data, UStruct* DefaultsStruct, const uint8* Defaults)
 {
 	// Convert UProperty object to TFieldPath
 	if (Tag.Type == NAME_ObjectProperty)
@@ -81,17 +85,20 @@ void FFieldPathProperty::SerializeItem(FStructuredArchive::FSlot Slot, void* Val
 	Slot << *FieldPtr;
 }
 
-void FFieldPathProperty::ExportTextItem( FString& ValueStr, const void* PropertyValue, const void* DefaultValue, UObject* Parent, int32 PortFlags, UObject* ExportRootScope ) const
+void FFieldPathProperty::ExportText_Internal( FString& ValueStr, const void* PropertyValueOrContainer, EPropertyPointerType PropertyPointerType, const void* DefaultValue, UObject* Parent, int32 PortFlags, UObject* ExportRootScope ) const
 {
-	const FFieldPath& Value = GetPropertyValue(PropertyValue);
-
-	if (PortFlags & PPF_ExportCpp)
+	FFieldPath Value;
+	
+	if (PropertyPointerType == EPropertyPointerType::Container && HasGetter())
 	{
-		ValueStr += TEXT("TEXT(\"");
-		ValueStr += Value.ToString();
-		ValueStr += TEXT("\")");
+		GetValue_InContainer(PropertyValueOrContainer, &Value);
 	}
-	else if (PortFlags & PPF_PropertyWindow)
+	else
+	{
+		Value = GetPropertyValue(PointerToValuePtr(PropertyValueOrContainer, PropertyPointerType));
+	}
+
+	if (PortFlags & PPF_PropertyWindow)
 	{
 		if (PortFlags & PPF_Delimited)
 		{
@@ -110,11 +117,10 @@ void FFieldPathProperty::ExportTextItem( FString& ValueStr, const void* Property
 	}
 }
 
-const TCHAR* FFieldPathProperty::ImportText_Internal( const TCHAR* Buffer, void* Data, int32 PortFlags, UObject* Parent, FOutputDevice* ErrorText ) const
+const TCHAR* FFieldPathProperty::ImportText_Internal( const TCHAR* Buffer, void* ContainerOrPropertyPtr, EPropertyPointerType PropertyPointerType, UObject* Parent, int32 PortFlags, FOutputDevice* ErrorText ) const
 {
 	check(Buffer);
-	FFieldPath* PathPtr = GetPropertyValuePtr(Data);
-	check(PathPtr);
+	FFieldPath ImportedPath;
 	FString PathName;
 
 	if (!(PortFlags & PPF_Delimited))
@@ -132,7 +138,7 @@ const TCHAR* FFieldPathProperty::ImportText_Internal( const TCHAR* Buffer, void*
 			++SeparatorIndex;
 		}
 		// Copy the value string
-		PathName = FString(SeparatorIndex, Buffer);
+		PathName = FString::ConstructFromPtrSize(Buffer, SeparatorIndex);
 		// Advance the buffer to let the calling function know we succeeded
 		Buffer += SeparatorIndex;
 	}
@@ -146,13 +152,29 @@ const TCHAR* FFieldPathProperty::ImportText_Internal( const TCHAR* Buffer, void*
 			FString UnquotedPathName;
 			if (!FParse::QuotedString(*PathName, UnquotedPathName))
 			{
-				UE_LOG(LogProperty, Warning, TEXT("FieldPathProperty: Bad quoted string: %s"), *PathName);
+				ErrorText->Logf(ELogVerbosity::Warning, TEXT("FieldPathProperty: Bad quoted string: %s"), *PathName);
 				return nullptr;
 			}
 			PathName = MoveTemp(UnquotedPathName);
 		}
-		PathPtr->Generate(*PathName);
-	}
+
+		// Attempt to apply core redirects to imported path name
+		PathName = RedirectFieldPathName(PathName);
+
+		// Resolve FFieldPath from imported and fixed up path name
+		ImportedPath.Generate(*PathName);
+
+		// Set the FFieldPath value within container
+		if (PropertyPointerType == EPropertyPointerType::Container && HasSetter())
+		{
+			SetValue_InContainer(ContainerOrPropertyPtr, ImportedPath);
+		}
+		else
+		{
+			FFieldPath* PathPtr = GetPropertyValuePtr(PointerToValuePtr(ContainerOrPropertyPtr, PropertyPointerType));
+			*PathPtr = ImportedPath;
+		}
+	}	
 
 	return Buffer;
 }
@@ -167,7 +189,7 @@ FString FFieldPathProperty::GetCPPMacroType(FString& ExtendedTypeText) const
 {
 	check(PropertyClass);
 	ExtendedTypeText = FString::Printf(TEXT("TFieldPath<F%s>"), *PropertyClass->GetName());
-	return TEXT("STRUCT");
+	return TEXT("TFIELDPATH");
 }
 
 FString FFieldPathProperty::GetCPPTypeForwardDeclaration() const
@@ -194,4 +216,44 @@ bool FFieldPathProperty::SupportsNetSharedSerialization() const
 	return false;
 }
 
-#include "UObject/DefineUPropertyMacros.h"
+FString FFieldPathProperty::RedirectFieldPathName(const FString& InPathName)
+{
+	// Apply redirectors to imported PathName value. First deconstruct it into package, class and field names.
+	// PathName format: /Script/MyGameModule.MyClass:MyField
+	FString OldPackageName;
+	FString OldClassName;
+	FString OldFieldName;
+	FString Tmp;
+	if (InPathName.Split(TEXT("."), &OldPackageName, &Tmp) && Tmp.Split(TEXT(":"), &OldClassName, &OldFieldName))
+	{
+		// Check for full property path redirect
+		{
+			const FCoreRedirectObjectName OldRedirectName = FCoreRedirectObjectName(InPathName);
+			constexpr ECoreRedirectFlags RedirectFlags = ECoreRedirectFlags::Type_Property; 
+			FCoreRedirectObjectName NewObjectName;
+			const FCoreRedirect* FoundValueRedirect = nullptr;
+			if (FCoreRedirects::RedirectNameAndValues(RedirectFlags, OldRedirectName, NewObjectName, &FoundValueRedirect))
+			{
+				const FString NewPathName = NewObjectName.ToString();
+				UE_LOG(LogCoreRedirects, Verbose, TEXT("FFieldPathProperty: Redirected '%s' -> '%s'"), *InPathName, *NewPathName);
+				return NewPathName;
+			}
+		}
+		
+		// Check for outer-only redirect
+		{
+			const FCoreRedirectObjectName OldRedirectName(*OldClassName, NAME_None, *OldPackageName);
+			constexpr ECoreRedirectFlags RedirectFlags = ECoreRedirectFlags::Type_Package | ECoreRedirectFlags::Type_Class | ECoreRedirectFlags::Type_Struct;
+			FCoreRedirectObjectName NewObjectName;
+			const FCoreRedirect* FoundValueRedirect = nullptr;
+			if (FCoreRedirects::RedirectNameAndValues(RedirectFlags, OldRedirectName, NewObjectName, &FoundValueRedirect))
+			{
+				const FString NewPathName = FPackageName::ObjectPathCombine(NewObjectName.ToString(), OldFieldName);
+				UE_LOG(LogCoreRedirects, Verbose, TEXT("FFieldPathProperty: Redirected '%s' -> '%s'"), *InPathName, *NewPathName);
+				return NewPathName;
+			}
+		}
+	}
+	
+	return InPathName;
+}

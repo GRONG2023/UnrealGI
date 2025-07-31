@@ -2,30 +2,58 @@
 
 
 #include "K2Node_FunctionEntry.h"
-#include "Engine/Blueprint.h"
+
 #include "Animation/AnimBlueprint.h"
-#include "UObject/UnrealType.h"
-#include "UObject/BlueprintsObjectVersion.h"
-#include "UObject/FrameworkObjectVersion.h"
-#include "UObject/StructOnScope.h"
-#include "Engine/UserDefinedStruct.h"
+#include "BPTerminal.h"
+#include "BlueprintCompiledStatement.h"
+#include "Containers/EnumAsByte.h"
+#include "Containers/IndirectArray.h"
+#include "Containers/Map.h"
+#include "CoreGlobals.h"
+#include "DiffResults.h"
+#include "EdGraph/EdGraph.h"
+#include "EdGraph/EdGraphPin.h"
 #include "EdGraph/EdGraphSchema.h"
 #include "EdGraphSchema_K2.h"
+#include "EdGraphUtilities.h"
+#include "Engine/Blueprint.h"
+#include "Engine/MemberReference.h"
+#include "EngineLogs.h"
+#include "FindInBlueprintManager.h"
+#include "FindInBlueprints.h"
+#include "HAL/PlatformCrt.h"
+#include "Internationalization/Internationalization.h"
 #include "K2Node_CallFunction.h"
 #include "K2Node_FunctionResult.h"
 #include "K2Node_MakeArray.h"
 #include "K2Node_MakeVariable.h"
 #include "K2Node_VariableSet.h"
 #include "Kismet2/BlueprintEditorUtils.h"
-#include "Kismet2/KismetEditorUtilities.h"
-#include "EdGraphUtilities.h"
-#include "BPTerminal.h"
-#include "UObject/PropertyPortFlags.h"
-#include "KismetCompilerMisc.h"
-#include "KismetCompiler.h"
-#include "Misc/OutputDeviceNull.h"
-#include "DiffResults.h"
+#include "Kismet2/CompilerResultsLog.h"
 #include "Kismet2/Kismet2NameValidators.h"
+#include "KismetCompiledFunctionContext.h"
+#include "KismetCompiler.h"
+#include "KismetCompilerMisc.h"
+#include "Logging/LogCategory.h"
+#include "Logging/LogMacros.h"
+#include "Misc/AssertionMacros.h"
+#include "Serialization/Archive.h"
+#include "Templates/Casts.h"
+#include "Templates/SubclassOf.h"
+#include "Trace/Detail/Channel.h"
+#include "UObject/BlueprintsObjectVersion.h"
+#include "UObject/Class.h"
+#include "UObject/CoreNetTypes.h"
+#include "UObject/Field.h"
+#include "UObject/FrameworkObjectVersion.h"
+#include "UObject/LinkerLoad.h"
+#include "UObject/Object.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/ObjectSaveContext.h"
+#include "UObject/ObjectVersion.h"
+#include "UObject/StructOnScope.h"
+#include "UObject/UnrealType.h"
+#include "UObject/WeakObjectPtrTemplates.h"
 
 #define LOCTEXT_NAMESPACE "K2Node_FunctionEntry"
 
@@ -203,8 +231,15 @@ UK2Node_FunctionEntry::UK2Node_FunctionEntry(const FObjectInitializer& ObjectIni
 
 void UK2Node_FunctionEntry::PreSave(const class ITargetPlatform* TargetPlatform)
 {
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS;
 	Super::PreSave(TargetPlatform);
-	
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS;
+}
+
+void UK2Node_FunctionEntry::PreSave(FObjectPreSaveContext ObjectSaveContext)
+{
+	Super::PreSave(ObjectSaveContext);
+
 	const UBlueprint* Blueprint = HasValidBlueprint() ? GetBlueprint() : nullptr;
 	if (Blueprint && LocalVariables.Num() > 0)
 	{
@@ -223,6 +258,13 @@ void UK2Node_FunctionEntry::PostLoad()
 		// This normally won't do anything because it gets called during the duplicate save during BP compilation, but if compilation gets skipped we need to make sure they get updated
 
 		UpdateLoadedDefaultValues();
+	}
+
+	// fix deprecated state.
+	if (HasAllExtraFlags(FUNC_Const | FUNC_Static))
+	{
+		// static functions can't be marked const
+		SetExtraFlags(GetFunctionFlags() & ~FUNC_Const);
 	}
 }
 
@@ -258,7 +300,7 @@ void UK2Node_FunctionEntry::Serialize(FArchive& Ar)
 			}
 		}
 
-		if (Ar.UE4Ver() < VER_UE4_BLUEPRINT_ENFORCE_CONST_IN_FUNCTION_OVERRIDES
+		if (Ar.UEVer() < VER_UE4_BLUEPRINT_ENFORCE_CONST_IN_FUNCTION_OVERRIDES
 			|| ((Ar.CustomVer(FFrameworkObjectVersion::GUID) < FFrameworkObjectVersion::EnforceConstInAnimBlueprintFunctionGraphs) && GetBlueprint()->IsA<UAnimBlueprint>()))
 		{
 			// Allow legacy implementations to violate const-correctness
@@ -289,7 +331,7 @@ void UK2Node_FunctionEntry::Serialize(FArchive& Ar)
 			for (FBPVariableDescription& LocalVar : LocalVariables)
 			{
 				FString UseDefaultValue;
-				UObject* UseDefaultObject = nullptr;
+				TObjectPtr<UObject> UseDefaultObject = nullptr;
 				FText UseDefaultText;
 
 				if (!LocalVar.DefaultValue.IsEmpty())
@@ -361,7 +403,11 @@ void UK2Node_FunctionEntry::AllocateDefaultPins()
 	Super::AllocateDefaultPins();
 
 	if (FFunctionEntryHelper::RequireWorldContextParameter(this) 
-		&& ensure(!FindPin(FFunctionEntryHelper::GetWorldContextPinName())))
+		&& ensureMsgf(!FindPin(FFunctionEntryHelper::GetWorldContextPinName()), 
+		TEXT("%s: World context parameter pin already exiss on function entry node %s"), 
+			*GetOutermost()->GetName(),
+			*(CustomGeneratedFunctionName.IsNone() ? FunctionReference.GetMemberName() : CustomGeneratedFunctionName).ToString()
+		))
 	{
 		UEdGraphPin* WorldContextPin = CreatePin(
 			EGPD_Output,
@@ -382,7 +428,7 @@ void UK2Node_FunctionEntry::RemoveOutputPin(UEdGraphPin* PinToRemove)
 	UK2Node_FunctionEntry* OwningSeq = Cast<UK2Node_FunctionEntry>( PinToRemove->GetOwningNode() );
 	if (OwningSeq)
 	{
-		PinToRemove->MarkPendingKill();
+		PinToRemove->MarkAsGarbage();
 		OwningSeq->Pins.Remove(PinToRemove);
 	}
 }
@@ -423,17 +469,20 @@ TSharedPtr<FStructOnScope> UK2Node_FunctionEntry::GetFunctionVariableCache(bool 
 		FunctionVariableCache.Reset();
 	}
 
-	if (!FunctionVariableCache.IsValid() || !FunctionVariableCache->IsValid())
+	if (!FunctionVariableCache.IsValid() && HasValidBlueprint() && LocalVariables.Num() > 0)
 	{
-		if (UFunction* const Function = FindSignatureFunction())
+		// Locate the UFunction object in the class hierarchy, starting at the current class. Note that local
+		// variables are generated as fields (properties) within the function context that contains this node,
+		// so for parent class/interface function overrides we want to make sure we're looking at the most-
+		// derived UFunction object. Also note that FunctionFromNode() looks at the skeleton class rather than
+		// the [authoritative] generated class, since the skeleton class is implicitly recompiled after e.g. adding
+		// an input/output argument or local variable, whereas the generated class must be explicitly recompiled.
+		if (UFunction* const Function = FFunctionFromNodeHelper::FunctionFromNode(this))
 		{
-			if (LocalVariables.Num() > 0)
-			{
-				FunctionVariableCache = MakeShared<FStructOnScope>(Function);
-				FunctionVariableCache->SetPackage(GetOutermost());
+			FunctionVariableCache = MakeShared<FStructOnScope>(Function);
+			FunctionVariableCache->SetPackage(GetOutermost());
 
-				RefreshFunctionVariableCache();
-			}
+			RefreshFunctionVariableCache();
 		}
 	}
 	
@@ -654,7 +703,7 @@ void UK2Node_FunctionEntry::FindDiffs(UEdGraphNode* OtherNode, struct FDiffResul
 			Diff.Node1 = this;
 			Diff.Node2 = OtherNode;
 			Diff.DisplayString = LOCTEXT("DIF_FunctionFlags", "Function flags have changed");
-			Diff.DisplayColor = FLinearColor(0.25f, 0.71f, 0.85f);
+			Diff.Category = EDiffType::MODIFICATION;
 
 			Results.Add(Diff);
 		}
@@ -666,58 +715,148 @@ void UK2Node_FunctionEntry::FindDiffs(UEdGraphNode* OtherNode, struct FDiffResul
 			Diff.Node1 = this;
 			Diff.Node2 = OtherNode;
 			Diff.DisplayString = LOCTEXT("DIF_FunctionMetadata", "Function metadata has changed");
-			Diff.DisplayColor = FLinearColor(0.25f, 0.71f, 0.85f);
+			Diff.Category = EDiffType::MODIFICATION;
 
 			Results.Add(Diff);
 		}
 
-		bool bLocalVarsDiffer = (LocalVariables.Num() != OtherFunction->LocalVariables.Num());
-
-		for (int32 i = 0; i < LocalVariables.Num() && !bLocalVarsDiffer; i++)
+		// constructs a map from variable guid to index in the provided array
+		auto MapVarGuidToArrayIndex = [](const TArray<FBPVariableDescription>& Variables)
 		{
-			const FBPVariableDescription& ThisVar = LocalVariables[i];
-			const FBPVariableDescription& OtherVar = OtherFunction->LocalVariables[i];
-			
-			// Can't do a raw compare, for local variable defaults we need to compare the struct
-			if (ThisVar.VarName != OtherVar.VarName
-				|| ThisVar.VarType != OtherVar.VarType
-				|| ThisVar.FriendlyName != OtherVar.FriendlyName
-				|| !ThisVar.Category.EqualTo(OtherVar.Category)
-				|| ThisVar.PropertyFlags != OtherVar.PropertyFlags
-				|| ThisVar.RepNotifyFunc != OtherVar.RepNotifyFunc
-				|| ThisVar.ReplicationCondition != OtherVar.ReplicationCondition)
+			TMap<FGuid, int32> Map;
+			for (int32 i = 0; i < Variables.Num(); i++)
 			{
-				bLocalVarsDiffer = true;
+				Map.Add(Variables[i].VarGuid, i);
 			}
-		}
+			return MoveTemp(Map);
+		};
 
-		if (bLocalVarsDiffer)
+		auto AddDiff = [this, OtherNode, &Results](const FText& DisplayString)
 		{
 			FDiffSingleResult Diff;
 			Diff.Diff = EDiffType::NODE_PROPERTY;
 			Diff.Node1 = this;
 			Diff.Node2 = OtherNode;
-			Diff.DisplayString = LOCTEXT("DIF_FunctionLocalVariables", "Function local variables have changed in structure");
-			Diff.DisplayColor = FLinearColor(0.25f, 0.71f, 0.85f);
-
+			Diff.DisplayString = DisplayString;
 			Results.Add(Diff);
-		}
-		else
+		};
+
+		// using maps so that order doesn't matter and it's easy to diff
+		const TMap<FGuid, int32> VarGuidToIndex = MapVarGuidToArrayIndex(LocalVariables);
+		const TMap<FGuid, int32> OtherVarGuidToIndex = MapVarGuidToArrayIndex(OtherFunction->LocalVariables);
+
+		FDiffSingleResult Diff;
+		Diff.Diff = EDiffType::NODE_PROPERTY;
+		Diff.Node1 = this;
+		Diff.Node2 = OtherNode;
+		const FText NodeName = FText::FromName(FunctionReference.GetMemberName());
+		for (const auto& [VarGuid,Index] : VarGuidToIndex)
 		{
-			TSharedPtr<FStructOnScope> MyLocals = GetFunctionVariableCache();
-			TSharedPtr<FStructOnScope> OtherLocals = OtherFunction->GetFunctionVariableCache();
-
-			if (MyLocals.IsValid() && MyLocals->IsValid() && OtherLocals.IsValid() && OtherLocals->IsValid())
+			const FBPVariableDescription& ThisVar = LocalVariables[Index];
+			const FText OldVarName = FText::FromName(ThisVar.VarName);
+			
+			if (const int32* OtherIndex = OtherVarGuidToIndex.Find(VarGuid))
 			{
-				// Check for local var diffs
-				FDiffSingleResult Diff;
-				Diff.Diff = EDiffType::NODE_PROPERTY;
-				Diff.Node1 = this;
-				Diff.Node2 = OtherNode;
-				Diff.ToolTip = LOCTEXT("DIF_FunctionLocalVariableDefaults", "Function local variable default values have changed");
-				Diff.DisplayColor = FLinearColor(0.25f, 0.71f, 0.85f);
-
-				DiffProperties(const_cast<UStruct*>(MyLocals->GetStruct()), const_cast<UStruct*>(OtherLocals->GetStruct()), MyLocals->GetStructMemory(), OtherLocals->GetStructMemory(), Results, Diff);
+				Diff.Category = EDiffType::MODIFICATION;
+				const FBPVariableDescription& OtherVar = OtherFunction->LocalVariables[*OtherIndex];
+				const FText NewVarName = FText::FromName(OtherVar.VarName);
+				if (ThisVar.VarName != OtherVar.VarName)
+				{
+					// variable name changed
+					AddDiff(FText::Format(
+						LOCTEXT("DIF_FunctionLocalVariableNameChange", "Local variable name changed from {0}::{1} to {0}::{2}"),
+						NodeName,
+						OldVarName,
+						NewVarName
+					));
+				}
+				if (ThisVar.VarType != OtherVar.VarType)
+				{
+					// type changed
+					AddDiff(FText::Format(
+						LOCTEXT("DIF_FunctionLocalVariableTypeChange", "Local variable {0}::{1} was a {2} but is now a {3}"),
+						NodeName,
+						NewVarName,
+						UEdGraphSchema_K2::TypeToText(ThisVar.VarType),
+						UEdGraphSchema_K2::TypeToText(OtherVar.VarType)
+					));
+				}
+				if (!ThisVar.Category.EqualTo(OtherVar.Category))
+				{
+					// category changed
+					AddDiff(FText::Format(
+						LOCTEXT("DIF_FunctionLocalVariableCategoryChange", "Local variable {0}::{1} changed category from {2} to {3}"),
+						NodeName,
+						NewVarName,
+						ThisVar.Category,
+						OtherVar.Category
+					));
+				}
+				if (ThisVar.PropertyFlags != OtherVar.PropertyFlags)
+				{
+					// property flags changed
+					AddDiff(FText::Format(
+						LOCTEXT("DIF_FunctionLocalVariableFlagChange", "Local variable {0}::{1} changed property flags"),
+						NodeName,
+						NewVarName
+					));
+				}
+				if (ThisVar.RepNotifyFunc != OtherVar.RepNotifyFunc)
+				{
+					// replication notify function changed
+					AddDiff(FText::Format(
+						LOCTEXT("DIF_FunctionLocalVariableRepNotifyFuncChange", "Local variable {0}::{1} changed RepNotifyFunc"),
+						NodeName,
+						NewVarName
+					));
+				}
+				if (ThisVar.ReplicationCondition != OtherVar.ReplicationCondition)
+				{
+					// replication condition changed
+					AddDiff(FText::Format(
+						LOCTEXT("DIF_FunctionLocalVariableRepConditionChange", "Local variable {0}::{1} changed ReplicationCondition"),
+						NodeName,
+						NewVarName
+					));
+				}
+				if (ThisVar.DefaultValue != OtherVar.DefaultValue)
+				{
+					// replication condition changed
+					AddDiff(FText::Format(
+						LOCTEXT("DIF_FunctionLocalVariableDefaultValueChange", "Local variable {0}::{1} changed default value from '{2}' to '{3}'"),
+						NodeName,
+						NewVarName,
+						FText::FromString(ThisVar.DefaultValue),
+						FText::FromString(OtherVar.DefaultValue)
+					));
+				}
+			}
+			else
+			{
+				// local variable is in this node but not in other node
+				Diff.Category = EDiffType::SUBTRACTION;
+				AddDiff(FText::Format(
+				LOCTEXT("DIF_FunctionLocalVariableRemoved", "Local variable {0}::{1} removed"),
+					NodeName,
+					OldVarName
+				));
+			}
+		}
+		
+		for (const auto& [VarGuid,Index] : OtherVarGuidToIndex)
+		{
+			const FBPVariableDescription& OtherVar = OtherFunction->LocalVariables[Index];
+			if (!VarGuidToIndex.Contains(VarGuid))
+			{
+				const FText NewVarName = FText::FromName(OtherVar.VarName);
+				
+				// local variable is in other node but not in this node
+				Diff.Category = EDiffType::ADDITION;
+				AddDiff(FText::Format(
+				LOCTEXT("DIF_FunctionLocalVariableAdded", "Local variable {0}::{1} added"),
+					NodeName,
+					NewVarName
+				));
 			}
 		}
 	}
@@ -758,6 +897,25 @@ void UK2Node_FunctionEntry::PostPasteNode()
 	ReconstructNode();
 }
 
+void UK2Node_FunctionEntry::AddSearchMetaDataInfo(TArray<FSearchTagDataPair>& OutTaggedMetaData) const
+{
+	Super::AddSearchMetaDataInfo(OutTaggedMetaData);
+
+	if (const UFunction* Function = FFunctionFromNodeHelper::FunctionFromNode(this))
+	{
+		// Index the native name of the function, this will be used in search queries rather than node title
+		const FString FunctionNativeName = Function->GetName();
+		OutTaggedMetaData.Add(FSearchTagDataPair(FFindInBlueprintSearchTags::FiB_NativeName, FText::FromString(FunctionNativeName)));
+
+		// Index the (ancestor) class or interface from which the function originates, can be self
+		if (const UClass* FuncOriginClass = FindInBlueprintsHelpers::GetFunctionOriginClass(Function))
+		{
+			const FString FuncOriginClassName = FuncOriginClass->GetPathName();
+			OutTaggedMetaData.Add(FSearchTagDataPair(FFindInBlueprintSearchTags::FiB_FuncOriginClass, FText::FromString(FuncOriginClassName)));
+		}
+	}
+}
+
 int32 UK2Node_FunctionEntry::GetFunctionFlags() const
 {
 	int32 ReturnFlags = 0;
@@ -767,6 +925,17 @@ int32 UK2Node_FunctionEntry::GetFunctionFlags() const
 		ReturnFlags = Function->FunctionFlags;
 	}
 	return ReturnFlags | ExtraFlags;
+}
+
+namespace UE::BlueprintGraph::Private
+{
+	bool GGenerateFieldNotifyBroadcastForOnRepFunction = true;
+	static FAutoConsoleVariableRef CVarGenerateFieldNotifyBroadcastForOnRepFunction(
+		TEXT("bp.GenerateFieldNotifyBroadcastForOnRepFunction"),
+		GGenerateFieldNotifyBroadcastForOnRepFunction,
+		TEXT("When needed, generate a Broadcast FieldNotification node when the OnRep function is called."),
+		ECVF_Default
+	);
 }
 
 void UK2Node_FunctionEntry::ExpandNode(class FKismetCompilerContext& CompilerContext, UEdGraph* SourceGraph)
@@ -783,6 +952,7 @@ void UK2Node_FunctionEntry::ExpandNode(class FKismetCompilerContext& CompilerCon
 	}
 	
 	UEdGraphPin* LastActiveOutputPin = Pins[0];
+	bool bLinkLastPin = false;
 
 	// Only look for FunctionEntry nodes who were duplicated and have a source object
 	if ( UK2Node_FunctionEntry* OriginalNode = Cast<UK2Node_FunctionEntry>(CompilerContext.MessageLog.FindSourceObject(this)) )
@@ -791,16 +961,6 @@ void UK2Node_FunctionEntry::ExpandNode(class FKismetCompilerContext& CompilerCon
 
 		// Find the associated UFunction
 		UFunction* Function = FindUField<UFunction>(CompilerContext.Blueprint->SkeletonGeneratedClass, *OriginalNode->GetOuter()->GetName());
-
-		// When regenerating on load, we may need to import text on certain properties to force load the assets
-		TSharedPtr<FStructOnScope> LocalVarData;
-		if (Function && CompilerContext.Blueprint->bIsRegeneratingOnLoad)
-		{
-			if (Function->GetStructureSize() > 0 || !ensure(Function->PropertyLink == nullptr))
-			{
-				LocalVarData = MakeShareable(new FStructOnScope(Function));
-			}
-		}
 
 		for (TFieldIterator<FProperty> It(Function); It; ++It)
 		{
@@ -862,16 +1022,6 @@ void UK2Node_FunctionEntry::ExpandNode(class FKismetCompilerContext& CompilerCon
 							}
 							else
 							{
-								if (CompilerContext.Blueprint->bIsRegeneratingOnLoad)
-								{
-									// When regenerating on load, we want to force load assets referenced by local variables.
-									// This functionality is already handled when generating Terms in the Kismet Compiler for Arrays and Structs, so we do not have to worry about them.
-									if (LocalVar.VarType.PinCategory == UEdGraphSchema_K2::PC_Object || LocalVar.VarType.PinCategory == UEdGraphSchema_K2::PC_Class || LocalVar.VarType.PinCategory == UEdGraphSchema_K2::PC_Interface)
-									{
-										FBlueprintEditorUtils::PropertyValueFromString(Property, LocalVar.DefaultValue, LocalVarData->GetStructMemory());
-									}
-								}
-
 								// Set the default value
 								Schema->TrySetDefaultValue(*SetPin, LocalVar.DefaultValue);
 							}
@@ -885,11 +1035,31 @@ void UK2Node_FunctionEntry::ExpandNode(class FKismetCompilerContext& CompilerCon
 			}
 		}
 
-		// Finally, hook up the last node to the old node the function entry node was connected to
-		if(OldStartExecPin)
+		bLinkLastPin = true;
+	}
+
+	if (UE::BlueprintGraph::Private::GGenerateFieldNotifyBroadcastForOnRepFunction)
+	{
+		if (FProperty** RepNotifyProperty = CompilerContext.RepNotifyFunctionMap.Find(FunctionReference.GetMemberName()))
 		{
-			LastActiveOutputPin->MakeLinkTo(OldStartExecPin);
+			if ((*RepNotifyProperty)->HasMetaData(FBlueprintMetadata::MD_FieldNotify))
+			{
+				// Generate node to broadcast when the value is changed from the network
+				TTuple<UEdGraphPin*, UEdGraphPin*> ExecThenPins = FKismetCompilerUtilities::GenerateBroadcastFieldNotificationNode(CompilerContext, SourceGraph, this, *RepNotifyProperty);
+
+				LastActiveOutputPin->BreakAllPinLinks();
+				LastActiveOutputPin->MakeLinkTo(ExecThenPins.Get<0>());
+				LastActiveOutputPin = ExecThenPins.Get<1>();
+
+				bLinkLastPin = true;
+			}
 		}
+	}
+
+	// Finally, hook up the last node to the old node the function entry node was connected to
+	if (bLinkLastPin && OldStartExecPin)
+	{
+		LastActiveOutputPin->MakeLinkTo(OldStartExecPin);
 	}
 }
 

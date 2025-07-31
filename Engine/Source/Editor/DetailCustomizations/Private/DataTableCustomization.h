@@ -2,13 +2,16 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
+#include "Containers/Array.h"
+#include "Containers/UnrealString.h"
 #include "IPropertyTypeCustomization.h"
-#include "IDetailChildrenBuilder.h"
-#include "Widgets/SToolTip.h"
-#include "Engine/DataTable.h"
-#include "IPropertyUtilities.h"
+#include "Templates/SharedPointer.h"
+#include "UObject/NameTypes.h"
 
+class IPropertyHandle;
+class SToolTip;
+class UDataTable;
+class UScriptStruct;
 struct FAssetData;
 
 /**
@@ -52,4 +55,5 @@ private:
 	TSharedPtr<IPropertyHandle> RowNamePropertyHandle;
 	/** The MetaData derived filter for the row type */
 	FName RowTypeFilter;
+	UScriptStruct* RowFilterStruct;
 };

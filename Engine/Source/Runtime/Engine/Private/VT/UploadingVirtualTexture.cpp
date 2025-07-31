@@ -1,19 +1,18 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "UploadingVirtualTexture.h"
+#include "HAL/PlatformFile.h"
 #include "VirtualTextureChunkManager.h"
-#include "VirtualTexturing.h"
-#include "SceneUtils.h"
 #include "FileCache/FileCache.h"
-#include "CrunchCompression.h"
+#include "VT/VirtualTextureBuiltData.h"
 #include "VirtualTextureChunkDDCCache.h"
 
 DECLARE_MEMORY_STAT(TEXT("File Cache Size"), STAT_FileCacheSize, STATGROUP_VirtualTextureMemory);
 DECLARE_MEMORY_STAT(TEXT("Total Header Size"), STAT_TotalHeaderSize, STATGROUP_VirtualTextureMemory);
-DECLARE_MEMORY_STAT(TEXT("Tile Header Size"), STAT_TileHeaderSize, STATGROUP_VirtualTextureMemory);
-DECLARE_DWORD_ACCUMULATOR_STAT(TEXT("Total Disk Size (KB)"), STAT_TotalDiskSize, STATGROUP_VirtualTextureMemory);
+DECLARE_DWORD_ACCUMULATOR_STAT(TEXT("Total Disk Size (MB)"), STAT_TotalDiskSize, STATGROUP_VirtualTextureMemory);
 DECLARE_DWORD_ACCUMULATOR_STAT(TEXT("Num Tile Headers"), STAT_NumTileHeaders, STATGROUP_VirtualTextureMemory);
 DECLARE_DWORD_ACCUMULATOR_STAT(TEXT("Num Codecs"), STAT_NumCodecs, STATGROUP_VirtualTextureMemory);
+DECLARE_FLOAT_COUNTER_STAT(TEXT("IO Requests Completed (MB)"), STAT_IORequestsComplete, STATGROUP_VirtualTexturing);
 
 static TAutoConsoleVariable<int32> CVarVTCodecAgeThreshold(
 	TEXT("r.VT.CodecAgeThreshold"),
@@ -57,8 +56,9 @@ FVirtualTextureCodec* FVirtualTextureCodec::ListHead = nullptr;
 FVirtualTextureCodec FVirtualTextureCodec::ListTail;
 uint32 FVirtualTextureCodec::NumCodecs = 0u;
 
-FUploadingVirtualTexture::FUploadingVirtualTexture(FVirtualTextureBuiltData* InData, int32 InFirstMipToUse)
-	: Data(InData)
+FUploadingVirtualTexture::FUploadingVirtualTexture(const FName& InName, FVirtualTextureBuiltData* InData, int32 InFirstMipToUse)
+	: Name(InName)
+	, Data(InData)
 	, FirstMipOffset(InFirstMipToUse)
 {
 	HandlePerChunk.AddDefaulted(InData->Chunks.Num());
@@ -68,8 +68,7 @@ FUploadingVirtualTexture::FUploadingVirtualTexture(FVirtualTextureBuiltData* InD
 	StreamingManager = &IStreamingManager::Get().GetVirtualTextureStreamingManager();
 
 	INC_MEMORY_STAT_BY(STAT_TotalHeaderSize, InData->GetMemoryFootprint());
-	INC_MEMORY_STAT_BY(STAT_TileHeaderSize, InData->GetTileMemoryFootprint());
-	INC_DWORD_STAT_BY(STAT_TotalDiskSize, InData->GetDiskMemoryFootprint() / 1024);
+	INC_DWORD_STAT_BY(STAT_TotalDiskSize, InData->GetDiskMemoryFootprint() / (1024 * 1024));
 	INC_DWORD_STAT_BY(STAT_NumTileHeaders, InData->GetNumTileHeaders());
 }
 
@@ -77,12 +76,8 @@ FUploadingVirtualTexture::~FUploadingVirtualTexture()
 {
 	check(Data);
 	DEC_MEMORY_STAT_BY(STAT_TotalHeaderSize, Data->GetMemoryFootprint());
-	DEC_MEMORY_STAT_BY(STAT_TileHeaderSize, Data->GetTileMemoryFootprint());
-	DEC_DWORD_STAT_BY(STAT_TotalDiskSize, Data->GetDiskMemoryFootprint() / 1024);
+	DEC_DWORD_STAT_BY(STAT_TotalDiskSize, Data->GetDiskMemoryFootprint() / (1024 * 1024));
 	DEC_DWORD_STAT_BY(STAT_NumTileHeaders, Data->GetNumTileHeaders());
-
-	// Complete all open transcode requests before deleting IFileCacheHandle objects
-	StreamingManager->WaitTasksFinished();
 
 	for (TUniquePtr<FVirtualTextureCodec>& Codec : CodecPerChunk)
 	{
@@ -92,43 +87,51 @@ FUploadingVirtualTexture::~FUploadingVirtualTexture()
 			Codec.Reset();
 		}
 	}
+
+#if WITH_EDITOR
+	// Need to flush DDC tasks in case they reference any chunks from this.
+	GetVirtualTextureChunkDDCCache()->WaitFlushRequests_AnyThread();
+#endif
 }
 
 uint32 FUploadingVirtualTexture::GetLocalMipBias(uint8 vLevel, uint32 vAddress) const
 {
+	vLevel += FirstMipOffset;
+
 	const uint32 NumMips = Data->NumMips;
-	uint32 NumNonResidentLevels = 0u;
-	while (vLevel < NumMips)
+	uint32 Current_vLevel = vLevel;
+	uint32 Current_vAddress = vAddress;
+	while (Current_vLevel < NumMips)
 	{
-		const uint32 TileIndex = Data->GetTileIndex(vLevel, vAddress);
-		if (TileIndex == ~0u)
+		if (!Data->IsValidAddress(Current_vLevel, Current_vAddress))
 		{
-			// vAddress is out-of-bounds for the given producer, this is a 
-			NumNonResidentLevels += (NumMips - vLevel);
+			// vAddress is out-of-bounds for the given producer
+			Current_vLevel = NumMips - 1u;
 			break;
 		}
 
-		const int32 ChunkIndex = Data->GetChunkIndex(TileIndex);
-		if (ChunkIndex >= 0)
+		const uint32 TileOffset = Data->GetTileOffset(Current_vLevel, Current_vAddress, 0);
+		if (TileOffset != ~0u)
 		{
 			break;
 		}
 
-		++NumNonResidentLevels;
-		++vLevel;
-		vAddress >>= 2;
+		Current_vLevel++;
+		Current_vAddress >>= 2;
 	}
 
-	return NumNonResidentLevels;
+	return Current_vLevel - vLevel;
 }
 
-FVTRequestPageResult FUploadingVirtualTexture::RequestPageData(const FVirtualTextureProducerHandle& ProducerHandle, uint8 LayerMask, uint8 vLevel, uint64 vAddress, EVTRequestPagePriority Priority)
+FVTRequestPageResult FUploadingVirtualTexture::RequestPageData(FRHICommandList& RHICmdList, const FVirtualTextureProducerHandle& ProducerHandle, uint8 LayerMask, uint8 vLevel, uint64 vAddress, EVTRequestPagePriority Priority)
 {
-	check(vAddress <= MAX_uint32); // Not supporting 64 bit vAddress here. Only currrently supported for adaptive runtime virtual texture.
-	return StreamingManager->RequestTile(this, ProducerHandle, LayerMask, FirstMipOffset + vLevel, (uint32)vAddress, Priority);
+	vLevel += FirstMipOffset;
+
+	check(vAddress <= MAX_uint32); // Not supporting 64 bit vAddress here. Only currently supported for adaptive runtime virtual texture.
+	return StreamingManager->RequestTile(RHICmdList, this, ProducerHandle, LayerMask, vLevel, (uint32)vAddress, Priority);
 }
 
-IVirtualTextureFinalizer* FUploadingVirtualTexture::ProducePageData(FRHICommandListImmediate& RHICmdList,
+IVirtualTextureFinalizer* FUploadingVirtualTexture::ProducePageData(FRHICommandList& RHICmdList,
 	ERHIFeatureLevel::Type FeatureLevel,
 	EVTProducePageFlags Flags,
 	const FVirtualTextureProducerHandle& ProducerHandle, uint8 LayerMask, uint8 vLevel, uint64 vAddress,
@@ -139,6 +142,16 @@ IVirtualTextureFinalizer* FUploadingVirtualTexture::ProducePageData(FRHICommandL
 
 	const uint32 SkipBorderSize = (Flags & EVTProducePageFlags::SkipPageBorders) != EVTProducePageFlags::None ? Data->TileBorderSize : 0;
 	return StreamingManager->ProduceTile(RHICmdList, SkipBorderSize, Data->GetNumLayers(), LayerMask, RequestHandle, TargetLayers);
+}
+
+void FUploadingVirtualTexture::GatherProducePageDataTasks(FVirtualTextureProducerHandle const& ProducerHandle, FGraphEventArray& InOutTasks) const
+{
+	StreamingManager->GatherProducePageDataTasks(ProducerHandle, InOutTasks);
+}
+
+void FUploadingVirtualTexture::GatherProducePageDataTasks(uint64 RequestHandle, FGraphEventArray& InOutTasks) const
+{
+	StreamingManager->GatherProducePageDataTasks(RequestHandle, InOutTasks);
 }
 
 void FVirtualTextureCodec::RetireOldCodecs()
@@ -155,7 +168,7 @@ void FVirtualTextureCodec::RetireOldCodecs()
 
 		bool bRetiredCodec = false;
 		// Can't retire codec if it's not even finished loading yet
-		if (Codec.Owner && (!Codec.CompletedEvent || Codec.CompletedEvent->IsComplete()))
+		if (Codec.Owner && Codec.IsIdle())
 		{
 			check(CurrentFrame >= Codec.LastFrameUsed);
 			const uint32 Age = CurrentFrame - Codec.LastFrameUsed;
@@ -202,18 +215,6 @@ void FVirtualTextureCodec::Init(IMemoryReadStreamRef& HeaderData)
 				CodecPayload = TempBuffer.GetData();
 			}
 		}
-
-		switch (Chunk.CodecType[LayerIndex])
-		{
-		case EVirtualTextureCodec::Crunch:
-#if WITH_CRUNCH
-			Contexts[LayerIndex] = CrunchCompression::InitializeDecoderContext(CodecPayload, CodecPayloadSize);
-#endif // WITH_CRUNCH
-			check(Contexts[LayerIndex]);
-			break;
-		default:
-			break;
-		}
 	}
 }
 
@@ -239,26 +240,10 @@ FVirtualTextureCodec::~FVirtualTextureCodec()
 {
 	if (Owner)
 	{
-		check(IsComplete());
-		check(!IsLinked());
+		checkf(IsCreationComplete(), TEXT("Codec is being released before its construction task hasn't finished."));
+		checkf(AllTranscodeTasksComplete(), TEXT("Codec is being released while there are tasks that still reference it."));
 
-		const FVirtualTextureBuiltData* VTData = Owner->GetVTData();
-		const FVirtualTextureDataChunk& Chunk = VTData->Chunks[ChunkIndex];
-		const uint32 NumLayers = VTData->GetNumLayers();
-		for (uint32 LayerIndex = 0; LayerIndex < NumLayers; ++LayerIndex)
-		{
-			switch (Chunk.CodecType[LayerIndex])
-			{
-			case EVirtualTextureCodec::Crunch:
-#if WITH_CRUNCH
-				check(Contexts[LayerIndex]);
-				CrunchCompression::DestroyDecoderContext(Contexts[LayerIndex]);
-#endif // WITH_CRUNCH
-				break;
-			default:
-				break;
-			}
-		}
+		check(!IsLinked());
 
 		check(NumCodecs > 0u);
 		--NumCodecs;
@@ -292,8 +277,11 @@ struct FCreateCodecTask
 
 FVTCodecAndStatus FUploadingVirtualTexture::GetCodecForChunk(FGraphEventArray& OutCompletionEvents, uint32 ChunkIndex, EVTRequestPagePriority Priority)
 {
-	const FVirtualTextureDataChunk& Chunk = Data->Chunks[ChunkIndex];
-	if (Chunk.CodecPayloadSize == 0u)
+	TRACE_CPUPROFILER_EVENT_SCOPE(FUploadingVirtualTexture::GetCodecForChunk);
+
+	// CodecPayloadSize includes the header that is always present even if there is no payload.
+ 	const FVirtualTextureDataChunk& Chunk = Data->Chunks[ChunkIndex];
+ 	if (Chunk.CodecPayloadSize <= sizeof(FVirtualTextureChunkHeader))
 	{
 		// Chunk has no codec
 		return EVTRequestPageStatus::Available;
@@ -336,25 +324,14 @@ FVTCodecAndStatus FUploadingVirtualTexture::GetCodecForChunk(FGraphEventArray& O
 
 FVTDataAndStatus FUploadingVirtualTexture::ReadData(FGraphEventArray& OutCompletionEvents, uint32 ChunkIndex, size_t Offset, size_t Size, EVTRequestPagePriority Priority)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(FUploadingVirtualTexture::ReadData);
+
 	FVirtualTextureDataChunk& Chunk = Data->Chunks[ChunkIndex];
 	FByteBulkData& BulkData = Chunk.BulkData;
-	FString ChunkFileName;
-	FIoChunkId ChunkId = FIoChunkId::InvalidChunkId;
-	int64 ChunkOffsetInFile = 0;
-
 #if WITH_EDITOR
-	FString ChunkFileNameDCC;
-	// If the bulkdata has a file associated with it, we stream directly from it.
-	// This only happens for lightmaps atm
-	if (BulkData.GetFilename().IsEmpty() == false)
-	{
-		ensure(Size <= (size_t)BulkData.GetBulkDataSize());
-		ChunkFileName = BulkData.GetFilename();
-		ChunkOffsetInFile = BulkData.GetBulkDataOffsetInFile();
-	}
 	// It could be that the bulkdata has no file associated yet (aka lightmaps have been build but not saved to disk yet) but still contains valid data
 	// Streaming is done from memory
-	else if (BulkData.IsBulkDataLoaded() && BulkData.GetBulkDataSize() > 0)
+	if (BulkData.IsBulkDataLoaded() && BulkData.GetBulkDataSize() > 0)
 	{
 		ensure(Size <= (size_t)BulkData.GetBulkDataSize());
 		const uint8 *P = (uint8*)BulkData.LockReadOnly() + Offset;
@@ -362,54 +339,78 @@ FVTDataAndStatus FUploadingVirtualTexture::ReadData(FGraphEventArray& OutComplet
 		BulkData.Unlock();
 		return FVTDataAndStatus(EVTRequestPageStatus::Available, Buffer);
 	}
-	// Else it should be VT data that is injected into the DDC (and stream from VT DDC cache)
-	else
-	{
-		SCOPE_CYCLE_COUNTER(STAT_VTP_MakeChunkAvailable);
-		check(Chunk.DerivedDataKey.IsEmpty() == false);
-
-		// If request is flagged as high priority, we will block here until DCC cache is populated
-		// This way we can service these high priority tasks immediately
-		// Would be better to have DCC cache return a task event handle, which could be used to chain a subsequent read operation,
-		// but that would be more complicated, and this should generally not be a critical runtime path
-		const bool bAsyncDCC = (Priority == EVTRequestPagePriority::Normal);
-
-		const bool Available = GetVirtualTextureChunkDDCCache()->MakeChunkAvailable(&Data->Chunks[ChunkIndex], ChunkFileNameDCC, bAsyncDCC);
-		if (!Available)
-		{
-			return EVTRequestPageStatus::Saturated;
-		}
-		ChunkFileName = ChunkFileNameDCC;
-	}
-#else // WITH_EDITOR
-	ChunkOffsetInFile = BulkData.GetBulkDataOffsetInFile();
-	
-	if (BulkData.GetBulkDataSize() == 0)
-	{
-		if (!InvalidChunks[ChunkIndex])
-		{
-			UE_LOG(LogConsoleResponse, Display, TEXT("BulkData for chunk %d in file '%s' is empty."), ChunkIndex, *ChunkFileName);
-			InvalidChunks[ChunkIndex] = true;
-		}
-		return EVTRequestPageStatus::Invalid;
-	}
-#endif // !WITH_EDITOR
+#endif // WITH_EDITOR
 
 	TUniquePtr<IFileCacheHandle>& Handle = HandlePerChunk[ChunkIndex];
 	if (!Handle)
 	{
-		// If we have a valid file name then we can create a file handle directly to it.
-		// If we do not then pass in the BulkData object which will create the IAsyncReadFileHandle for us.
-		//
-		if (!ChunkFileName.IsEmpty())
+		enum class EChunkSource
 		{
-			Handle.Reset(IFileCacheHandle::CreateFileCacheHandle(*ChunkFileName));
+			File,
+			BulkData,
+			Invalid
+		};
+		EChunkSource ChunkSource = EChunkSource::Invalid;
+		FString ChunkFileName;
+		int64 ChunkOffsetInFile = 0;
+#if WITH_EDITOR
+		// If the bulkdata has a file associated with it, we stream directly from it.
+		// This only happens for lightmaps atm
+		if (BulkData.CanLoadFromDisk())
+		{
+			ensure(Size <= (size_t)BulkData.GetBulkDataSize());
+
+			ChunkOffsetInFile = BulkData.GetBulkDataOffsetInFile();
+			ChunkSource = EChunkSource::BulkData;
 		}
+		// Else it should be VT data that is injected into the DDC (and stream from VT DDC cache)
 		else
 		{
-			Handle.Reset(IFileCacheHandle::CreateFileCacheHandle(BulkData.OpenAsyncReadHandle()));
-		}
+			SCOPE_CYCLE_COUNTER(STAT_VTP_MakeChunkAvailable);
+			check(Chunk.DerivedDataKey.IsEmpty() == false);
+			FString ChunkFileNameDDC;
 
+			// If request is flagged as high priority, we will block here until DDC cache is populated
+			// This way we can service these high priority tasks immediately
+			// Would be better to have DDC cache return a task event handle, which could be used to chain a subsequent read operation,
+			// but that would be more complicated, and this should generally not be a critical runtime path
+			const bool bAsyncDDC = (Priority == EVTRequestPagePriority::Normal);
+			const bool Available = GetVirtualTextureChunkDDCCache()->MakeChunkAvailable(&Data->Chunks[ChunkIndex], bAsyncDDC, ChunkFileNameDDC, ChunkOffsetInFile);
+			if (!Available)
+			{
+				return EVTRequestPageStatus::Saturated;
+			}
+			ChunkFileName = ChunkFileNameDDC;
+			ChunkSource = EChunkSource::File;
+		}
+#else // WITH_EDITOR
+		ChunkOffsetInFile = BulkData.GetBulkDataOffsetInFile();
+		if (BulkData.GetBulkDataSize() == 0)
+		{
+			if (!InvalidChunks[ChunkIndex])
+			{
+				UE_LOG(LogConsoleResponse, Display, TEXT("BulkData for chunk %d in file '%s' is empty."), ChunkIndex, *BulkData.GetDebugName());
+				InvalidChunks[ChunkIndex] = true;
+			}
+			return EVTRequestPageStatus::Invalid;
+		}
+		ChunkSource = EChunkSource::BulkData;
+#endif // !WITH_EDITOR
+		// If we have a valid file name then we can create a file handle directly to it.
+		// If we do not then pass in the BulkData object which will create the IAsyncReadFileHandle for us.
+		switch (ChunkSource)
+		{
+		case EChunkSource::File:
+			Handle.Reset(IFileCacheHandle::CreateFileCacheHandle(*ChunkFileName, ChunkOffsetInFile));
+			break;
+		case EChunkSource::BulkData:
+			Handle.Reset(IFileCacheHandle::CreateFileCacheHandle(BulkData.OpenAsyncReadHandle(), ChunkOffsetInFile));
+			break;
+		default:
+			check(false);
+			return EVTRequestPageStatus::Invalid;
+		}
+		
 		// Don't expect CreateFileCacheHandle() to fail, async files should never fail to open
 		if (!ensure(Handle.IsValid()))
 		{
@@ -423,11 +424,15 @@ FVTDataAndStatus FUploadingVirtualTexture::ReadData(FGraphEventArray& OutComplet
 		SET_MEMORY_STAT(STAT_FileCacheSize, IFileCacheHandle::GetFileCacheSize());
 	}
 
-	IMemoryReadStreamRef ReadData = Handle->ReadData(OutCompletionEvents, ChunkOffsetInFile + Offset, Size, GetAsyncIOPriority(Priority));
+	IMemoryReadStreamRef ReadData = Handle->ReadData(OutCompletionEvents, Offset, Size, GetAsyncIOPriority(Priority));
 	if (!ReadData)
 	{
 		return EVTRequestPageStatus::Saturated;
 	}
+
+	const float SizeMB = (float)Size / (float)(1024 * 1024);
+	INC_FLOAT_STAT_BY(STAT_IORequestsComplete, SizeMB);
+	
 	return FVTDataAndStatus(EVTRequestPageStatus::Pending, ReadData);
 }
 
@@ -454,10 +459,10 @@ void FUploadingVirtualTexture::DumpToConsole(bool verbose)
 		}
 		else
 #endif
-			BulkDataFiles.Add(Chunk.BulkData.GetFilename());
+			BulkDataFiles.Add(Chunk.BulkData.GetDebugName());
 	}
 
-	for (auto FileName : BulkDataFiles)
+	for (const auto& FileName : BulkDataFiles)
 	{
 		UE_LOG(LogConsoleResponse, Display, TEXT("Bulk data file / DDC entry: %s"), *FileName);
 	}

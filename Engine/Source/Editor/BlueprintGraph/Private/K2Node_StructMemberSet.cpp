@@ -1,8 +1,22 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "K2Node_StructMemberSet.h"
+
+#include "EdGraph/EdGraphSchema.h"
 #include "EdGraphSchema_K2.h"
+#include "Engine/MemberReference.h"
+#include "Internationalization/Internationalization.h"
+#include "Misc/AssertionMacros.h"
 #include "StructMemberNodeHandlers.h"
+#include "UObject/Class.h"
+#include "UObject/NameTypes.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/UnrealNames.h"
+#include "UObject/UnrealType.h"
+#include "PropertyCustomizationHelpers.h"
+
+class FKismetCompilerContext;
+class UEdGraphPin;
 
 //////////////////////////////////////////////////////////////////////////
 // UK2Node_StructMemberSet
@@ -37,11 +51,16 @@ void UK2Node_StructMemberSet::PostEditChangeProperty(FPropertyChangedEvent& Prop
 	Super::PostEditChangeProperty(PropertyChangedEvent);
 }
 
+void UK2Node_StructMemberSet::AllocateExecPins()
+{
+	CreatePin(EGPD_Input, UEdGraphSchema_K2::PC_Exec, UEdGraphSchema_K2::PN_Execute);
+	CreatePin(EGPD_Output, UEdGraphSchema_K2::PC_Exec, UEdGraphSchema_K2::PN_Then);
+}
+
 void UK2Node_StructMemberSet::AllocateDefaultPins()
 {
 	// Add the execution sequencing pin
-	CreatePin(EGPD_Input, UEdGraphSchema_K2::PC_Exec, UEdGraphSchema_K2::PN_Execute);
-	CreatePin(EGPD_Output, UEdGraphSchema_K2::PC_Exec, UEdGraphSchema_K2::PN_Then);
+	AllocateExecPins();
 
 	// Display any currently visible optional pins
 	{
@@ -83,6 +102,26 @@ UK2Node::ERedirectType UK2Node_StructMemberSet::DoPinsMatchForReconstruction(con
 FNodeHandlingFunctor* UK2Node_StructMemberSet::CreateNodeHandler(FKismetCompilerContext& CompilerContext) const
 {
 	return new FKCHandler_StructMemberVariableSet(CompilerContext);
+}
+
+FBoolProperty* UK2Node_StructMemberSet::GetOverrideConditionForProperty(const FProperty* InProperty) const
+{
+	bool bNegate = false;
+	if (FBoolProperty* OverrideProperty = PropertyCustomizationHelpers::GetEditConditionProperty(InProperty, bNegate))
+	{
+		// Determine if the edit condition is included in the optional input pin set - if so, then it is not considered to be an override condition.
+		const bool bIsOverrideExposedForInput = ShowPinForProperties.ContainsByPredicate([OverrideProperty](const FOptionalPinFromProperty& PropertyEntry)
+		{
+			return PropertyEntry.PropertyName == OverrideProperty->GetFName();
+		});
+
+		if (!bIsOverrideExposedForInput)
+		{
+			return OverrideProperty;
+		}
+	}
+
+	return nullptr;
 }
 
 #undef LOCTEXT_NAMESPACE

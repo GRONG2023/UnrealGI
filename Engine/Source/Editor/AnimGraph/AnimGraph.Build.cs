@@ -6,13 +6,7 @@ using System.IO;
 public class AnimGraph : ModuleRules
 {
 	public AnimGraph(ReadOnlyTargetRules Target) : base(Target)
-	{
-        PrivateIncludePaths.AddRange(
-            new string[] {
-                "Editor/AnimGraph/Private",
-            }
-        );
-		
+	{		
 		OverridePackageType = PackageOverrideType.EngineDeveloper;
 
         PublicDependencyModuleNames.AddRange(
@@ -30,16 +24,19 @@ public class AnimGraph : ModuleRules
 			new string[] {
 				"InputCore",
 				"SlateCore",
+				"EditorFramework",
 				"UnrealEd",
                 "GraphEditor",
 				"PropertyEditor",
-				"EditorStyle",
+				
                 "ContentBrowser",
 				"KismetWidgets",
 				"ToolMenus",
 				"KismetCompiler",
 				"Kismet",
 				"EditorWidgets",
+				"ToolWidgets",
+				"AnimationEditMode",
 			}
 		);
 
@@ -52,9 +49,6 @@ public class AnimGraph : ModuleRules
 
         PrivateIncludePathModuleNames.AddRange(
             new string[] {
-                "Persona",
-                "SkeletonEditor",
-                "AdvancedPreviewScene",
                 "AnimationBlueprintEditor",
             }
         );

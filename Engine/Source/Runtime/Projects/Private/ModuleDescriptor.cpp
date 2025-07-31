@@ -7,6 +7,7 @@
 #include "Serialization/JsonSerializer.h"
 #include "JsonUtils/JsonObjectArrayUpdater.h"
 #include "Modules/ModuleManager.h"
+#include "JsonExtensions.h"
 
 #define LOCTEXT_NAMESPACE "ModuleDescriptor"
 
@@ -152,16 +153,20 @@ FModuleDescriptor::FModuleDescriptor(const FName InName, EHostType::Type InType,
 	: Name(InName)
 	, Type(InType)
 	, LoadingPhase(InLoadingPhase)
+	, bHasExplicitPlatforms(false)
 {
 }
 
-bool FModuleDescriptor::Read(const FJsonObject& Object, FText& OutFailReason)
+bool FModuleDescriptor::Read(const FJsonObject& Object, FText* OutFailReason /*= nullptr*/)
 {
 	// Read the module name
 	TSharedPtr<FJsonValue> NameValue = Object.TryGetField(TEXT("Name"));
 	if(!NameValue.IsValid() || NameValue->Type != EJson::String)
 	{
-		OutFailReason = LOCTEXT("ModuleWithoutAName", "Found a 'Module' entry with a missing 'Name' field");
+		if (OutFailReason)
+		{
+			*OutFailReason = LOCTEXT("ModuleWithoutAName", "Found a 'Module' entry with a missing 'Name' field");
+		}
 		return false;
 	}
 	Name = FName(*NameValue->AsString());
@@ -170,13 +175,19 @@ bool FModuleDescriptor::Read(const FJsonObject& Object, FText& OutFailReason)
 	TSharedPtr<FJsonValue> TypeValue = Object.TryGetField(TEXT("Type"));
 	if(!TypeValue.IsValid() || TypeValue->Type != EJson::String)
 	{
-		OutFailReason = FText::Format( LOCTEXT( "ModuleWithoutAType", "Found Module entry '{0}' with a missing 'Type' field" ), FText::FromName(Name) );
+		if (OutFailReason)
+		{
+			*OutFailReason = FText::Format( LOCTEXT( "ModuleWithoutAType", "Found Module entry '{0}' with a missing 'Type' field" ), FText::FromName(Name) );
+		}
 		return false;
 	}
 	Type = EHostType::FromString(*TypeValue->AsString());
 	if(Type == EHostType::Max)
 	{
-		OutFailReason = FText::Format( LOCTEXT( "ModuleWithInvalidType", "Module entry '{0}' specified an unrecognized module Type '{1}'" ), FText::FromName(Name), FText::FromString(TypeValue->AsString()) );
+		if (OutFailReason)
+		{
+			*OutFailReason = FText::Format( LOCTEXT( "ModuleWithInvalidType", "Module entry '{0}' specified an unrecognized module Type '{1}'" ), FText::FromName(Name), FText::FromString(TypeValue->AsString()) );
+		}
 		return false;
 	}
 
@@ -187,26 +198,30 @@ bool FModuleDescriptor::Read(const FJsonObject& Object, FText& OutFailReason)
 		LoadingPhase = ELoadingPhase::FromString(*LoadingPhaseValue->AsString());
 		if(LoadingPhase == ELoadingPhase::Max)
 		{
-			OutFailReason = FText::Format( LOCTEXT( "ModuleWithInvalidLoadingPhase", "Module entry '{0}' specified an unrecognized module LoadingPhase '{1}'" ), FText::FromName(Name), FText::FromString(LoadingPhaseValue->AsString()) );
+			if (OutFailReason)
+			{
+				*OutFailReason = FText::Format( LOCTEXT( "ModuleWithInvalidLoadingPhase", "Module entry '{0}' specified an unrecognized module LoadingPhase '{1}'" ), FText::FromName(Name), FText::FromString(LoadingPhaseValue->AsString()) );
+			}
 			return false;
 		}
 	}
 
-	// Read the whitelisted and blacklisted platforms
-	Object.TryGetStringArrayField(TEXT("WhitelistPlatforms"), WhitelistPlatforms);
-	Object.TryGetStringArrayField(TEXT("BlacklistPlatforms"), BlacklistPlatforms);
+	// Read the allow/deny lists for platforms
+	JsonExtensions::TryGetStringArrayFieldWithDeprecatedFallback(Object, TEXT("PlatformAllowList"), TEXT("WhitelistPlatforms"), /*out*/ PlatformAllowList);
+	JsonExtensions::TryGetStringArrayFieldWithDeprecatedFallback(Object, TEXT("PlatformDenyList"), TEXT("BlacklistPlatforms"), /*out*/ PlatformDenyList);
+	Object.TryGetBoolField(TEXT("HasExplicitPlatforms"), bHasExplicitPlatforms);
 
-	// Read the whitelisted and blacklisted targets
-	Object.TryGetEnumArrayField(TEXT("WhitelistTargets"), WhitelistTargets);
-	Object.TryGetEnumArrayField(TEXT("BlacklistTargets"), BlacklistTargets);
+	// Read the allow/deny lists for targets
+	JsonExtensions::TryGetEnumArrayFieldWithDeprecatedFallback(Object, TEXT("TargetAllowList"), TEXT("WhitelistTargets"), /*out*/ TargetAllowList);
+	JsonExtensions::TryGetEnumArrayFieldWithDeprecatedFallback(Object, TEXT("TargetDenyList"), TEXT("BlacklistTargets"), /*out*/ TargetDenyList);
 
-	// Read the whitelisted and blacklisted target configurations
-	Object.TryGetEnumArrayField(TEXT("WhitelistTargetConfigurations"), WhitelistTargetConfigurations);
-	Object.TryGetEnumArrayField(TEXT("BlacklistTargetConfigurations"), BlacklistTargetConfigurations);
+	// Read the allow/deny lists for target configurations
+	JsonExtensions::TryGetEnumArrayFieldWithDeprecatedFallback(Object, TEXT("TargetConfigurationAllowList"), TEXT("WhitelistTargetConfigurations"), /*out*/ TargetConfigurationAllowList);
+	JsonExtensions::TryGetEnumArrayFieldWithDeprecatedFallback(Object, TEXT("TargetConfigurationDenyList"), TEXT("BlacklistTargetConfigurations"), /*out*/ TargetConfigurationDenyList);
 
-	// Read the whitelisted and blacklisted programs
-	Object.TryGetStringArrayField(TEXT("WhitelistPrograms"), WhitelistPrograms);
-	Object.TryGetStringArrayField(TEXT("BlacklistPrograms"), BlacklistPrograms);
+	// Read the allow/deny lists for programs
+	JsonExtensions::TryGetStringArrayFieldWithDeprecatedFallback(Object, TEXT("ProgramAllowList"), TEXT("WhitelistPrograms"), /*out*/ ProgramAllowList);
+	JsonExtensions::TryGetStringArrayFieldWithDeprecatedFallback(Object, TEXT("ProgramDenyList"), TEXT("BlacklistPrograms"), /*out*/ ProgramDenyList);
 
 	// Read the additional dependencies
 	Object.TryGetStringArrayField(TEXT("AdditionalDependencies"), AdditionalDependencies);
@@ -214,7 +229,12 @@ bool FModuleDescriptor::Read(const FJsonObject& Object, FText& OutFailReason)
 	return true;
 }
 
-bool FModuleDescriptor::ReadArray(const FJsonObject& Object, const TCHAR* Name, TArray<FModuleDescriptor>& OutModules, FText& OutFailReason)
+bool FModuleDescriptor::Read(const FJsonObject& Object, FText& OutFailReason)
+{
+	return Read(Object, &OutFailReason);
+}
+
+bool FModuleDescriptor::ReadArray(const FJsonObject& Object, const TCHAR* Name, TArray<FModuleDescriptor>& OutModules, FText* OutFailReason /*= nullptr*/)
 {
 	bool bResult = true;
 
@@ -239,13 +259,21 @@ bool FModuleDescriptor::ReadArray(const FJsonObject& Object, const TCHAR* Name, 
 			}
 			else
 			{
-				OutFailReason = LOCTEXT( "ModuleWithInvalidModulesArray", "The 'Modules' array has invalid contents and was not able to be loaded." );
+				if (OutFailReason)
+				{
+					*OutFailReason = LOCTEXT( "ModuleWithInvalidModulesArray", "The 'Modules' array has invalid contents and was not able to be loaded." );
+				}
 				bResult = false;
 			}
 		}
 	}
 	
 	return bResult;
+}
+
+bool FModuleDescriptor::ReadArray(const FJsonObject& Object, const TCHAR* Name, TArray<FModuleDescriptor>& OutModules, FText& OutFailReason)
+{
+	return ReadArray(Object, Name, OutModules, &OutFailReason);
 }
 
 void FModuleDescriptor::Write(TJsonWriter<>& Writer) const
@@ -262,116 +290,116 @@ void FModuleDescriptor::UpdateJson(FJsonObject& JsonObject) const
 	JsonObject.SetStringField(TEXT("Type"), FString(EHostType::ToString(Type)));
 	JsonObject.SetStringField(TEXT("LoadingPhase"), FString(ELoadingPhase::ToString(LoadingPhase)));
 
-	if (WhitelistPlatforms.Num() > 0)
+	if (PlatformAllowList.Num() > 0)
 	{
-		TArray<TSharedPtr<FJsonValue>> WhitelistPlatformValues;
-		for (const FString& WhitelistPlatform : WhitelistPlatforms)
+		TArray<TSharedPtr<FJsonValue>> PlatformAllowListValues;
+		for (const FString& Entry : PlatformAllowList)
 		{
-			WhitelistPlatformValues.Add(MakeShareable(new FJsonValueString(WhitelistPlatform)));
+			PlatformAllowListValues.Add(MakeShareable(new FJsonValueString(Entry)));
 		}
-		JsonObject.SetArrayField(TEXT("WhitelistPlatforms"), WhitelistPlatformValues);
+		JsonObject.SetArrayField(TEXT("PlatformAllowList"), PlatformAllowListValues);
 	}
 	else
 	{
-		JsonObject.RemoveField(TEXT("WhitelistPlatforms"));
+		JsonObject.RemoveField(TEXT("PlatformAllowList"));
 	}
 
-	if (BlacklistPlatforms.Num() > 0)
+	if (PlatformDenyList.Num() > 0)
 	{
-		TArray<TSharedPtr<FJsonValue>> BlacklistPlatformValues;
-		for (const FString& BlacklistPlatform : BlacklistPlatforms)
+		TArray<TSharedPtr<FJsonValue>> PlatformDenyListValues;
+		for (const FString& Entry : PlatformDenyList)
 		{
-			BlacklistPlatformValues.Add(MakeShareable(new FJsonValueString(BlacklistPlatform)));
+			PlatformDenyListValues.Add(MakeShareable(new FJsonValueString(Entry)));
 		}
-		JsonObject.SetArrayField(TEXT("BlacklistPlatforms"), BlacklistPlatformValues);
+		JsonObject.SetArrayField(TEXT("PlatformDenyList"), PlatformDenyListValues);
 	}
 	else
 	{
-		JsonObject.RemoveField(TEXT("BlacklistPlatforms"));
+		JsonObject.RemoveField(TEXT("PlatformDenyList"));
 	}
 
-	if (WhitelistTargets.Num() > 0)
+	if (TargetAllowList.Num() > 0)
 	{
-		TArray<TSharedPtr<FJsonValue>> WhitelistTargetValues;
-		for (EBuildTargetType WhitelistTarget : WhitelistTargets)
+		TArray<TSharedPtr<FJsonValue>> TargetAllowListValues;
+		for (EBuildTargetType Target : TargetAllowList)
 		{
-			WhitelistTargetValues.Add(MakeShareable(new FJsonValueString(LexToString(WhitelistTarget))));
+			TargetAllowListValues.Add(MakeShareable(new FJsonValueString(LexToString(Target))));
 		}
-		JsonObject.SetArrayField(TEXT("WhitelistTargets"), WhitelistTargetValues);
+		JsonObject.SetArrayField(TEXT("TargetAllowList"), TargetAllowListValues);
 	}
 	else
 	{
-		JsonObject.RemoveField(TEXT("WhitelistTargets"));
+		JsonObject.RemoveField(TEXT("TargetAllowList"));
 	}
 
-	if (BlacklistTargets.Num() > 0)
+	if (TargetDenyList.Num() > 0)
 	{
-		TArray<TSharedPtr<FJsonValue>> BlacklistTargetValues;
-		for (EBuildTargetType BlacklistTarget : BlacklistTargets)
+		TArray<TSharedPtr<FJsonValue>> TargetDenyListValues;
+		for (EBuildTargetType Target : TargetDenyList)
 		{
-			BlacklistTargetValues.Add(MakeShareable(new FJsonValueString(LexToString(BlacklistTarget))));
+			TargetDenyListValues.Add(MakeShareable(new FJsonValueString(LexToString(Target))));
 		}
-		JsonObject.SetArrayField(TEXT("BlacklistTargets"), BlacklistTargetValues);
+		JsonObject.SetArrayField(TEXT("TargetDenyList"), TargetDenyListValues);
 	}
 	else
 	{
-		JsonObject.RemoveField(TEXT("BlacklistTargets"));
+		JsonObject.RemoveField(TEXT("TargetDenyList"));
 	}
 
-	if (WhitelistTargetConfigurations.Num() > 0)
+	if (TargetConfigurationAllowList.Num() > 0)
 	{
-		TArray<TSharedPtr<FJsonValue>> WhitelistTargetConfigurationValues;
-		for (EBuildConfiguration WhitelistTargetConfiguration : WhitelistTargetConfigurations)
+		TArray<TSharedPtr<FJsonValue>> TargetConfigurationAllowListValues;
+		for (EBuildConfiguration Config : TargetConfigurationAllowList)
 		{
-			WhitelistTargetConfigurationValues.Add(MakeShareable(new FJsonValueString(LexToString(WhitelistTargetConfiguration))));
+			TargetConfigurationAllowListValues.Add(MakeShareable(new FJsonValueString(LexToString(Config))));
 		}
-		JsonObject.SetArrayField(TEXT("WhitelistTargetConfigurations"), WhitelistTargetConfigurationValues);
+		JsonObject.SetArrayField(TEXT("TargetConfigurationAllowList"), TargetConfigurationAllowListValues);
 	}
 	else
 	{
-		JsonObject.RemoveField(TEXT("WhitelistTargetConfigurations"));
+		JsonObject.RemoveField(TEXT("TargetConfigurationAllowList"));
 	}
 
-	if (BlacklistTargetConfigurations.Num() > 0)
+	if (TargetConfigurationDenyList.Num() > 0)
 	{
-		TArray<TSharedPtr<FJsonValue>> BlacklistTargetConfigurationValues;
-		for (EBuildConfiguration BlacklistTargetConfiguration : BlacklistTargetConfigurations)
+		TArray<TSharedPtr<FJsonValue>> TargetConfigurationDenyListValues;
+		for (EBuildConfiguration Config : TargetConfigurationDenyList)
 		{
-			BlacklistTargetConfigurationValues.Add(MakeShareable(new FJsonValueString(LexToString(BlacklistTargetConfiguration))));
+			TargetConfigurationDenyListValues.Add(MakeShareable(new FJsonValueString(LexToString(Config))));
 		}
-		JsonObject.SetArrayField(TEXT("BlacklistTargetConfigurations"), BlacklistTargetConfigurationValues);
+		JsonObject.SetArrayField(TEXT("TargetConfigurationDenyList"), TargetConfigurationDenyListValues);
 	}
 	else
 	{
-		JsonObject.RemoveField(TEXT("BlacklistTargetConfigurations"));
+		JsonObject.RemoveField(TEXT("TargetConfigurationDenyList"));
 	}
 
-	if (WhitelistPrograms.Num() > 0)
+	if (ProgramAllowList.Num() > 0)
 	{
-		TArray<TSharedPtr<FJsonValue>> WhitelistProgramValues;
-		for (const FString& WhitelistProgram : WhitelistPrograms)
+		TArray<TSharedPtr<FJsonValue>> ProgramAllowListValues;
+		for (const FString& Program : ProgramAllowList)
 		{
-			WhitelistProgramValues.Add(MakeShareable(new FJsonValueString(WhitelistProgram)));
+			ProgramAllowListValues.Add(MakeShareable(new FJsonValueString(Program)));
 		}
-		JsonObject.SetArrayField(TEXT("WhitelistPrograms"), WhitelistProgramValues);
+		JsonObject.SetArrayField(TEXT("ProgramAllowList"), ProgramAllowListValues);
 	}
 	else
 	{
-		JsonObject.RemoveField(TEXT("WhitelistPrograms"));
+		JsonObject.RemoveField(TEXT("ProgramAllowList"));
 	}
 
-	if (BlacklistPrograms.Num() > 0)
+	if (ProgramDenyList.Num() > 0)
 	{
-		TArray<TSharedPtr<FJsonValue>> BlacklistProgramValues;
-		for (const FString& BlacklistProgram : BlacklistPrograms)
+		TArray<TSharedPtr<FJsonValue>> ProgramDenyListValues;
+		for (const FString& Program : ProgramDenyList)
 		{
-			BlacklistProgramValues.Add(MakeShareable(new FJsonValueString(BlacklistProgram)));
+			ProgramDenyListValues.Add(MakeShareable(new FJsonValueString(Program)));
 		}
-		JsonObject.SetArrayField(TEXT("BlacklistPrograms"), BlacklistProgramValues);
+		JsonObject.SetArrayField(TEXT("ProgramDenyList"), ProgramDenyListValues);
 	}
 	else
 	{
-		JsonObject.RemoveField(TEXT("BlacklistPrograms"));
+		JsonObject.RemoveField(TEXT("ProgramDenyList"));
 	}
 
 	if (AdditionalDependencies.Num() > 0)
@@ -387,6 +415,25 @@ void FModuleDescriptor::UpdateJson(FJsonObject& JsonObject) const
 	{
 		JsonObject.RemoveField(TEXT("AdditionalDependencies"));
 	}
+
+	if (bHasExplicitPlatforms)
+	{
+		JsonObject.SetBoolField(TEXT("HasExplicitPlatforms"), bHasExplicitPlatforms);
+	}
+	else
+	{
+		JsonObject.RemoveField(TEXT("HasExplicitPlatforms"));
+	}
+
+	// Clear away deprecated fields
+	JsonObject.RemoveField(TEXT("WhitelistPlatforms"));
+	JsonObject.RemoveField(TEXT("BlacklistPlatforms"));
+	JsonObject.RemoveField(TEXT("WhitelistTargets"));
+	JsonObject.RemoveField(TEXT("BlacklistTargets"));
+	JsonObject.RemoveField(TEXT("WhitelistTargetConfigurations"));
+	JsonObject.RemoveField(TEXT("BlacklistTargetConfigurations"));
+	JsonObject.RemoveField(TEXT("WhitelistPrograms"));
+	JsonObject.RemoveField(TEXT("BlacklistPrograms"));
 }
 
 void FModuleDescriptor::WriteArray(TJsonWriter<>& Writer, const TCHAR* ArrayName, const TArray<FModuleDescriptor>& Modules)
@@ -415,38 +462,38 @@ void FModuleDescriptor::UpdateArray(FJsonObject& JsonObject, const TCHAR* ArrayN
 
 bool FModuleDescriptor::IsCompiledInConfiguration(const FString& Platform, EBuildConfiguration Configuration, const FString& TargetName, EBuildTargetType TargetType, bool bBuildDeveloperTools, bool bBuildRequiresCookedData) const
 {
-	// Check the platform is whitelisted
-	if (WhitelistPlatforms.Num() > 0 && !WhitelistPlatforms.Contains(Platform))
+	// Check the platform is allowed
+	if ((bHasExplicitPlatforms || PlatformAllowList.Num() > 0) && !PlatformAllowList.Contains(Platform))
 	{
 		return false;
 	}
 
-	// Check the platform is not blacklisted
-	if (BlacklistPlatforms.Contains(Platform))
+	// Check the platform is not denied
+	if (PlatformDenyList.Contains(Platform))
 	{
 		return false;
 	}
 
-	// Check the target is whitelisted
-	if (WhitelistTargets.Num() > 0 && !WhitelistTargets.Contains(TargetType))
+	// Check the target is allowed
+	if (TargetAllowList.Num() > 0 && !TargetAllowList.Contains(TargetType))
 	{
 		return false;
 	}
 
-	// Check the target is not blacklisted
-	if (BlacklistTargets.Contains(TargetType))
+	// Check the target is not denied
+	if (TargetDenyList.Contains(TargetType))
 	{
 		return false;
 	}
 
-	// Check the target configuration is whitelisted
-	if (WhitelistTargetConfigurations.Num() > 0 && !WhitelistTargetConfigurations.Contains(Configuration))
+	// Check the target configuration is allowed
+	if (TargetConfigurationAllowList.Num() > 0 && !TargetConfigurationAllowList.Contains(Configuration))
 	{
 		return false;
 	}
 
-	// Check the target configuration is not blacklisted
-	if (BlacklistTargetConfigurations.Contains(Configuration))
+	// Check the target configuration is not denied
+	if (TargetConfigurationDenyList.Contains(Configuration))
 	{
 		return false;
 	}
@@ -454,14 +501,14 @@ bool FModuleDescriptor::IsCompiledInConfiguration(const FString& Platform, EBuil
 	// Special checks just for programs
 	if(TargetType == EBuildTargetType::Program)
 	{
-		// Check the program name is whitelisted. Note that this behavior is slightly different to other whitelist/blacklist checks; we will whitelist a module of any type if it's explicitly allowed for this program.
-		if(WhitelistPrograms.Num() > 0)
+		// Check the program name is allowed. Note that this behavior is slightly different to other allow/deny checks; we will allow a module of any type if it's explicitly allowed for this program.
+		if(ProgramAllowList.Num() > 0)
 		{
-			return WhitelistPrograms.Contains(TargetName);
+			return ProgramAllowList.Contains(TargetName);
 		}
 				
-		// Check the program name is not blacklisted
-		if(BlacklistPrograms.Contains(TargetName))
+		// Check the program name is not denied
+		if(ProgramDenyList.Contains(TargetName))
 		{
 			return false;
 		}
@@ -513,20 +560,20 @@ bool FModuleDescriptor::IsLoadedInCurrentConfiguration() const
 		return false;
 	}
 
-	// Always respect the whitelist/blacklist for program targets
+	// Always respect the allow/deny lists for program targets
 	EBuildTargetType TargetType = FApp::GetBuildTargetType();
 	if(TargetType == EBuildTargetType::Program)
 	{
 		const FString TargetName = UE_APP_NAME;
 
-		// Check the program name is whitelisted. Note that this behavior is slightly different to other whitelist/blacklist checks; we will whitelist a module of any type if it's explicitly allowed for this program.
-		if(WhitelistPrograms.Num() > 0)
+		// Check the program name is allowed. Note that this behavior is slightly different to other allow/deny list checks; we will allow a module of any type if it's explicitly allowed for this program.
+		if(ProgramAllowList.Num() > 0)
 		{
-			return WhitelistPrograms.Contains(TargetName);
+			return ProgramAllowList.Contains(TargetName);
 		}
 				
-		// Check the program name is not blacklisted
-		if(BlacklistPrograms.Contains(TargetName))
+		// Check the program name is not denied
+		if(ProgramDenyList.Contains(TargetName))
 		{
 			return false;
 		}
@@ -575,24 +622,30 @@ bool FModuleDescriptor::IsLoadedInCurrentConfiguration() const
 
 	case EHostType::Editor:
 		#if WITH_EDITOR
-			// GIsEditor is not set until the PostSplashScreen phase
-			ensure(LoadingPhase != ELoadingPhase::PostConfigInit && LoadingPhase != ELoadingPhase::EarliestPossible);
+			#if !UE_EDITOR
+				// SetIsRunningAsCommandlet() may be set after AppInit() via "late commandlet token" path
+				ensure(LoadingPhase != ELoadingPhase::PostConfigInit && LoadingPhase != ELoadingPhase::EarliestPossible);
+			#endif
 			if(GIsEditor) return true;
 		#endif
 		break;
 
 	case EHostType::EditorNoCommandlet:
 		#if WITH_EDITOR
-			// GIsEditor is not set until the PostSplashScreen phase
-			ensure(LoadingPhase != ELoadingPhase::PostConfigInit && LoadingPhase != ELoadingPhase::EarliestPossible);
+			#if !UE_EDITOR
+				// SetIsRunningAsCommandlet() may be set after AppInit() via "late commandlet token" path
+				ensure(LoadingPhase != ELoadingPhase::PostConfigInit && LoadingPhase != ELoadingPhase::EarliestPossible);
+			#endif
 			if(GIsEditor && !IsRunningCommandlet()) return true;
 		#endif
 		break;
 
 	case EHostType::EditorAndProgram:
 		#if WITH_EDITOR
-			// GIsEditor is not set until the PostSplashScreen phase
-			ensure(LoadingPhase != ELoadingPhase::PostConfigInit && LoadingPhase != ELoadingPhase::EarliestPossible);
+			#if !UE_EDITOR
+				// SetIsRunningAsCommandlet() may be set after AppInit() via "late commandlet token" path
+				ensure(LoadingPhase != ELoadingPhase::PostConfigInit && LoadingPhase != ELoadingPhase::EarliestPossible);
+			#endif
 			return GIsEditor;
 		#elif IS_PROGRAM
 			return true;
@@ -623,7 +676,7 @@ bool FModuleDescriptor::IsLoadedInCurrentConfiguration() const
 
 void FModuleDescriptor::LoadModulesForPhase(ELoadingPhase::Type LoadingPhase, const TArray<FModuleDescriptor>& Modules, TMap<FName, EModuleLoadResult>& ModuleLoadErrors)
 {
-	FScopedSlowTask SlowTask(Modules.Num());
+	FScopedSlowTask SlowTask((float)Modules.Num());
 	for (int Idx = 0; Idx < Modules.Num(); Idx++)
 	{
 		SlowTask.EnterProgressFrame(1);
@@ -647,6 +700,41 @@ void FModuleDescriptor::LoadModulesForPhase(ELoadingPhase::Type LoadingPhase, co
 				}
 			}
 		}
+	}
+}
+
+void FModuleDescriptor::UnloadModulesForPhase(ELoadingPhase::Type LoadingPhase, const TArray<FModuleDescriptor>& Modules, TMap<FName, EModuleUnloadResult>& OutErrors, bool bSkipUnload /*= false*/, bool bAllowUnloadCode /*= true*/)
+{
+	FScopedSlowTask SlowTask((float)Modules.Num());
+	for (const FModuleDescriptor& Descriptor : Modules)
+	{
+		SlowTask.EnterProgressFrame();
+
+		if (LoadingPhase != Descriptor.LoadingPhase)
+		{
+			continue;
+		}
+
+		IModuleInterface* Module = FModuleManager::Get().GetModule(Descriptor.Name);
+		if (!Module)
+		{
+			continue;
+		}
+
+		if (!Module->SupportsDynamicReloading())
+		{
+			OutErrors.Add(Descriptor.Name, EModuleUnloadResult::UnloadNotSupported);
+			continue;
+		}
+
+		if (bSkipUnload)
+		{
+			// Useful to gather errors without actually unloading
+			continue;
+		}
+
+		Module->PreUnloadCallback();
+		verify(FModuleManager::Get().UnloadModule(Descriptor.Name, false, bAllowUnloadCode));
 	}
 }
 

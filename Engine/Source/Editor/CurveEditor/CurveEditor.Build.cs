@@ -9,16 +9,19 @@ public class CurveEditor : ModuleRules
 		PrivateDependencyModuleNames.AddRange(
 			new string[] {
                 "ApplicationCore",
+                "AppFramework",
                 "Core",
 				"CoreUObject",
+				"EditorFramework",
 				"Engine",
-				"EditorStyle",
-				"InputCore",
+                "InputCore",
+				"PropertyEditor",
 				"Slate",
 				"SlateCore",
 				"TimeManagement",
+				"UMG",
 				"UnrealEd",
-				"SequencerWidgets",
+				"ToolMenus",
 			}
 		);
 

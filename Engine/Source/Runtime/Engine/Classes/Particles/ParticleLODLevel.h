@@ -15,6 +15,7 @@
 class UInterpCurveEdSetup;
 class UParticleModule;
 class UMaterialInterface;
+struct FStreamingRenderAssetPrimitiveInfo;
 
 UCLASS(collapsecategories, hidecategories=Object, editinlinenew, MinimalAPI)
 class UParticleLODLevel : public UObject
@@ -31,45 +32,45 @@ class UParticleLODLevel : public UObject
 
 	/** The required module for this LOD level											*/
 	UPROPERTY(instanced)
-	class UParticleModuleRequired* RequiredModule;
+	TObjectPtr<class UParticleModuleRequired> RequiredModule;
 
 	/** An array of particle modules that contain the adjusted data for the LOD level	*/
 	UPROPERTY(instanced)
-	TArray<class UParticleModule*> Modules;
+	TArray<TObjectPtr<class UParticleModule>> Modules;
 
 	// Module<SINGULAR> used for emitter type "extension".
 	UPROPERTY(export)
-	class UParticleModuleTypeDataBase* TypeDataModule;
+	TObjectPtr<class UParticleModuleTypeDataBase> TypeDataModule;
 
 	/** The SpawnRate/Burst module - required by all emitters. */
 	UPROPERTY(export)
-	class UParticleModuleSpawn* SpawnModule;
+	TObjectPtr<class UParticleModuleSpawn> SpawnModule;
 
 	/** The optional EventGenerator module. */
 	UPROPERTY(export)
-	class UParticleModuleEventGenerator* EventGenerator;
+	TObjectPtr<class UParticleModuleEventGenerator> EventGenerator;
 
 	/** SpawningModules - These are called to determine how many particles to spawn.	*/
 	UPROPERTY(transient, duplicatetransient)
-	TArray<class UParticleModuleSpawnBase*> SpawningModules;
+	TArray<TObjectPtr<class UParticleModuleSpawnBase>> SpawningModules;
 
 	/** SpawnModules - These are called when particles are spawned.						*/
 	UPROPERTY(transient, duplicatetransient)
-	TArray<class UParticleModule*> SpawnModules;
+	TArray<TObjectPtr<class UParticleModule>> SpawnModules;
 
 	/** UpdateModules - These are called when particles are updated.					*/
 	UPROPERTY(transient, duplicatetransient)
-	TArray<class UParticleModule*> UpdateModules;
+	TArray<TObjectPtr<class UParticleModule>> UpdateModules;
 
 	/** OrbitModules 
 	 *	These are used to do offsets of the sprite from the particle location.
 	 */
 	UPROPERTY(transient, duplicatetransient)
-	TArray<class UParticleModuleOrbit*> OrbitModules;
+	TArray<TObjectPtr<class UParticleModuleOrbit>> OrbitModules;
 
 	/** Event receiver modules only! */
 	UPROPERTY(transient, duplicatetransient)
-	TArray<class UParticleModuleEventReceiverBase*> EventReceiverModules;
+	TArray<TObjectPtr<class UParticleModuleEventReceiverBase>> EventReceiverModules;
 
 	UPROPERTY()
 	uint32 ConvertedModules:1;
@@ -142,6 +143,13 @@ class UParticleLODLevel : public UObject
  	 * @param EmitterMaterials - the material slot materials.
 	 */
 	void GetUsedMaterials( TArray<UMaterialInterface*>& OutMaterials, const TArray<struct FNamedEmitterMaterial>& NamedMaterialSlots, const TArray<UMaterialInterface*>& EmitterMaterials) const;
+
+	/**
+	 * Appends information on streaming meshes
+	 * @param Bounds - the bounds of the parent particle system component
+	 * @param OutStreamingRenderAssets - where the streaming mesh information will be added
+	 */
+	void GetStreamingMeshInfo(const FBoxSphereBounds& Bounds, TArray<FStreamingRenderAssetPrimitiveInfo>& OutStreamingRenderAssets) const;
 };
 
 

@@ -2,19 +2,39 @@
 
 
 #include "K2Node_VariableGet.h"
-#include "UObject/UObjectHash.h"
-#include "UObject/PropertyPortFlags.h"
-#include "Kismet/KismetSystemLibrary.h"
-#include "Framework/Commands/UIAction.h"
-#include "ToolMenus.h"
+
+#include "Containers/EnumAsByte.h"
+#include "Containers/UnrealString.h"
+#include "Delegates/Delegate.h"
 #include "EdGraph/EdGraph.h"
+#include "EdGraph/EdGraphPin.h"
 #include "EdGraphSchema_K2.h"
+#include "Engine/Blueprint.h"
+#include "Engine/MemberReference.h"
+#include "Framework/Commands/UIAction.h"
+#include "HAL/PlatformMath.h"
+#include "Internationalization/Internationalization.h"
 #include "K2Node_CallFunction.h"
 #include "K2Node_IfThenElse.h"
+#include "Kismet/KismetSystemLibrary.h"
 #include "Kismet2/BlueprintEditorUtils.h"
-#include "KismetCompilerMisc.h"
+#include "Kismet2/CompilerResultsLog.h"
+#include "KismetCompiledFunctionContext.h"
 #include "KismetCompiler.h"
+#include "KismetCompilerMisc.h"
+#include "Misc/AssertionMacros.h"
 #include "ScopedTransaction.h"
+#include "Serialization/Archive.h"
+#include "Templates/Casts.h"
+#include "Textures/SlateIcon.h"
+#include "ToolMenu.h"
+#include "ToolMenuSection.h"
+#include "UObject/Class.h"
+#include "UObject/NameTypes.h"
+#include "UObject/Object.h"
+#include "UObject/PropertyPortFlags.h"
+#include "UObject/UnrealNames.h"
+#include "UObject/UnrealType.h"
 
 //////////////////////////////////////////////////////////////////////////
 // FKCHandler_VariableGet
@@ -427,13 +447,11 @@ void UK2Node_VariableGet::ValidateNodeDuringCompilation(FCompilerResultsLog& Mes
 
 				if (PropertyReadableState == FBlueprintEditorUtils::EPropertyReadableState::NotBlueprintVisible)
 				{
-					// UE_DEPRECATED(4.17) ... make this an error
-					MessageLog.Warning(*FText::Format(LOCTEXT("UnableToGet_NotVisible", "{VariableName} is not blueprint visible (BlueprintReadOnly or BlueprintReadWrite). Please fix mark up or cease accessing as this will be made an error in a future release. @@"), Args).ToString(), this);
+					MessageLog.Error(*FText::Format(LOCTEXT("UnableToGet_NotVisible", "{VariableName} is not blueprint visible (BlueprintReadOnly or BlueprintReadWrite). Please fix mark up or cease accessing as this will be made an error in a future release. @@"), Args).ToString(), this);
 				}
 				else if (PropertyReadableState == FBlueprintEditorUtils::EPropertyReadableState::Private)
 				{
-					// UE_DEPRECATED(4.17) ... make this an error
-					MessageLog.Warning(*FText::Format(LOCTEXT("UnableToGet_ReadOnly", "{VariableName} is private and not accessible in this context. Please fix mark up or cease accessing as this will be an error in a future release. @@"), Args).ToString(), this);
+					MessageLog.Error(*FText::Format(LOCTEXT("UnableToGet_ReadOnly", "{VariableName} is private and not accessible in this context. Please fix mark up or cease accessing as this will be an error in a future release. @@"), Args).ToString(), this);
 				}
 				else
 				{
@@ -531,7 +549,11 @@ void UK2Node_VariableGet::ExpandNode(class FKismetCompilerContext& CompilerConte
 		{
 			UClass* OwnerClass = VariableProperty->GetOwnerClass();
 			UFunction* GetFunction = OwnerClass->FindFunctionByName(*GetFunctionName);
-			check(GetFunction);
+			if (!GetFunction)
+			{
+				CompilerContext.MessageLog.Error(*LOCTEXT("MissingGetter", "Getter function not found for @@").ToString(), this);
+				return;
+			}
 
 			UK2Node_CallFunction* CallFuncNode = CompilerContext.SpawnIntermediateNode<UK2Node_CallFunction>(this, SourceGraph);
 			CallFuncNode->SetFromFunction(GetFunction);

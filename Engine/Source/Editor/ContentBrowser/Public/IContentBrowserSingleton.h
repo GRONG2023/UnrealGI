@@ -5,28 +5,30 @@
 #include "CoreMinimal.h"
 #include "SlateFwd.h"
 #include "Misc/Attribute.h"
-#include "AssetData.h"
-#include "Developer/AssetTools/Public/AssetTypeCategories.h"
-#include "ARFilter.h"
+#include "AssetRegistry/AssetData.h"
+#include "AssetTypeCategories.h"
+#include "AssetRegistry/ARFilter.h"
+#include "CollectionManagerTypes.h"
 #include "ContentBrowserItem.h"
 #include "ContentBrowserDelegates.h"
-#include "Developer/CollectionManager/Public/CollectionManagerTypes.h"
+#include "ContentBrowserDataSubsystem.h"
 #include "Misc/FilterCollection.h"
 #include "Framework/Views/ITypedTableView.h"
 #include "AssetThumbnail.h"
+#include "ContentBrowserItemPath.h"
+#include "Misc/NamePermissionList.h"
 
 class FViewport;
-class UFactory;
 class IPlugin;
+class SWidget;
+class UFactory;
+class UToolMenu;
 
 typedef const FContentBrowserItem& FAssetFilterType;
 typedef TFilterCollection<FAssetFilterType> FAssetFilterCollectionType;
 
 typedef const TSharedRef<IPlugin>& FPluginFilterType;
 typedef TFilterCollection<FPluginFilterType> FPluginFilterCollectionType;
-
-class UFactory;
-
 
 /** The view modes used in SAssetView */
 namespace EAssetViewType
@@ -89,54 +91,54 @@ struct FContentBrowserConfig
 	/** The default view mode */
 	EAssetViewType::Type InitialAssetViewType;
 
-	/** If true, show the bottom toolbar which shows # of assets selected, view mode buttons, etc... */
-	bool bShowBottomToolbar;
-
-	/** Indicates if this view is allowed to show classes */
-	bool bCanShowClasses;
-
-	/** Whether the sources view for choosing folders/collections is available or not */
-	bool bUseSourcesView;
-
-	/** Whether the sources view should initially be expanded or not */
-	bool bExpandSourcesView;
-
 	/** Collection to view initially */
 	FCollectionNameType SelectedCollectionName;
 
+	/** If true, show the bottom toolbar which shows # of assets selected, view mode buttons, etc... */
+	bool bShowBottomToolbar : 1;
+
+	/** Indicates if this view is allowed to show classes */
+	bool bCanShowClasses : 1;
+
+	/** Whether the sources view for choosing folders/collections is available or not */
+	bool bUseSourcesView : 1;
+
+	/** Whether the sources view should initially be expanded or not */
+	bool bExpandSourcesView : 1;
+
 	/** Whether the path picker is available or not */
-	bool bUsePathPicker;
+	bool bUsePathPicker : 1;
 
 	/** Whether to show filters */
-	bool bCanShowFilters;
+	bool bCanShowFilters : 1;
 
 	/** Whether to show asset search */
-	bool bCanShowAssetSearch;
+	bool bCanShowAssetSearch : 1;
 
 	/** Indicates if the 'Show folders' option should be enabled or disabled */
-	bool bCanShowFolders;
+	bool bCanShowFolders : 1;
 
 	/** Indicates if the 'Real-Time Thumbnails' option should be enabled or disabled */
-	bool bCanShowRealTimeThumbnails;
+	bool bCanShowRealTimeThumbnails : 1;
 
 	/** Indicates if the 'Show Developers' option should be enabled or disabled */
-	bool bCanShowDevelopersFolder;
+	bool bCanShowDevelopersFolder : 1;
 
 	/** Whether the 'lock' button is visible on the toolbar */
-	bool bCanShowLockButton;
+	bool bCanShowLockButton : 1;
 
 	/** Whether or not this Content Browser can be used as the Primary Browser for SyncBrowserTo functions */
-	bool bCanSetAsPrimaryBrowser;
+	bool bCanSetAsPrimaryBrowser : 1;
 
 	FContentBrowserConfig()
 		: ThumbnailLabel( EThumbnailLabel::ClassName )
 		, ThumbnailScale(0.1f)
 		, InitialAssetViewType(EAssetViewType::Tile)
+		, SelectedCollectionName( NAME_None, ECollectionShareType::CST_Local )
 		, bShowBottomToolbar(true)
 		, bCanShowClasses(true)
 		, bUseSourcesView(true)
 		, bExpandSourcesView(true)
-		, SelectedCollectionName( NAME_None, ECollectionShareType::CST_Local )
 		, bUsePathPicker(true)
 		, bCanShowFilters(true)
 		, bCanShowAssetSearch(true)
@@ -184,6 +186,9 @@ struct FAssetPickerConfig
 
 	/** The default scale for thumbnails. [0-1] range */
 	TAttribute< float > ThumbnailScale;
+
+	/** Initial thumbnail size */
+	EThumbnailSize InitialThumbnailSize;
 
 	/** Only display results in these collections */
 	TArray<FCollectionNameType> Collections;
@@ -264,11 +269,17 @@ struct FAssetPickerConfig
 	/** Whether to allow dragging of items */
 	bool bAllowDragging;
 
+	/** Whether to allow renaming of items */
+	bool bAllowRename;
+
 	/** Indicates if this view is allowed to show classes */
 	bool bCanShowClasses;
 
 	/** Indicates if the 'Show folders' option should be enabled or disabled */
 	bool bCanShowFolders;
+
+	/** If true, will allow read-only folders to be shown in the picker */
+	bool bCanShowReadOnlyFolders;
 
 	/** Indicates if the 'Real-Time Thumbnails' option should be enabled or disabled */
 	bool bCanShowRealTimeThumbnails;
@@ -282,9 +293,6 @@ struct FAssetPickerConfig
 	/** Indicates if plugin content should always be shown */
 	bool bForceShowPluginContent;
 
-	/** Indicates if the context menu is going to load the assets, and if so to preload before the context menu is shown, and warn about the pending load. */
-	bool bPreloadAssetsForContextMenu;
-
 	/** Indicates that we would like to build the filter UI with the Asset Picker */
 	bool bAddFilterUI;
 
@@ -295,31 +303,40 @@ struct FAssetPickerConfig
 	/** If true, sort by path in column view. Only works if initial view type is Column */
 	bool bSortByPathInColumnView;
 
+	/** Can be used to freely change the Add Filter menu. This is executed on the dynamically instanced menu, not the registered menu. */
+	TDelegate<void(UToolMenu*)> OnExtendAddFilterMenu;
+	
 	/** Override the default filter context menu layout */
 	EAssetTypeCategories::Type DefaultFilterMenuExpansion;
+
+	/** If we display filters & set to true, we will add sections instead of sub-menus for other filters. Useful if the number of additional filters is small. */
+	bool bUseSectionsForCustomFilterCategories;
 
 	FAssetPickerConfig()
 		: SelectionMode( ESelectionMode::Multi )
 		, ThumbnailLabel( EThumbnailLabel::ClassName )
 		, ThumbnailScale(0.1f)
+		, InitialThumbnailSize(EThumbnailSize::Medium)
 		, InitialAssetViewType(EAssetViewType::Tile)
 		, bFocusSearchBoxWhenOpened(true)
 		, bAllowNullSelection(false)
 		, bShowBottomToolbar(true)
 		, bAutohideSearchBar(false)
 		, bAllowDragging(true)
+		, bAllowRename(true)
 		, bCanShowClasses(true)
 		, bCanShowFolders(false)
+		, bCanShowReadOnlyFolders(true)
 		, bCanShowRealTimeThumbnails(false)
 		, bCanShowDevelopersFolder(true)
 		, bForceShowEngineContent(false)
 		, bForceShowPluginContent(false)
-		, bPreloadAssetsForContextMenu(true)
 		, bAddFilterUI(false)
 		, bShowPathInColumnView(false)
 		, bShowTypeInColumnView(true)
 		, bSortByPathInColumnView(false)
 		, DefaultFilterMenuExpansion(EAssetTypeCategories::Basic)
+		, bUseSectionsForCustomFilterCategories(false)
 	{}
 };
 
@@ -328,6 +345,9 @@ struct FPathPickerConfig
 {
 	/** The initial path to select. Leave empty to skip initial selection. */
 	FString DefaultPath;
+
+	/** Custom Folder permissions to be used to filter folders in this Path Picker. */
+	TSharedPtr<FPathPermissionList> CustomFolderPermissionList;
 
 	/** The delegate that fires when a path was selected */
 	FOnPathSelected OnPathSelected;
@@ -342,19 +362,28 @@ struct FPathPickerConfig
 	TArray<FSetPathPickerPathsDelegate*> SetPathsDelegates;
 
 	/** If true, the search box will gain focus when the path picker is created */
-	bool bFocusSearchBoxWhenOpened;
+	bool bFocusSearchBoxWhenOpened : 1;
 
 	/** If false, the context menu will not open when an item is right clicked */
-	bool bAllowContextMenu;
+	bool bAllowContextMenu : 1;
 
 	/** If true, will allow class folders to be shown in the picker */
-	bool bAllowClassesFolder;
+	bool bAllowClassesFolder : 1;
 
 	/** If true, will allow read-only folders to be shown in the picker */
-	bool bAllowReadOnlyFolders;
+	bool bAllowReadOnlyFolders : 1;
 
 	/** If true, will add the path specified in DefaultPath to the tree if it doesn't exist already */
-	bool bAddDefaultPath;
+	bool bAddDefaultPath : 1;
+
+	/** If true, passes virtual paths to OnPathSelected instead of internal asset paths */
+	bool bOnPathSelectedPassesVirtualPaths : 1;
+
+	/** Whether or not to show the favorites selector. */
+	bool bShowFavorites : 1;
+
+	/** Whether to call OnPathSelected during construction for DefaultPath if DefaultPath is allowed */
+	bool bNotifyDefaultPathSelected : 1;
 
 	FPathPickerConfig()
 		: bFocusSearchBoxWhenOpened(true)
@@ -362,6 +391,9 @@ struct FPathPickerConfig
 		, bAllowClassesFolder(false)
 		, bAllowReadOnlyFolders(true)
 		, bAddDefaultPath(false)
+		, bOnPathSelectedPassesVirtualPaths(false)
+		, bShowFavorites(true)
+		, bNotifyDefaultPathSelected(false)
 	{}
 };
 
@@ -398,9 +430,11 @@ struct FSharedAssetDialogConfig
 {
 	FText DialogTitleOverride;
 	FString DefaultPath;
-	TArray<FName> AssetClassNames;
+	TArray<FTopLevelAssetPath> AssetClassNames;
 	FVector2D WindowSizeOverride;
 	FOnPathSelected OnPathSelected;
+	/** When specified, this window will be used instead of the mainframe window. */
+	TSharedPtr<SWindow> WindowOverride;
 
 	virtual EAssetDialogType::Type GetDialogType() const = 0;
 
@@ -458,6 +492,8 @@ struct FSaveAssetDialogConfig : public FSharedAssetDialogConfig
 class IContentBrowserSingleton
 {
 public:
+	CONTENTBROWSER_API static IContentBrowserSingleton& Get();
+	
 	/** Virtual destructor */
 	virtual ~IContentBrowserSingleton() {}
 
@@ -470,7 +506,7 @@ public:
 	 *
 	 * @return The newly created content browser widget
 	 */
-	virtual TSharedRef<class SWidget> CreateContentBrowser( const FName InstanceName, TSharedPtr<SDockTab> ContainingTab, const FContentBrowserConfig* ContentBrowserConfig ) = 0;
+	virtual TSharedRef<SWidget> CreateContentBrowser( const FName InstanceName, TSharedPtr<SDockTab> ContainingTab, const FContentBrowserConfig* ContentBrowserConfig ) = 0;
 
 	/**
 	 * Generates an asset picker widget locked to the specified FARFilter.
@@ -478,7 +514,10 @@ public:
 	 * @param AssetPickerConfig		A struct containing details about how the asset picker should behave				
 	 * @return The asset picker widget
 	 */
-	virtual TSharedRef<class SWidget> CreateAssetPicker(const FAssetPickerConfig& AssetPickerConfig) = 0;
+	virtual TSharedRef<SWidget> CreateAssetPicker(const FAssetPickerConfig& AssetPickerConfig) = 0;
+
+	/** Focus the search box of the given asset picker widget. */
+	virtual TSharedPtr<SWidget> GetAssetPickerSearchBox(const TSharedRef<SWidget>& AssetPickerWidget) = 0;
 
 	/**
 	 * Generates a path picker widget.
@@ -486,7 +525,7 @@ public:
 	 * @param PathPickerConfig		A struct containing details about how the path picker should behave				
 	 * @return The path picker widget
 	 */
-	virtual TSharedRef<class SWidget> CreatePathPicker(const FPathPickerConfig& PathPickerConfig) = 0;
+	virtual TSharedRef<SWidget> CreatePathPicker(const FPathPickerConfig& PathPickerConfig) = 0;
 
 	/**
 	 * Generates a collection picker widget.
@@ -494,7 +533,16 @@ public:
 	 * @param CollectionPickerConfig		A struct containing details about how the collection picker should behave				
 	 * @return The collection picker widget
 	 */
-	virtual TSharedRef<class SWidget> CreateCollectionPicker(const FCollectionPickerConfig& CollectionPickerConfig) = 0;
+	virtual TSharedRef<SWidget> CreateCollectionPicker(const FCollectionPickerConfig& CollectionPickerConfig) = 0;
+
+	/**
+	 * Generates a content browser for use in a drawer. This content browser is a singleton and is reused among all drawers.
+	 *
+	 * @param ContentBrowserConfig	Initial defaults for the new content browser
+	 *
+	 * @return The content browser drawer widget
+	 */
+	virtual TSharedRef<SWidget> CreateContentBrowserDrawer(const FContentBrowserConfig& ContentBrowserConfig, TFunction<TSharedPtr<SDockTab>()> InOnGetTabForDrawer) = 0;
 
 	/**
 	 * Opens the Open Asset dialog in a non-modal window
@@ -533,8 +581,16 @@ public:
 	/** Returns true if there is at least one browser open that is eligible to be a primary content browser */
 	virtual bool HasPrimaryContentBrowser() const = 0;
 
+	/** Sets the primary content browser for subsequent state changes through this singleton
+	 * Returns true if content browser was changed sucessfully
+	 */
+	virtual bool SetPrimaryContentBrowser(FName InstanceName) = 0;
+
 	/** Brings the primary content browser to the front or opens one if it does not exist. */
 	virtual void FocusPrimaryContentBrowser(bool bFocusSearch) = 0;
+
+	/** Focuses the search field of a content browser widget */
+	virtual void FocusContentBrowserSearchField(TSharedPtr<SWidget> ContentBrowserWidget) = 0;
 
 	/** Sets up an inline-name for the creation of a new asset in the primary content browser using the specified path and the specified class and/or factory */
 	virtual void CreateNewAsset(const FString& DefaultAssetName, const FString& PackagePath, UClass* AssetClass, UFactory* Factory) = 0;
@@ -602,7 +658,11 @@ public:
 	virtual void GetSelectedPathViewFolders(TArray<FString>& SelectedFolders) = 0;
 
 	/** Gets the current path if one exists, otherwise returns empty string. */
-	virtual FString GetCurrentPath() = 0;
+	UE_DEPRECATED(5.0, "This function is deprecated. Use GetCurrentPath without argument instead.")
+	virtual FString GetCurrentPath(const EContentBrowserPathType PathType) = 0;
+
+	/** Gets the current path if one exists, otherwise returns empty string. */
+	virtual FContentBrowserItemPath GetCurrentPath() = 0;
 
 	/**
 	 * Capture active viewport to thumbnail and assigns that thumbnail to incoming assets
@@ -615,12 +675,75 @@ public:
 	/**
 	 * Sets the content browser to display the selected paths
 	 */
-	virtual void SetSelectedPaths(const TArray<FString>& FolderPaths, bool bNeedsRefresh = false) = 0;
+	virtual void SetSelectedPaths(const TArray<FString>& FolderPaths, bool bNeedsRefresh = false, bool bPathsAreVirtual = false) = 0;
 
 	/**
-	* Forces the content browser to show plugin content if it's not already showing.
-	*
-	* @param bEnginePlugin	If this is true, it will also force the content browser to show engine content
-	*/
+	 * Forces the content browser to show plugin content if it's not already showing.
+	 *
+	 * @param bEnginePlugin	If this is true, it will also force the content browser to show engine content
+	 */
 	virtual void ForceShowPluginContent(bool bEnginePlugin) = 0;
+
+	/**
+	 * Saves the settings for a particular content browser instance
+	 *
+	 * @param ContentBrowserWidget The content browser widget to save
+	 */
+	virtual void SaveContentBrowserSettings(TSharedPtr<SWidget> ContentBrowserWidget) = 0;
+
+	/**
+	 * Rename current first selected content item on the passed in widget.
+	 *
+	 * @param PickerWidget The picker widget whose asset we want to rename, should be a asset or path picker widget.
+	 */
+	virtual void ExecuteRename(TSharedPtr<SWidget> PickerWidget) = 0;
+
+	/**
+	 * Add a folder to the path picker widget under the current selected path.
+	 *
+	 * @param PathPickerWidget The path picker widget where we want to add an folder
+	 */
+	virtual void ExecuteAddFolder(TSharedPtr<SWidget> PathPickerWidget) = 0;
+
+	/**
+	 * Force refresh on the path picker widget.  You may need to do this if you have changed the filter on the path picker.
+	 *
+	 * @param PathPickerWidget The path picker widget where we want to add an folder
+	*/
+	virtual void RefreshPathView(TSharedPtr<SWidget> PathPickerWidget) = 0;
+
+	/** Returns InPath if can be written to, otherwise picks a default path that can be written to */
+	virtual FContentBrowserItemPath GetInitialPathToSaveAsset(const FContentBrowserItemPath& InPath) = 0;
+
+	/** Returns true if FolderPath is a private content edit folder */
+	virtual bool IsShowingPrivateContent(const FStringView VirtualFolderPath) = 0;
+
+	/** Returns true if FolderPath's private content edit mode is allowed to be toggled */
+	virtual bool IsFolderShowPrivateContentToggleable(const FStringView VirtualFolderPath) = 0;
+
+	/** Returns the Private Content Permission List */
+	virtual const TSharedPtr<FPathPermissionList>& GetShowPrivateContentPermissionList() = 0;
+
+	/** Declares the Private Content Permission List dirty */
+	virtual void SetPrivateContentPermissionListDirty() = 0;
+
+	/** Registers the delegate for custom handling of if a Folder allows private content edits */
+	virtual void RegisterIsFolderShowPrivateContentToggleableDelegate(FIsFolderShowPrivateContentToggleableDelegate InIsFolderShowPrivateContentToggleableDelegate) = 0;
+
+	/** Unregisters the delegate for custom handling of if a Folder allows private content edits */
+	virtual void UnregisterIsFolderShowPrivateContentToggleableDelegate() = 0;
+
+	/** Register a delegate to be called when the Favorites changes. */
+	virtual FDelegateHandle RegisterOnFavoritesChangedHandler(FSimpleDelegate OnFavoritesChanged) = 0;
+
+	/** Unregister a previously-registered handler for when Favorites changes. */
+	virtual void UnregisterOnFavoritesChangedDelegate(FDelegateHandle Handle) = 0;
+
+	/**
+	 * Get a list of other paths that the data source may be using to represent a specific path
+	 *
+	 * @param The internal path (or object path) of an asset to get aliases for
+	 * @return All alternative paths that represent the input path (not including the input path itself)
+	 */
+	virtual TArray<FString> GetAliasesForPath(const FSoftObjectPath& InPath) const = 0;
 };

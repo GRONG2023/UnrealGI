@@ -8,6 +8,21 @@
 
 #define WITH_ATLAS_DEBUGGING (WITH_EDITOR || IS_PROGRAM) && !UE_BUILD_SHIPPING
 
+class FSlateShaderResource;
+
+/**
+ * Specifies the type of content of font atlas, based on which the texture format is determined.
+ */
+enum class ESlateFontAtlasContentType
+{
+	/** Alpha channel only (linear, formerly IsGrayscale = true) */
+	Alpha,
+	/** RGBA color data - sRGB color space */
+	Color,
+	/** Multi-channel signed distance field - linear color space */
+	Msdf
+};
+
 /** 
  * Specifies how to handle texture atlas padding (when specified for the atlas). 
  * We only support one pixel of padding because we don't support mips or aniso filtering on atlas textures right now.
@@ -41,11 +56,16 @@ enum class ESlateTextureAtlasThreadId
 SLATECORE_API ESlateTextureAtlasThreadId GetCurrentSlateTextureAtlasThreadId();
 
 /**
+ * Returns the byte size of a single pixel of a font atlas with the specified content type
+ */
+SLATECORE_API uint32 GetSlateFontAtlasContentBytesPerPixel(ESlateFontAtlasContentType InContentType);
+
+/**
  * Structure holding information about where a texture is located in the atlas. Inherits a linked-list interface.
  *
  * When a slot is occupied by texture data, the remaining space in the slot (if big enough) is split off into two new (smaller) slots,
  * building a tree of texture rectangles which, instead of being stored as a tree, are flattened into two linked-lists:
- *	- AtlastEmptySlots:	A linked-list of empty slots ready for texture data - iterates in same order as a depth-first-search on a tree
+ *	- AtlasEmptySlots:	A linked-list of empty slots ready for texture data - iterates in same order as a depth-first-search on a tree
  *	- AtlasUsedSlots:	An unordered linked-list of slots containing texture data
  */
 struct FAtlasedTextureSlot : public TIntrusiveLinkedList<FAtlasedTextureSlot>
@@ -75,13 +95,13 @@ struct FAtlasedTextureSlot : public TIntrusiveLinkedList<FAtlasedTextureSlot>
 /**
  * Base class texture atlases in Slate
  */
-class SLATECORE_API FSlateTextureAtlas
+class FSlateTextureAtlas
 {
 public:
 	FSlateTextureAtlas( uint32 InWidth, uint32 InHeight, uint32 InBytesPerPixel, ESlateTextureAtlasPaddingStyle InPaddingStyle, bool bInUpdatesAfterInitialization )
 		: AtlasData()
 		, AtlasUsedSlots(NULL)
-		, AtlasEmptySlots(NULL)
+		, AtlasEmptySlotsMap()
 		, AtlasWidth( InWidth )
 		, AtlasHeight( InHeight )
 		, BytesPerPixel( InBytesPerPixel )
@@ -95,12 +115,12 @@ public:
 		InitAtlasData();
 	}
 
-	virtual ~FSlateTextureAtlas();
+	SLATECORE_API virtual ~FSlateTextureAtlas();
 
 	/**
 	 * Clears atlas cpu data.  It does not clear rendering data
 	 */
-	void EmptyAtlasData();
+	SLATECORE_API void EmptyAtlasData();
 
 	/**
 	 * Adds a texture to the atlas
@@ -109,7 +129,7 @@ public:
 	 * @param TextureHeight	Height of the texture
 	 * @param Data			Raw texture data
 	 */
-	const FAtlasedTextureSlot* AddTexture(uint32 TextureWidth, uint32 TextureHeight, const TArray<uint8>& Data);
+	SLATECORE_API const FAtlasedTextureSlot* AddTexture(uint32 TextureWidth, uint32 TextureHeight, const TArray<uint8>& Data);
 
 	/** @return the width of the atlas */
 	uint32 GetWidth() const { return AtlasWidth; }
@@ -117,15 +137,22 @@ public:
 	uint32 GetHeight() const { return AtlasHeight; }
 
 	/** Marks the texture as dirty and needing its rendering resources updated */
-	void MarkTextureDirty();
+	SLATECORE_API void MarkTextureDirty();
 	
 	/**
 	 * Updates the texture used for rendering if needed
 	 */
 	virtual void ConditionalUpdateTexture() = 0;
-	
+
+	/**
+	 * Releases rendering resources of this texture
+	 */
+	virtual void ReleaseResources() = 0;
+
+	virtual FSlateShaderResource* GetAtlasTexture() const = 0;
+
 #if WITH_ATLAS_DEBUGGING
-	const FAtlasedTextureSlot* GetSlotAtPosition(FIntPoint InPosition) const;
+	SLATECORE_API const FAtlasedTextureSlot* GetSlotAtPosition(FIntPoint InPosition) const;
 #endif
 protected:
 	/**
@@ -134,12 +161,22 @@ protected:
 	 * @param Width The width of the texture we are adding
 	 * @param Height The height of the texture we are adding
 	 */
-	const FAtlasedTextureSlot* FindSlotForTexture( uint32 InWidth, uint32 InHeight );
+	SLATECORE_API const FAtlasedTextureSlot* FindSlotForTexture( uint32 InWidth, uint32 InHeight );
+
+	/**
+	 * Get the index to start looking for a free slot.
+	 */
+	static int32 GetFreeSlotSearchIndex(uint32 InWidth, uint32 InHeight);
+
+	/**
+	 * Adds a new slot to the free slot list.
+	 */
+	void AddFreeSlot(uint32 InX, uint32 InY, uint32 InWidth, uint32 InHeight);
 
 	/**
 	 * Creates enough space for a single texture the width and height of the atlas
 	 */
-	void InitAtlasData();
+	SLATECORE_API void InitAtlasData();
 
 	struct FCopyRowData
 	{
@@ -165,7 +202,7 @@ protected:
 	 *
 	 * @param CopyRowData	Information for how to copy a row
 	 */
-	void CopyRow( const FCopyRowData& CopyRowData );
+	SLATECORE_API void CopyRow( const FCopyRowData& CopyRowData );
 
 	/**
 	 * Zeros out a row in the dest texture (used with PaddingStyle == PadWithZero).
@@ -173,7 +210,7 @@ protected:
 	 *
 	 * @param CopyRowData	Information for how to copy a row
 	 */
-	void ZeroRow( const FCopyRowData& CopyRowData );
+	SLATECORE_API void ZeroRow( const FCopyRowData& CopyRowData );
 
 	/** 
 	 * Copies texture data into the atlas at a given slot
@@ -181,11 +218,11 @@ protected:
 	 * @param SlotToCopyTo	The occupied slot in the atlas where texture data should be copied to
 	 * @param Data			The data to copy into the atlas
 	 */
-	void CopyDataIntoSlot( const FAtlasedTextureSlot* SlotToCopyTo, const TArray<uint8>& Data );
+	SLATECORE_API void CopyDataIntoSlot( const FAtlasedTextureSlot* SlotToCopyTo, const TArray<uint8>& Data );
 
 private:
 	/** Returns the amount of padding needed for the current padding style */
-	FORCEINLINE int32 GetPaddingAmount() const
+	FORCEINLINE uint8 GetPaddingAmount() const
 	{
 		return (PaddingStyle == ESlateTextureAtlasPaddingStyle::NoPadding) ? 0 : 1;
 	}
@@ -195,7 +232,7 @@ protected:
 	/** The list of atlas slots pointing to used texture data in the atlas */
 	FAtlasedTextureSlot* AtlasUsedSlots;
 	/** The list of atlas slots pointing to empty texture data in the atlas */
-	FAtlasedTextureSlot* AtlasEmptySlots;
+	TArray<FAtlasedTextureSlot*> AtlasEmptySlotsMap;
 	/** Width of the atlas */
 	uint32 AtlasWidth;
 	/** Height of the atlas */
@@ -234,6 +271,71 @@ struct FAtlasSlotInfo
 	FName TextureName;
 };
 
+
+/** A factory capable of generating a texture atlas or shader resource for textures too big to be in an atlas */
+class ISlateTextureAtlasFactory
+{
+public:
+	virtual ~ISlateTextureAtlasFactory() {}
+	virtual TUniquePtr<FSlateTextureAtlas> CreateTextureAtlas(int32 AtlasSize, int32 AtlasStride, ESlateTextureAtlasPaddingStyle PaddingStyle, bool bUpdatesAfterInitialization) const = 0;
+
+	virtual TUniquePtr<FSlateShaderResource> CreateNonAtlasedTexture(const uint32 InWidth, const uint32 InHeight, const TArray<uint8>& InRawData) const = 0;
+
+	virtual void ReleaseTextureAtlases(const TArray<TUniquePtr<FSlateTextureAtlas>>& InTextureAtlases, const TArray<TUniquePtr<FSlateShaderResource>>& InNonAtlasedTextures, const bool bWaitForRelease) const = 0;
+};
+
+/** Parameters for flushable atlases that dictate when the atlas is allowed to flush after it becomes full */
+struct FAtlasFlushParams
+{
+	int32 InitialMaxAtlasPagesBeforeFlushRequest = 1;
+	int32 InitialMaxNonAtlasPagesBeforeFlushRequest = 1;
+	int32 GrowAtlasFrameWindow = 1;
+	int32 GrowNonAtlasFrameWindow = 1;
+};
+
+/** Base class for any atlas cache which has flushing logic to keep the number of in use pages small */
+class FSlateFlushableAtlasCache
+{
+public:
+	FSlateFlushableAtlasCache(const FAtlasFlushParams* InFlushParams);
+
+	virtual ~FSlateFlushableAtlasCache() {}
+
+	/** 
+	 * Called when this cache must be flushed 
+	 * 
+ 	 * @param Reason A string explaining the reason the cache was flushed (generally for debugging or logging
+	 */
+	virtual void RequestFlushCache(const FString& Reason) = 0;
+
+	/** Resets all counters to their initial state to start over flushing logic */
+	void ResetFlushCounters();
+
+	/** Increments counters that determine if a flush is needed.  If a flush is needed RequestFlushCache will be called from here */
+	void UpdateFlushCounters(int32 NumGrayscale, int32 NumColor, int32 NumMsdf, int32 NumNonAtlased);
+
+private:
+	bool UpdateInternal(int32 CurrentNum, int32& MaxNum, int32 InitialMax, int32 FrameWindowNum);
+private:
+	/** Flush params that dictate when this atlas can flush.*/
+	const FAtlasFlushParams* FlushParams;
+
+	/** Number of grayscale atlas pages we can have before we request that the cache be flushed */
+	int32 CurrentMaxGrayscaleAtlasPagesBeforeFlushRequest;
+
+	/** Number of color atlas pages we can have before we request that the cache be flushed */
+	int32 CurrentMaxColorAtlasPagesBeforeFlushRequest;
+
+	/** Number of multi-channel signed distance field atlas pages we can have before we request that the cache be flushed */
+	int32 CurrentMaxMsdfAtlasPagesBeforeFlushRequest;
+
+	/** Number of non-atlased textures we can have before we request that the cache be flushed */
+	int32 CurrentMaxNonAtlasedTexturesBeforeFlushRequest;
+
+	/** The frame counter the last time the font cache was asked to be flushed */
+	uint64 FrameCounterLastFlushRequest;
+};
+
 /**
  * Interface to allow the Slate atlas visualizer to query atlas page information for an atlas provider
  */
@@ -257,3 +359,5 @@ public:
 	virtual FAtlasSlotInfo GetAtlasSlotInfoAtPosition(FIntPoint InPosition, int32 AtlasIndex) const = 0;
 #endif
 };
+
+

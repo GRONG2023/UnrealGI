@@ -3,14 +3,21 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
+#include "EdGraph/EdGraphNode.h"
 #include "EdGraph/EdGraphPin.h"
+#include "HAL/Platform.h"
+#include "Internationalization/Text.h"
 #include "K2Node.h"
 #include "K2Node_AddPinInterface.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/UObjectGlobals.h"
+
 #include "K2Node_DoOnceMultiInput.generated.h"
 
 class FBlueprintActionDatabaseRegistrar;
 class UEdGraph;
+class UObject;
 
 UCLASS(MinimalAPI)
 class UK2Node_DoOnceMultiInput : public UK2Node, public IK2Node_AddPinInterface
@@ -25,7 +32,7 @@ class UK2Node_DoOnceMultiInput : public UK2Node, public IK2Node_AddPinInterface
 
 	/** Reference to the integer that contains */
 	UPROPERTY(transient)
-	class UK2Node_TemporaryVariable* DataNode;
+	TObjectPtr<class UK2Node_TemporaryVariable> DataNode;
 
 	virtual ERedirectType DoPinsMatchForReconstruction(const UEdGraphPin* NewPin, int32 NewPinIndex, const UEdGraphPin* OldPin, int32 OldPinIndex) const override;
 
@@ -33,14 +40,13 @@ private:
 
 	const static int32 NumBaseInputs = 1;
 
-	static int32 GetMaxInputPinsNum();
 	static FText GetNameForPin(int32 PinIndex, bool In);
 
 	FEdGraphPinType GetInType() const;
 	FEdGraphPinType GetOutType() const;
 
 	void AddPinsInner(int32 AdditionalPinIndex);
-	bool CanRemovePin(const UEdGraphPin* Pin) const;
+	bool CanRemovePin(const UEdGraphPin* Pin) const override;
 public:
 	BLUEPRINTGRAPH_API UEdGraphPin* FindOutPin() const;
 	BLUEPRINTGRAPH_API UEdGraphPin* FindSelfPin() const;
@@ -49,7 +55,7 @@ public:
 	BLUEPRINTGRAPH_API UEdGraphPin* GetInputPin(int32 InputPinIndex);
 	BLUEPRINTGRAPH_API UEdGraphPin* GetOutputPin(int32 InputPinIndex);
 
-	BLUEPRINTGRAPH_API void RemoveInputPin(UEdGraphPin* Pin);
+	virtual void RemoveInputPin(UEdGraphPin* Pin) override;
 
 	// UEdGraphNode interface
 	virtual void AllocateDefaultPins() override;

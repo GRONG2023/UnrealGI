@@ -6,22 +6,37 @@
 
 #pragma once
 
+#include "Containers/Set.h"
 #include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
+#include "EditorUtilityWidget.h"
+#include "HAL/Platform.h"
+#include "Templates/SharedPointer.h"
+#include "UObject/NameTypes.h"
 #include "UObject/Object.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/UObjectGlobals.h"
 #include "WidgetBlueprint.h"
 #include "Widgets/Docking/SDockTab.h"
+
 #include "EditorUtilityWidgetBlueprint.generated.h"
 
+class FSpawnTabArgs;
+class SDockTab;
+class SWidget;
 class UBlueprint;
+class UClass;
 class UEditorUtilityWidget;
+class UObject;
+class UWorld;
+
 enum class EAssetEditorCloseReason : uint8;
 enum class EMapChangeType : uint8;
 
 UCLASS()
 class BLUTILITY_API UEditorUtilityWidgetBlueprint : public UWidgetBlueprint
 {
-	GENERATED_UCLASS_BODY()
+	GENERATED_BODY()
 
 public:
 	virtual void BeginDestroy() override;
@@ -56,14 +71,34 @@ public:
 		return RegistrationName;
 	}
 
+	/** Returns the default desired tab display name that was specified for this widget */
+	FText GetTabDisplayName() const;
+
+	virtual UWidgetEditingProjectSettings* GetRelevantSettings() override;
+	virtual const UWidgetEditingProjectSettings* GetRelevantSettings() const override;
+
+public:
+	static void MarkTransientRecursive(UEditorUtilityWidget* UtilityWidget);
+
+private:
+	bool IsWidgetEnabled() const;
+
 	void ChangeTabWorld(UWorld* World, EMapChangeType MapChangeType);
 
 private:
+	// Should the widget be enabled when running PIE
+	UPROPERTY(Category = Settings, EditDefaultsOnly)
+	bool bIsEnabledInPIE = false;
+
+	// Should the widget be enabled when debugging BP
+	UPROPERTY(Category = Settings, EditDefaultsOnly)
+	bool bIsEnabledInDebugging = false;
+
 	FName RegistrationName;
 
 	TWeakPtr<SDockTab> CreatedTab;
 
 	UPROPERTY(Transient)
-	UEditorUtilityWidget* CreatedUMGWidget;
+	TObjectPtr<UEditorUtilityWidget> CreatedUMGWidget;
 
 };

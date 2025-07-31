@@ -2,14 +2,19 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "Widgets/SWidget.h"
-#include "Widgets/Input/NumericTypeInterface.h"
-#include "UnrealClient.h"
+#include "Containers/Array.h"
+#include "Containers/UnrealString.h"
+#include "HAL/Platform.h"
 #include "IPropertyTypeCustomization.h"
-#include "PropertyHandle.h"
+#include "Internationalization/Text.h"
+#include "Misc/Optional.h"
+#include "Templates/SharedPointer.h"
+#include "Types/SlateEnums.h"
 
+class IPropertyHandle;
 class SEditableTextBox;
+class SWidget;
+template <typename NumericType> struct INumericTypeInterface;
 
 class FMarginStructCustomization : public IPropertyTypeCustomization
 {
@@ -36,9 +41,8 @@ private:
 	 * Make the widget for the specified property
 	 *
 	 * @param PropertyIndex	The index of the child property to the make the widget for
-	 * @param bDisplayLabel	True if the label is to be visible
 	 */
-	TSharedRef<SWidget> MakeChildPropertyWidget( int32 PropertyIndex, bool bDisplayLabel ) const;
+	TSharedRef<SWidget> MakeChildPropertyWidget( int32 PropertyIndex) const;
 
 	/**
 	 Get the margin property value as text

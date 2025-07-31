@@ -1,11 +1,28 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "K2Node_StructOperation.h"
-#include "Engine/UserDefinedStruct.h"
-#include "EdGraphSchema_K2.h"
-#include "UserDefinedStructure/UserDefinedStructEditorData.h"
-#include "Kismet2/StructureEditorUtils.h"
+
+#include "BlueprintActionDatabaseRegistrar.h"
 #include "BlueprintActionFilter.h"
+#include "BlueprintFieldNodeSpawner.h"
+#include "BlueprintNodeBinder.h"
+#include "BlueprintNodeSpawner.h"
+#include "Containers/EnumAsByte.h"
+#include "EdGraph/EdGraphPin.h"
+#include "EdGraphSchema_K2.h"
+#include "Engine/UserDefinedStruct.h"
+#include "HAL/PlatformCrt.h"
+#include "Internationalization/Internationalization.h"
+#include "Internationalization/Text.h"
+#include "Kismet2/StructureEditorUtils.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/Guid.h"
+#include "Templates/Casts.h"
+#include "UObject/Field.h"
+#include "UObject/Object.h"
+#include "UObject/WeakObjectPtr.h"
+#include "UObject/WeakObjectPtrTemplates.h"
+#include "UserDefinedStructure/UserDefinedStructEditorData.h"
 
 //////////////////////////////////////////////////////////////////////////
 // UK2Node_StructOperation
@@ -61,12 +78,16 @@ bool UK2Node_StructOperation::DoRenamedPinsMatch(const UEdGraphPin* NewPin, cons
 		const UEdGraphSchema_K2* K2Schema = GetDefault<UEdGraphSchema_K2>(); 
 		const bool bCompatible = K2Schema && K2Schema->ArePinTypesCompatible(NewPin->PinType, OldPin->PinType);
 
-		if (bCompatible && (StructDirection == OldPin->Direction))
+		if (!bCompatible)
+		{
+			return false;
+		}
+		else if (StructDirection == OldPin->Direction)
 		{
 			// Struct name was changed, which is fine
 			return true;
 		}
-		else if (bCompatible && (VariablesDirection == OldPin->Direction))
+		else if (VariablesDirection == OldPin->Direction)
 		{
 			// Name of a member variable was changed, check guids and redirects
 			if ((NewPin->PersistentGuid == OldPin->PersistentGuid) && OldPin->PersistentGuid.IsValid())
@@ -83,6 +104,48 @@ bool UK2Node_StructOperation::DoRenamedPinsMatch(const UEdGraphPin* NewPin, cons
 	return false;
 }
 
+void UK2Node_StructOperation::SetupMenuActions(FBlueprintActionDatabaseRegistrar& ActionRegistrar, const FMakeStructSpawnerAllowedDelegate& AllowedDelegate, EEdGraphPinDirection PinDirectionToPromote) const
+{
+	struct GetMenuActions_Utils
+	{
+		static void SetNodeStruct(UEdGraphNode* NewNode, FFieldVariant /*StructField*/, TWeakObjectPtr<UScriptStruct> NonConstStructPtr)
+		{
+			UK2Node_StructOperation* StructNode = CastChecked<UK2Node_StructOperation>(NewNode);
+			StructNode->StructType = NonConstStructPtr.Get();
+		}
+
+		static void OverrideCategory(FBlueprintActionContext const& Context, IBlueprintNodeBinder::FBindingSet const& /*Bindings*/, FBlueprintActionUiSpec* UiSpecOut, TWeakObjectPtr<UScriptStruct> StructPtr, EEdGraphPinDirection PinDirectionToPromote)
+		{
+			for (UEdGraphPin* Pin : Context.Pins)
+			{
+				UScriptStruct* PinStruct = Cast<UScriptStruct>(Pin->PinType.PinSubCategoryObject.Get());
+				if ((PinStruct != nullptr) && (StructPtr.Get() == PinStruct) && (Pin->Direction == PinDirectionToPromote))
+				{
+					UiSpecOut->Category = NSLOCTEXT("BlueprintFunctionNodeSpawner", "EmptyFunctionCategory", "|");
+					break;
+				}
+			}
+		}
+	};
+
+	UClass* NodeClass = GetClass();
+	ActionRegistrar.RegisterStructActions(FBlueprintActionDatabaseRegistrar::FMakeStructSpawnerDelegate::CreateLambda([NodeClass, AllowedDelegate, PinDirectionToPromote](const UScriptStruct* Struct)->UBlueprintNodeSpawner*
+	{
+		UBlueprintFieldNodeSpawner* NodeSpawner = nullptr;
+
+		if (AllowedDelegate.Execute(Struct, false))
+		{
+			NodeSpawner = UBlueprintFieldNodeSpawner::Create(NodeClass, const_cast<UScriptStruct*>(Struct));
+			check(NodeSpawner != nullptr);
+			TWeakObjectPtr<UScriptStruct> NonConstStructPtr = MakeWeakObjectPtr(const_cast<UScriptStruct*>(Struct));
+			NodeSpawner->SetNodeFieldDelegate = UBlueprintFieldNodeSpawner::FSetNodeFieldDelegate::CreateStatic(GetMenuActions_Utils::SetNodeStruct, NonConstStructPtr);
+			NodeSpawner->DynamicUiSignatureGetter = UBlueprintFieldNodeSpawner::FUiSpecOverrideDelegate::CreateStatic(GetMenuActions_Utils::OverrideCategory, NonConstStructPtr, PinDirectionToPromote);
+
+		}
+		return NodeSpawner;
+	}));
+}
+
 FString UK2Node_StructOperation::GetPinMetaData(FName InPinName, FName InKey)
 {
 	for (TFieldIterator<FProperty> It(StructType); It; ++It)
@@ -96,9 +159,9 @@ FString UK2Node_StructOperation::GetPinMetaData(FName InPinName, FName InKey)
 	return Super::GetPinMetaData(InPinName, InKey);
 }
 
-FString UK2Node_StructOperation::GetFindReferenceSearchString() const
+FString UK2Node_StructOperation::GetFindReferenceSearchString_Impl(EGetFindReferenceSearchStringFlags InFlags) const
 {
-	return UEdGraphNode::GetFindReferenceSearchString();
+	return UEdGraphNode::GetFindReferenceSearchString_Impl(InFlags);
 }
 
 bool UK2Node_StructOperation::IsActionFilteredOut(const FBlueprintActionFilter& Filter)
@@ -107,6 +170,10 @@ bool UK2Node_StructOperation::IsActionFilteredOut(const FBlueprintActionFilter& 
 	if (StructType)
 	{
 		if (StructType->GetBoolMetaData(FBlueprintMetadata::MD_BlueprintInternalUseOnly))
+		{
+			bIsFiltered = true;
+		}
+		else if (StructType->GetBoolMetaDataHierarchical(FBlueprintMetadata::MD_BlueprintInternalUseOnlyHierarchical))
 		{
 			bIsFiltered = true;
 		}

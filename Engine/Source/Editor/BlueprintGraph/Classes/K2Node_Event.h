@@ -3,19 +3,36 @@
 
 #pragma once
 
+#include "Containers/Array.h"
+#include "Containers/UnrealString.h"
 #include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
-#include "Templates/SubclassOf.h"
-#include "Textures/SlateIcon.h"
-#include "Engine/MemberReference.h"
+#include "EdGraph/EdGraphNode.h"
 #include "EdGraph/EdGraphNodeUtils.h"
+#include "Engine/MemberReference.h"
+#include "HAL/Platform.h"
+#include "Internationalization/Text.h"
 #include "K2Node_EditablePinBase.h"
 #include "K2Node_EventNodeInterface.h"
+#include "KismetCompilerMisc.h"
+#include "Math/Color.h"
+#include "Templates/SharedPointer.h"
+#include "Templates/SubclassOf.h"
+#include "Textures/SlateIcon.h"
+#include "UObject/NameTypes.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/UObjectGlobals.h"
+
 #include "K2Node_Event.generated.h"
 
+class FArchive;
 class FKismetCompilerContext;
 class FNodeHandlingFunctor;
 class UEdGraph;
+class UEdGraphPin;
+class UFunction;
+class UObject;
+struct FEdGraphSchemaAction;
+template <typename KeyType, typename ValueType> struct TKeyValuePair;
 
 UCLASS(MinimalAPI)
 class UK2Node_Event : public UK2Node_EditablePinBase, public IK2Node_EventNodeInterface
@@ -70,8 +87,10 @@ class UK2Node_Event : public UK2Node_EditablePinBase, public IK2Node_EventNodeIn
 	BLUEPRINTGRAPH_API virtual FEdGraphNodeDeprecationResponse GetDeprecationResponse(EEdGraphNodeDeprecationType DeprecationType) const override;
 	BLUEPRINTGRAPH_API virtual UObject* GetJumpTargetForDoubleClick() const override;
 	BLUEPRINTGRAPH_API virtual FSlateIcon GetIconAndTint(FLinearColor& OutColor) const override;
-	BLUEPRINTGRAPH_API virtual FString GetFindReferenceSearchString() const override;
+	BLUEPRINTGRAPH_API virtual FString GetFindReferenceSearchString_Impl(EGetFindReferenceSearchStringFlags InFlags) const override;
 	BLUEPRINTGRAPH_API virtual void FindDiffs(UEdGraphNode* OtherNode, struct FDiffResults& Results) override;
+	BLUEPRINTGRAPH_API virtual bool HasExternalDependencies(TArray<class UStruct*>* OptionalOutput) const override;
+	BLUEPRINTGRAPH_API virtual void AddSearchMetaDataInfo(TArray<struct FSearchTagDataPair>& OutTaggedMetaData) const override;
 	//~ End UEdGraphNode Interface
 
 	//~ Begin UK2Node Interface
@@ -88,7 +107,6 @@ class UK2Node_Event : public UK2Node_EditablePinBase, public IK2Node_EventNodeIn
 	BLUEPRINTGRAPH_API virtual FText GetToolTipHeading() const override;
 	BLUEPRINTGRAPH_API virtual void GetNodeAttributes( TArray<TKeyValuePair<FString, FString>>& OutNodeAttributes ) const override;
 	BLUEPRINTGRAPH_API virtual FText GetMenuCategory() const override;
-	BLUEPRINTGRAPH_API virtual bool HasExternalDependencies(TArray<class UStruct*>* OptionalOutput) const override;
 	//~ End UK2Node Interface
 
 	//~ Begin IK2Node_EventNodeInterface Interface.
@@ -100,7 +118,7 @@ class UK2Node_Event : public UK2Node_EditablePinBase, public IK2Node_EventNodeIn
 	/** Checks if this event node is implementing an interface event */
 	BLUEPRINTGRAPH_API bool IsInterfaceEventNode() const;
 
-	BLUEPRINTGRAPH_API UFunction* FindEventSignatureFunction();
+	BLUEPRINTGRAPH_API UFunction* FindEventSignatureFunction() const;
 	BLUEPRINTGRAPH_API void UpdateDelegatePin(bool bSilent = false);
 	BLUEPRINTGRAPH_API FName GetFunctionName() const;
 	BLUEPRINTGRAPH_API virtual bool IsUsedByAuthorityOnlyDelegate() const { return false; }

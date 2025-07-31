@@ -20,7 +20,7 @@ struct FCurveEdEntry;
 struct FParticleEmitterInstance;
 
 UENUM()
-enum EBeam2Method
+enum EBeam2Method : int
 {
 	PEB2M_Distance UMETA(DisplayName="Distance"),
 	PEB2M_Target UMETA(DisplayName="Target"),
@@ -32,7 +32,7 @@ enum EBeam2Method
 // Beam Tapering Variables.
 //
 UENUM()
-enum EBeamTaperMethod
+enum EBeamTaperMethod : int
 {
 	PEBTM_None UMETA(DisplayName="None"),
 	PEBTM_Full UMETA(DisplayName="Full"),
@@ -224,6 +224,9 @@ class UParticleModuleTypeDataBeam2 : public UParticleModuleTypeDataBase
 	//~ Begin UParticleModuleTypeDataBase Interface
 	virtual FParticleEmitterInstance* CreateInstance(UParticleEmitter* InEmitterParent, UParticleSystemComponent* InComponent) override;
 	virtual void CacheModuleInfo(UParticleEmitter* Emitter) override;
+	virtual const FVertexFactoryType* GetVertexFactoryType() const override;
+	virtual EPrimitiveType GetPrimitiveType() const { return PT_TriangleStrip; }
+	virtual void CollectPSOPrecacheData(const UParticleEmitter* Emitter, FPSOPrecacheParams& OutParams) override;
 	//~ End UParticleModuleTypeDataBase Interface
 
 

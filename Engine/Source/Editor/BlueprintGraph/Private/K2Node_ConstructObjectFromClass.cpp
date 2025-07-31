@@ -1,24 +1,53 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "K2Node_ConstructObjectFromClass.h"
-#include "UObject/UnrealType.h"
-#include "EdGraphSchema_K2.h"
-#include "Kismet2/BlueprintEditorUtils.h"
-#include "BlueprintNodeSpawner.h"
-#include "EditorCategoryUtils.h"
+
 #include "BlueprintActionDatabaseRegistrar.h"
+#include "BlueprintNodeSpawner.h"
+#include "Containers/EnumAsByte.h"
+#include "EdGraph/EdGraph.h"
+#include "EdGraph/EdGraphPin.h"
+#include "EdGraphSchema_K2.h"
+#include "EditorCategoryUtils.h"
+#include "Engine/Blueprint.h"
 #include "FindInBlueprintManager.h"
+#include "HAL/PlatformCrt.h"
+#include "Internationalization/Internationalization.h"
+#include "Kismet2/BlueprintEditorUtils.h"
+#include "Misc/AssertionMacros.h"
+#include "Templates/Casts.h"
+#include "Templates/SubclassOf.h"
+#include "Templates/UnrealTemplate.h"
+#include "UObject/Class.h"
+#include "UObject/Object.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/UnrealNames.h"
+#include "UObject/UnrealType.h"
+#include "UObject/WeakObjectPtr.h"
+#include "UObject/WeakObjectPtrTemplates.h"
 
 struct FK2Node_ConstructObjectFromClassHelper
 {
-	static FName WorldContextPinName;
-	static FName ClassPinName;
-	static FName OuterPinName;
-};
+	static FName GetWorldContextPinName()
+	{
+		return TEXT("WorldContextObject");
+	}
 
-FName FK2Node_ConstructObjectFromClassHelper::WorldContextPinName(TEXT("WorldContextObject"));
-FName FK2Node_ConstructObjectFromClassHelper::ClassPinName(TEXT("Class"));
-FName FK2Node_ConstructObjectFromClassHelper::OuterPinName(TEXT("Outer"));
+	static FName GetClassPinName()
+	{
+		return TEXT("Class");
+	}
+
+	static FName GetOuterPinFriendlyName()
+	{
+		return TEXT("Outer");
+	}
+
+	static FName GetOuterPinName()
+	{
+		return UEdGraphSchema_K2::PN_Self;
+	}
+};
 
 #define LOCTEXT_NAMESPACE "K2Node_ConstructObjectFromClass"
 
@@ -49,18 +78,19 @@ void UK2Node_ConstructObjectFromClass::AllocateDefaultPins()
 	// If required add the world context pin
 	if (UseWorldContext())
 	{
-		CreatePin(EGPD_Input, UEdGraphSchema_K2::PC_Object, UObject::StaticClass(), FK2Node_ConstructObjectFromClassHelper::WorldContextPinName);
+		CreatePin(EGPD_Input, UEdGraphSchema_K2::PC_Object, UObject::StaticClass(), FK2Node_ConstructObjectFromClassHelper::GetWorldContextPinName());
 	}
 
 	// Add blueprint pin
-	UEdGraphPin* ClassPin = CreatePin(EGPD_Input, UEdGraphSchema_K2::PC_Class, GetClassPinBaseClass(), FK2Node_ConstructObjectFromClassHelper::ClassPinName);
+	UEdGraphPin* ClassPin = CreatePin(EGPD_Input, UEdGraphSchema_K2::PC_Class, GetClassPinBaseClass(), FK2Node_ConstructObjectFromClassHelper::GetClassPinName());
 	
 	// Result pin
 	UEdGraphPin* ResultPin = CreatePin(EGPD_Output, UEdGraphSchema_K2::PC_Object, GetClassPinBaseClass(), UEdGraphSchema_K2::PN_ReturnValue);
 	
 	if (UseOuter())
 	{
-		UEdGraphPin* OuterPin = CreatePin(EGPD_Input, UEdGraphSchema_K2::PC_Object, UObject::StaticClass(), FK2Node_ConstructObjectFromClassHelper::OuterPinName);
+		UEdGraphPin* OuterPin = CreatePin(EGPD_Input, UEdGraphSchema_K2::PC_Object, UObject::StaticClass(), UEdGraphSchema_K2::PN_Self);
+		OuterPin->PinFriendlyName = FText::FromName(FK2Node_ConstructObjectFromClassHelper::GetOuterPinFriendlyName());
 	}
 
 	Super::AllocateDefaultPins();
@@ -68,7 +98,7 @@ void UK2Node_ConstructObjectFromClass::AllocateDefaultPins()
 
 UEdGraphPin* UK2Node_ConstructObjectFromClass::GetOuterPin() const
 {
-	UEdGraphPin* Pin = FindPin(FK2Node_ConstructObjectFromClassHelper::OuterPinName);
+	UEdGraphPin* Pin = FindPin(FK2Node_ConstructObjectFromClassHelper::GetOuterPinName());
 	ensure(nullptr == Pin || Pin->Direction == EGPD_Input);
 	return Pin;
 }
@@ -167,6 +197,18 @@ void UK2Node_ConstructObjectFromClass::ReallocatePinsDuringReconstruction(TArray
 	RestoreSplitPins(OldPins);
 }
 
+UK2Node::ERedirectType UK2Node_ConstructObjectFromClass::DoPinsMatchForReconstruction(const UEdGraphPin* NewPin, int32 NewPinIndex, const UEdGraphPin* OldPin, int32 OldPinIndex) const
+{
+	// the name of the outer pin was changed and its friendly name was updated to match
+	// the legacy naming. Use this to identify the change
+	if (NewPin->PinName == FK2Node_ConstructObjectFromClassHelper::GetOuterPinName() &&
+		OldPin->PinName == FK2Node_ConstructObjectFromClassHelper::GetOuterPinFriendlyName())
+	{
+		return ERedirectType_Name;
+	}
+	return Super::DoPinsMatchForReconstruction(NewPin, NewPinIndex, OldPin, OldPinIndex);
+}
+
 void UK2Node_ConstructObjectFromClass::PostPlacedNewNode()
 {
 	Super::PostPlacedNewNode();
@@ -175,6 +217,21 @@ void UK2Node_ConstructObjectFromClass::PostPlacedNewNode()
 	{
 		CreatePinsForClass(UseSpawnClass);
 	}
+}
+
+FString UK2Node_ConstructObjectFromClass::GetPinMetaData(FName InPinName, FName InKey)
+{
+	FString MetaData = Super::GetPinMetaData(InPinName, InKey);
+
+	if (MetaData.IsEmpty())
+	{
+		if (InPinName == FK2Node_ConstructObjectFromClassHelper::GetClassPinName() && InKey == FBlueprintMetadata::MD_AllowAbstractClasses)
+		{
+			MetaData = TEXT("false");
+		}
+	}
+
+	return MetaData;
 }
 
 void UK2Node_ConstructObjectFromClass::AddSearchMetaDataInfo(TArray<struct FSearchTagDataPair>& OutTaggedMetaData) const
@@ -193,9 +250,9 @@ bool UK2Node_ConstructObjectFromClass::IsSpawnVarPin(UEdGraphPin* Pin) const
 	return(	Pin->PinName != UEdGraphSchema_K2::PN_Execute &&
 			Pin->PinName != UEdGraphSchema_K2::PN_Then &&
 			Pin->PinName != UEdGraphSchema_K2::PN_ReturnValue &&
-			Pin->PinName != FK2Node_ConstructObjectFromClassHelper::ClassPinName &&
-			Pin->PinName != FK2Node_ConstructObjectFromClassHelper::WorldContextPinName &&
-			Pin->PinName != FK2Node_ConstructObjectFromClassHelper::OuterPinName);
+			Pin->PinName != FK2Node_ConstructObjectFromClassHelper::GetClassPinName() &&
+			Pin->PinName != FK2Node_ConstructObjectFromClassHelper::GetWorldContextPinName() &&
+			Pin->PinName != FK2Node_ConstructObjectFromClassHelper::GetOuterPinName());
 }
 
 void UK2Node_ConstructObjectFromClass::OnClassPinChanged()
@@ -251,7 +308,7 @@ void UK2Node_ConstructObjectFromClass::PinConnectionListChanged(UEdGraphPin* Pin
 {
 	Super::PinConnectionListChanged(Pin);
 
-	if (Pin && (Pin->PinName == FK2Node_ConstructObjectFromClassHelper::ClassPinName))
+	if (Pin && (Pin->PinName == FK2Node_ConstructObjectFromClassHelper::GetClassPinName()))
 	{
 		OnClassPinChanged();
 	}
@@ -277,7 +334,7 @@ void UK2Node_ConstructObjectFromClass::GetPinHoverText(const UEdGraphPin& Pin, F
 
 void UK2Node_ConstructObjectFromClass::PinDefaultValueChanged(UEdGraphPin* ChangedPin) 
 {
-	if (ChangedPin && (ChangedPin->PinName == FK2Node_ConstructObjectFromClassHelper::ClassPinName))
+	if (ChangedPin && (ChangedPin->PinName == FK2Node_ConstructObjectFromClassHelper::GetClassPinName()))
 	{
 		OnClassPinChanged();
 	}
@@ -302,7 +359,7 @@ UEdGraphPin* UK2Node_ConstructObjectFromClass::GetClassPin(const TArray<UEdGraph
 	UEdGraphPin* Pin = nullptr;
 	for (UEdGraphPin* TestPin : *PinsToSearch)
 	{
-		if (TestPin && TestPin->PinName == FK2Node_ConstructObjectFromClassHelper::ClassPinName)
+		if (TestPin && TestPin->PinName == FK2Node_ConstructObjectFromClassHelper::GetClassPinName())
 		{
 			Pin = TestPin;
 			break;
@@ -314,7 +371,7 @@ UEdGraphPin* UK2Node_ConstructObjectFromClass::GetClassPin(const TArray<UEdGraph
 
 UEdGraphPin* UK2Node_ConstructObjectFromClass::GetWorldContextPin() const
 {
-	UEdGraphPin* Pin = FindPin(FK2Node_ConstructObjectFromClassHelper::WorldContextPinName);
+	UEdGraphPin* Pin = FindPin(FK2Node_ConstructObjectFromClassHelper::GetWorldContextPinName());
 	check(Pin == nullptr || Pin->Direction == EGPD_Input);
 	return Pin;
 }
@@ -406,7 +463,7 @@ bool UK2Node_ConstructObjectFromClass::HasExternalDependencies(TArray<class UStr
 {
 	UClass* SourceClass = GetClassToSpawn();
 	const UBlueprint* SourceBlueprint = GetBlueprint();
-	const bool bResult = (SourceClass && (SourceClass->ClassGeneratedBy != SourceBlueprint));
+	const bool bResult = (SourceClass && (SourceClass->ClassGeneratedBy.Get() != SourceBlueprint));
 	if (bResult && OptionalOutput)
 	{
 		OptionalOutput->AddUnique(SourceClass);

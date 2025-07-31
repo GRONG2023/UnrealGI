@@ -2,10 +2,16 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
 #include "BehaviorTreeGraphNode.h"
+#include "CoreMinimal.h"
+#include "EdGraph/EdGraphNode.h"
+#include "Internationalization/Text.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/UObjectGlobals.h"
+
 #include "BehaviorTreeGraphNode_Composite.generated.h"
+
+class UObject;
 
 UCLASS()
 class BEHAVIORTREEEDITOR_API UBehaviorTreeGraphNode_Composite : public UBehaviorTreeGraphNode
@@ -22,4 +28,10 @@ class BEHAVIORTREEEDITOR_API UBehaviorTreeGraphNode_Composite : public UBehavior
 
 	/** check if node can accept breakpoints */
 	virtual bool CanPlaceBreakpoints() const override { return true; }
+
+	virtual FLinearColor GetBackgroundColor(bool bIsActiveForDebugger) const override;
+
+protected:
+
+	virtual void PostPasteNode() override;
 };

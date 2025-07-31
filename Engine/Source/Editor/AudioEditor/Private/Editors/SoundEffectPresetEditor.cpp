@@ -1,36 +1,51 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 #include "SoundEffectPresetEditor.h"
 
+#include "Audio/SoundEffectPresetWidgetInterface.h"
 #include "Blueprint/UserWidget.h"
-#include "Containers/Set.h"
-#include "EditorStyleSet.h"
-#include "Framework/Commands/UIAction.h"
+#include "Containers/List.h"
+#include "CoreGlobals.h"
+#include "Delegates/Delegate.h"
+#include "DetailsViewArgs.h"
+#include "Editor.h"
+#include "Editor/EditorEngine.h"
+#include "Engine/Engine.h"
 #include "Framework/Docking/TabManager.h"
-#include "Framework/MultiBox/MultiBoxBuilder.h"
 #include "Framework/MultiBox/MultiBoxDefs.h"
-#include "Framework/MultiBox/MultiBoxExtender.h"
+#include "HAL/PlatformCrt.h"
 #include "IDetailsView.h"
+#include "Internationalization/Internationalization.h"
+#include "Layout/Margin.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/Attribute.h"
 #include "Modules/ModuleManager.h"
 #include "PropertyEditorModule.h"
+#include "Sound/SoundEffectPreset.h"
+#include "Styling/AppStyle.h"
+#include "Textures/SlateIcon.h"
+#include "UObject/Class.h"
+#include "UObject/ObjectMacros.h"
 #include "UObject/StrongObjectPtr.h"
-#include "UObject/WeakObjectPtrTemplates.h"
+#include "UObject/UObjectGlobals.h"
+#include "UObject/UnrealType.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
 #include "Widgets/Docking/SDockTab.h"
-#include "Widgets/Input/SButton.h"
 #include "Widgets/Layout/SBorder.h"
-#include "WidgetBlueprint.h"
-#include "AudioEditorModule.h"
+#include "Widgets/Text/STextBlock.h"
+
+class UWorld;
+struct FSlateBrush;
 
 
 #define LOCTEXT_NAMESPACE "SoundEffectPresetEditor"
 
 
-const FName FSoundEffectPresetEditor::AppIdentifier(TEXT("SoundEffectPresetEditorApp"));
-const FName FSoundEffectPresetEditor::PropertiesTabId(TEXT("SoundEffectPresetEditor_Properties"));
-const FName FSoundEffectPresetEditor::UserWidgetTabId(TEXT("SoundEffectPresetEditor_UserWidget"));
+const FName FSoundEffectPresetEditor::AppIdentifier("SoundEffectPresetEditorApp");
+const FName FSoundEffectPresetEditor::PropertiesTabId("SoundEffectPresetEditor_Properties");
+const FName FSoundEffectPresetEditor::UserWidgetTabId("SoundEffectPresetEditor_UserWidget");
 
 FSoundEffectPresetEditor::FSoundEffectPresetEditor()
 	: SoundEffectPreset(nullptr)
-	, UserWidget(nullptr)
 {
 }
 
@@ -43,14 +58,17 @@ void FSoundEffectPresetEditor::RegisterTabSpawners(const TSharedRef<FTabManager>
 	InTabManager->RegisterTabSpawner(PropertiesTabId, FOnSpawnTab::CreateSP(this, &FSoundEffectPresetEditor::SpawnTab_Properties))
 		.SetDisplayName(LOCTEXT("DetailsTab", "Details"))
 		.SetGroup(WorkspaceMenuCategory.ToSharedRef())
-		.SetIcon(FSlateIcon(FEditorStyle::GetStyleSetName(), "LevelEditor.Tabs.Details"));
+		.SetIcon(FSlateIcon(FAppStyle::GetAppStyleSetName(), "LevelEditor.Tabs.Details"));
 
 
-	if (UserWidget)
+	for (int32 i = 0; i < UserWidgets.Num(); i++)
 	{
+		TStrongObjectPtr<UUserWidget> UserWidget = UserWidgets[i];
 		const FString ClassName = SoundEffectPreset->GetClass()->GetName();
-		FSlateIcon BPIcon(FEditorStyle::GetStyleSetName(), "LevelEditor.CreateClassBlueprint");
-		InTabManager->RegisterTabSpawner(UserWidgetTabId, FOnSpawnTab::CreateLambda([this](const FSpawnTabArgs& Args) { return SpawnTab_UserWidgetEditor(Args); }))
+		FSlateIcon BPIcon(FAppStyle::GetAppStyleSetName(), "LevelEditor.CreateClassBlueprint");
+
+		const FName UserWidgetTabIdIndexed = FName(UserWidgetTabId.ToString() + FString(TEXT("_")) + FString::FromInt(i));
+		InTabManager->RegisterTabSpawner(UserWidgetTabIdIndexed, FOnSpawnTab::CreateLambda([this, i](const FSpawnTabArgs& Args) { return SpawnTab_UserWidgetEditor(Args, i); }))
 			.SetDisplayName(FText::Format(LOCTEXT("UserEditorTabFormat", "{0} Editor"), FText::FromString(ClassName)))
 			.SetGroup(WorkspaceMenuCategory.ToSharedRef())
 			.SetIcon(BPIcon);
@@ -61,22 +79,30 @@ void FSoundEffectPresetEditor::UnregisterTabSpawners(const TSharedRef<FTabManage
 {
 	InTabManager->UnregisterTabSpawner(PropertiesTabId);
 
-	if (UserWidget)
+	for (int32 i = 0; i < UserWidgets.Num(); i++)
 	{
-		InTabManager->UnregisterTabSpawner(UserWidgetTabId);
+		const FName UserWidgetTabIdIndexed = FName(UserWidgetTabId.ToString() + FString(TEXT("_")) + FString::FromInt(i));
+		InTabManager->UnregisterTabSpawner(UserWidgetTabIdIndexed);
 	}
 }
 
-void FSoundEffectPresetEditor::Init(const EToolkitMode::Type Mode, const TSharedPtr<IToolkitHost>& InitToolkitHost, USoundEffectPreset* InPresetToEdit)
+void FSoundEffectPresetEditor::Init(const EToolkitMode::Type Mode, const TSharedPtr<IToolkitHost>& InitToolkitHost, USoundEffectPreset* InPresetToEdit, const TArray<UUserWidget*>& InWidgetBlueprints)
 {
-	check(InPresetToEdit);
+	if (!ensure(InPresetToEdit))
+	{
+		return;
+	}
 
-	SoundEffectPreset = InPresetToEdit;
-	InitPresetWidget();
-
+	SoundEffectPreset = TStrongObjectPtr<USoundEffectPreset>(InPresetToEdit);
+	InitPresetWidgets(InWidgetBlueprints);
+	
 	// Support undo/redo
 	InPresetToEdit->SetFlags(RF_Transactional);
-	GEditor->RegisterForUndo(this);
+
+	if (GEditor)
+	{
+		GEditor->RegisterForUndo(this);
+	}
 
 	FDetailsViewArgs Args;
 	Args.bHideSelectionTip = true;
@@ -96,7 +122,7 @@ void FSoundEffectPresetEditor::Init(const EToolkitMode::Type Mode, const TShared
 			->AddTab(PropertiesTabId, ETabState::OpenedTab)
 		);
 
-	if (UserWidget)
+	if (!UserWidgets.IsEmpty())
 	{
 		TabSplitter->Split
 		(
@@ -113,18 +139,11 @@ void FSoundEffectPresetEditor::Init(const EToolkitMode::Type Mode, const TShared
 		);
 	}
 
-	TSharedRef<FTabManager::FLayout> StandaloneDefaultLayout = FTabManager::NewLayout("Standalone_SoundEffectPresetEditor_Layout_v1")
+	TSharedRef<FTabManager::FLayout> StandaloneDefaultLayout = FTabManager::NewLayout("Standalone_SoundEffectPresetEditor_Layout_v2")
 		->AddArea
 		(
 			FTabManager::NewPrimaryArea()
 			->SetOrientation(Orient_Vertical)
-			->Split
-			(
-				FTabManager::NewStack()
-				->SetSizeCoefficient(0.1f)
-				->SetHideTabWell(true)
-				->AddTab(GetToolbarTabId(), ETabState::OpenedTab)
-			)
 			->Split(TabSplitter)
 		);
 
@@ -144,6 +163,22 @@ void FSoundEffectPresetEditor::Init(const EToolkitMode::Type Mode, const TShared
 		bUseSmallIcons);
 }
 
+bool FSoundEffectPresetEditor::CloseWindow(EAssetEditorCloseReason InCloseReason)
+{
+	if (FAssetEditorToolkit::CloseWindow(InCloseReason))
+	{
+		UserWidgets.Reset();
+		return true;
+	}
+
+	return false;
+}
+
+FName FSoundEffectPresetEditor::GetEditorName() const
+{
+	return "Preset Editor";
+}
+
 FName FSoundEffectPresetEditor::GetToolkitFName() const
 {
 	return FName("SoundEffectPresetEditor");
@@ -151,10 +186,10 @@ FName FSoundEffectPresetEditor::GetToolkitFName() const
 
 FText FSoundEffectPresetEditor::GetBaseToolkitName() const
 {
-	return LOCTEXT("AppLabel", "Sound Effect Editor");
+	return LOCTEXT("AppLabel", "Sound Effect Preset Editor");
 }
 
-void FSoundEffectPresetEditor::InitPresetWidget()
+void FSoundEffectPresetEditor::InitPresetWidgets(const TArray<UUserWidget*>& InWidgets)
 {
 	if (!SoundEffectPreset)
 	{
@@ -163,15 +198,12 @@ void FSoundEffectPresetEditor::InitPresetWidget()
 
 	if (UWorld* World = GEditor->GetEditorWorldContext().World())
 	{
-		IAudioEditorModule* AudioEditorModule = &FModuleManager::LoadModuleChecked<IAudioEditorModule>("AudioEditor");
-
-		UClass* PresetClass = SoundEffectPreset->GetClass();
-		if (const UWidgetBlueprint* WidgetBP = AudioEditorModule->GetSoundEffectPresetWidget(PresetClass))
+		for (UUserWidget* Widget : InWidgets)
 		{
-			if (UClass* GeneratedClass = WidgetBP->GeneratedClass.Get())
+			if (Widget)
 			{
-				UserWidget = CreateWidget<USoundEffectPresetUserWidget>(World, GeneratedClass);
-				UserWidget->Preset = SoundEffectPreset;
+				UserWidgets.Add(TStrongObjectPtr<UUserWidget>(Widget));
+				ISoundEffectPresetWidgetInterface::Execute_OnConstructed(Widget, SoundEffectPreset.Get());
 			}
 		}
 	}
@@ -196,22 +228,34 @@ EOrientation FSoundEffectPresetEditor::GetSnapLabelOrientation() const
 
 void FSoundEffectPresetEditor::NotifyPostChange(const FPropertyChangedEvent& PropertyChangedEvent, FProperty* PropertyThatChanged)
 {
-	if (UserWidget && SoundEffectPreset)
+	if (SoundEffectPreset)
 	{
-		const FName PropertyName = PropertyThatChanged->GetFName();
-		UserWidget->OnPresetChanged(PropertyName);
+		for (TStrongObjectPtr<UUserWidget>& UserWidget : UserWidgets)
+		{
+			const FName PropertyName = PropertyThatChanged->GetFName();
+			ISoundEffectPresetWidgetInterface::Execute_OnPropertyChanged(UserWidget.Get(), SoundEffectPreset.Get(), PropertyName);
+		}
 	}
 }
 
-void FSoundEffectPresetEditor::AddReferencedObjects(FReferenceCollector& Collector)
+void FSoundEffectPresetEditor::NotifyPostChange(const FPropertyChangedEvent& PropertyChangedEvent, FEditPropertyChain* PropertyThatChanged)
 {
-	Collector.AddReferencedObject(SoundEffectPreset);
-	Collector.AddReferencedObject(UserWidget);
-}
-
-FString FSoundEffectPresetEditor::GetReferencerName() const
-{
-	return "SoundEffectPresetEditor";
+	if (SoundEffectPreset)
+	{
+		for (TStrongObjectPtr<UUserWidget>& UserWidget : UserWidgets)
+		{
+			auto Node = PropertyThatChanged->GetHead();
+			while(Node)
+			{
+				if (FProperty* Property = Node->GetValue())
+				{
+					const FName PropertyName = Property->GetFName();
+					ISoundEffectPresetWidgetInterface::Execute_OnPropertyChanged(UserWidget.Get(), SoundEffectPreset.Get(), PropertyName);
+				}
+				Node = Node->GetNextNode();
+			}
+		}
+	}
 }
 
 TSharedRef<SDockTab> FSoundEffectPresetEditor::SpawnTab_Properties(const FSpawnTabArgs& Args)
@@ -219,42 +263,55 @@ TSharedRef<SDockTab> FSoundEffectPresetEditor::SpawnTab_Properties(const FSpawnT
 	check(Args.GetTabId() == PropertiesTabId);
 
 	return SNew(SDockTab)
-		.Icon(FEditorStyle::GetBrush("LevelEditor.Tabs.Details"))
 		.Label(LOCTEXT("SoundSoundEffectDetailsTitle", "Details"))
 		[
 			PropertiesView.ToSharedRef()
 		];
 }
 
-TSharedRef<SDockTab> FSoundEffectPresetEditor::SpawnTab_UserWidgetEditor(const FSpawnTabArgs& Args)
+TSharedRef<SDockTab> FSoundEffectPresetEditor::SpawnTab_UserWidgetEditor(const FSpawnTabArgs& Args, int32 WidgetIndex)
 {
-	const FSlateBrush* IconBrush = FEditorStyle::GetBrush("SoundEffectPresetEditor.Tabs.Properties");
-	const FText Label = FText::FromString(GetEditingObject()->GetName());
-
-	if (!UserWidget)
+	FName IconBrushName = ISoundEffectPresetWidgetInterface::Execute_GetIconBrushName(UserWidgets[WidgetIndex].Get());
+	if (IconBrushName == FName())
 	{
-		return SNew(SDockTab)
-			.Icon(IconBrush)
+		IconBrushName = "GenericEditor.Tabs.Properties";
+	}
+
+	const FSlateBrush* IconBrush = FAppStyle::GetBrush(IconBrushName);
+
+	FText Label = FText::FromString(SoundEffectPreset->GetName());
+	if (UserWidgets.Num() < WidgetIndex)
+	{
+		TSharedPtr<SDockTab> NewTab = SNew(SDockTab)
 			.Label(Label)
 			.TabColorScale(GetTabColorScale())
 			[
 				SNew(STextBlock)
 					.Text(LOCTEXT("InvalidPresetEditor", "No editor available for SoundEffectPreset.  Widget Blueprint not found."))
 			];
+		NewTab->SetTabIcon(IconBrush);
+		return NewTab.ToSharedRef();
 	}
 
-	return SNew(SDockTab)
-		.Icon(IconBrush)
+	const FText CustomLabel = ISoundEffectPresetWidgetInterface::Execute_GetEditorName(UserWidgets[WidgetIndex].Get());
+	if (!CustomLabel.IsEmpty())
+	{
+		Label = CustomLabel;
+	}
+
+	TSharedPtr<SDockTab> NewTab = SNew(SDockTab)
 		.Label(Label)
 		.TabColorScale(GetTabColorScale())
 		[
 			SNew(SBorder)
-			.BorderImage(FEditorStyle::GetBrush("ToolPanel.GroupBorder"))
+			.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
 			.Padding(0.0f)
 			[
-				UserWidget->TakeWidget()
+				UserWidgets[WidgetIndex]->TakeWidget()
 			]
 		];
+	NewTab->SetTabIcon(IconBrush);
+	return NewTab.ToSharedRef();
 }
 
 void FSoundEffectPresetEditor::PostUndo(bool bSuccess)

@@ -2,18 +2,31 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "UObject/Object.h"
-#include "Features/IModularFeature.h"
-#include "ContentBrowserItemData.h"
+#include "Containers/Array.h"
+#include "Containers/ArrayView.h"
+#include "Containers/StringFwd.h"
+#include "Containers/UnrealString.h"
 #include "ContentBrowserDataFilter.h"
+#include "ContentBrowserDataSubsystem.h"
+#include "ContentBrowserItemData.h"
+#include "ContentBrowserVirtualPathTree.h"
+#include "CoreMinimal.h"
+#include "Features/IModularFeature.h"
+#include "Templates/SharedPointer.h"
+#include "UObject/NameTypes.h"
+#include "UObject/Object.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/UObjectGlobals.h"
+
 #include "ContentBrowserDataSource.generated.h"
 
-struct FAssetData;
 class FAssetThumbnail;
-
 class FDragDropEvent;
 class FDragDropOperation;
+class FText;
+struct FAssetData;
+struct FContentBrowserItemPath;
+template <typename FuncType> class TFunctionRef;
 
 namespace ContentBrowserItemAttributes
 {
@@ -34,6 +47,18 @@ namespace ContentBrowserItemAttributes
 	 * Type: FText.
 	 */
 	const FName ItemDescription = "ItemDescription";
+
+	/**
+	 * Attribute key that can be used to query the internal disk size of an item.
+	 * Type: int64.
+	 */
+	const FName ItemDiskSize = "ItemDiskSize";
+
+	/**
+	 * Attribute key that can be used to query if the item has virtualized data or not.
+	 * Type: bool.
+	 */
+	const FName VirtualizedData = "HasVirtualizedData";
 
 	/**
 	 * Attribute key that can be used to query whether the given item is considered to be developer content.
@@ -64,6 +89,13 @@ namespace ContentBrowserItemAttributes
 	 * Type: bool.
 	 */
 	const FName ItemIsPluginContent = "ItemIsPluginContent";
+
+	/**
+	 * Attribute key that can be used to query whether the given item is considered to be a custom virtual folder for organizational purposes
+	 * that should be presented with a different folder icon.
+	 * Type: bool.
+	 */
+	const FName ItemIsCustomVirtualFolder = "ItemIsCustomVirtualFolder";
 
 	/**
 	 * Attribute key that can be used to query the display color of an item.
@@ -126,10 +158,9 @@ public:
 	 * Initialize this data source instance, optionally registering it once the initialization has finished (@see RegisterDataSource).
 	 * @note This function is non-virtual because its signature may change on derived types, and so should be called directly on an instance of the correct type.
 	 *
-	 * @param InMountRoot The virtual root path that items in this data source appear under, in the form "/My/Mount/Root".
 	 * @param InAutoRegister True to automatically register this instance once initialization has finished.
 	 */
-	void Initialize(const FName InMountRoot, const bool InAutoRegister = true);
+	void Initialize(const bool InAutoRegister = true);
 
 	/**
 	 * Shutdown this data source instance.
@@ -142,18 +173,6 @@ public:
 	 * @note Called once every 0.1 seconds, prior to the Content Browser Data Subsystem emitting any pending item update notifications.
 	 */
 	virtual void Tick(const float InDeltaTime);
-
-	/**
-	 * Get the virtual mount root that was passed to Initialize.
-	 */
-	FName GetVirtualMountRoot() const;
-
-	/**
-	 * Get the virtual folder paths required to get to the virtual mount root of this data source instance.
-	 * eg) A virtual mount root of "/One/Two" would return ["/", "/One", "/One/Two"].
-	 */
-	TArrayView<const FName> GetVirtualMountRootHierarchy() const;
-
 	/**
 	 * Test whether the given virtual path is under the virtual mount root that was passed to Initialize.
 	 * @note This also returns true if the given virtual path *is* the virtual mount root.
@@ -192,6 +211,37 @@ public:
 	 */
 	virtual void EnumerateItemsAtPath(const FName InPath, const EContentBrowserItemTypeFilter InItemTypeFilter, TFunctionRef<bool(FContentBrowserItemData&&)> InCallback);
 
+	
+	/**
+	 * Enumerate the items (folders and/or files) that exist at the given content browser paths.
+	 * @note Multiple items may have the same virtual path if they are different types, or come from different data sources.
+	 *
+	 * @param InPaths The paths to search for
+	 * @param InItemTypeFilter The types of items we want to find.
+	 * @param InCallback The function to invoke for each matching item (return true to continue enumeration).
+	 */
+	virtual bool EnumerateItemsAtPaths(const TArrayView<FContentBrowserItemPath> InPaths, const EContentBrowserItemTypeFilter InItemTypeFilter, TFunctionRef<bool(FContentBrowserItemData&&)> InCallback);
+
+	/**
+	 * Enumerate the items (files) that exist for the given objects.
+	 * @note Multiple items may have the same virtual path if they are different types, or come from different data sources.
+	 *
+	 * @param InObjects The objects to enumerate
+	 * @param InCallback The function to invoke for each matching item (return true to continue enumeration).
+	 */
+	virtual bool EnumerateItemsForObjects(const TArrayView<UObject*> InObjects, TFunctionRef<bool(FContentBrowserItemData&&)> InCallback);
+
+	/**
+	 * Get a list of other paths that the data source may be using to represent a specific path
+	 *
+	 * @param The internal path (or object path) of an asset to get aliases for
+	 * @return All alternative paths that represent the input path (not including the input path itself)
+	 */
+	virtual TArray<FContentBrowserItemPath> GetAliasesForPath(const FSoftObjectPath& InInternalPath) const;
+
+	UE_DEPRECATED(5.1, "FNames containing full asset paths are deprecated. Use FSoftObjectPath instead.")
+	TArray<FContentBrowserItemPath> GetAliasesForPath(FName InInternalPath) const;
+
 	/**
 	 * Query whether this data source instance is currently discovering content, and retrieve an optional status message that can be shown in the UI.
 	 */
@@ -204,11 +254,10 @@ public:
 	virtual bool PrioritizeSearchPath(const FName InPath);
 
 	/**
-	 * Query whether the given virtual folder should be visible if the UI is asking to hide empty content folders.
+	 * Query whether the given virtual folder should be visible in the UI.
 	 * @note This function must be able to answer the question quickly or not at all (and assume visible). It *must not* block doing something like a file system scan.
-	 * @note "Empty" in this case means that it recursively contains no file items.
 	 */
-	virtual bool IsFolderVisibleIfHidingEmpty(const FName InPath);
+	virtual bool IsFolderVisible(const FName InPath, const EContentBrowserIsFolderVisibleFlags InFlags);
 
 	/*
 	 * Query whether a folder can be created at the given virtual path, optionally providing error information if it cannot.
@@ -231,7 +280,8 @@ public:
 	virtual bool CreateFolder(const FName InPath, FContentBrowserItemDataTemporaryContext& OutPendingItem);
 
 	/*
-	 * Query whether the given item passes the given compiled filter.
+	 * Query whether the given item passes the given compiled filter. Should be called after ConvertItemForFilter
+	 *
 	 * @see CompileFilter.
 	 *
 	 * @param InItem The item to query.
@@ -240,6 +290,19 @@ public:
 	 * @return True if the item passes the filter, false otherwise.
 	 */
 	virtual bool DoesItemPassFilter(const FContentBrowserItemData& InItem, const FContentBrowserDataCompiledFilter& InFilter);
+
+
+	/*
+	 * Let the compiled filter decide the payload and the type of the item 
+	 * Some Compiled filter might change the type/payload of the item. This allow these filter to work properly and should be called before the filtering (see DoesItemPassFilter)
+	 * @see CompileFilter
+	 * 
+	 * @param Item The item that might be converted
+	 * @param InFilter The compiled filter used to possibly convert the matching items.
+	 * 
+	 * @return True if the item was converted by the filter.
+	 */
+	virtual bool ConvertItemForFilter(FContentBrowserItemData& Item, const FContentBrowserDataCompiledFilter& InFilter);
 
 	/**
 	 * Query the value of the given attribute on the given item.
@@ -312,6 +375,35 @@ public:
 	 * @return True if any items were opened for editing, false otherwise.
 	 */
 	virtual bool BulkEditItems(TArrayView<const FContentBrowserItemData> InItems);
+
+	/**
+     * Query whether the given item is can be viewed (a read-only asset editor), optionally providing error information if it cannot.
+     *
+     * @param InItem The item to query.
+     * @param OutErrorMessage Optional error message to fill on failure.
+     *
+     * @return True if the item can be viewed in a read-only editor, false otherwise.
+     */
+    virtual bool CanViewItem(const FContentBrowserItemData& InItem, FText* OutErrorMsg);
+
+    /**
+     * Attempt to open the given item for read-only viewing.
+     *
+     * @param InItem The item to view.
+     *
+     * @return True if the item was opened for read-only viewing, false otherwise.
+     */
+    virtual bool ViewItem(const FContentBrowserItemData& InItem);
+
+    /**
+     * Attempt to open the given items for read-only viewing.
+     * @note The default implementation of this will call ViewItem for each item. Override if you can provide a more efficient implementation.
+     *
+     * @param InItems The items to view.
+     *
+     * @return True if any items were opened for read-only viewing, false otherwise.
+     */
+    virtual bool BulkViewItems(TArrayView<const FContentBrowserItemData> InItems);
 
 	/**
 	 * Query whether the given item is can be previewed, optionally providing error information if it cannot.
@@ -434,6 +526,34 @@ public:
 	 * @return True if any items were deleted, false otherwise.
 	 */
 	virtual bool BulkDeleteItems(TArrayView<const FContentBrowserItemData> InItems);
+
+	/**
+	* Query whether the given item can be privatized, optionally providing error information if it cannot.
+	* 
+	* @param InItem The item to query.
+	* @param OutErrorMessage Optional error message to fill on failure.
+	* 
+	* @return True if the item was deleted, false otherwise.
+	*/
+	virtual bool CanPrivatizeItem(const FContentBrowserItemData& InItem, FText* OutErrorMsg);
+
+	/**
+	* Attempt to mark the given item as private (NotExternallyReferenceable).
+	* 
+	* @param InItem The item to mark private.
+	*
+	* @return True if the item was marked private, false otherwise
+	*/
+	virtual bool PrivatizeItem(const FContentBrowserItemData& InItem);
+
+	/**
+	* Attempt to mark the given items as private (NotExternallyReferenceable)
+	* 
+	* @param InItems The items to be marked private.
+	* 
+	* @return True if any items were marked private, false otherwise
+	*/
+	virtual bool BulkPrivatizeItems(TArrayView<const FContentBrowserItemData> InItems);
 
 	/**
 	 * Query whether the given item is can be renamed, optionally providing error information if it cannot.
@@ -596,11 +716,25 @@ public:
 	 * Attempt to retrieve the identifier that should be used when storing a reference to the given item within a collection.
 	 *
 	 * @param InItem The item to query.
-	 * @param InOutStr The collection ID to fill.
+	 * @param OutCollectionId The collection ID to fill.
 	 *
 	 * @return True if the ID was retrieved, false otherwise.
 	 */
-	virtual bool TryGetCollectionId(const FContentBrowserItemData& InItem, FName& OutCollectionId);
+	virtual bool TryGetCollectionId(const FContentBrowserItemData& InItem, FSoftObjectPath& OutCollectionId);
+
+	UE_DEPRECATED(5.1, "FNames containing full object paths are deprecated. Use FSoftObjectPath instead.")
+	bool TryGetCollectionId(const FContentBrowserItemData& InItem, FName& OutCollectionId)
+	{
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
+		FSoftObjectPath Temp;
+		if (TryGetCollectionId(InItem, Temp))
+		{
+			OutCollectionId = Temp.ToFName();
+			return true;
+		}
+		return false;
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
+	}
 
 	/**
 	 * Attempt to retrieve the package path associated with the given item.
@@ -651,7 +785,40 @@ public:
 	 */
 	virtual bool Legacy_TryConvertAssetDataToVirtualPath(const FAssetData& InAssetData, const bool InUseFolderPaths, FName& OutPath);
 
-protected:
+	/**
+	 * Sets a flag to force rebuild of virtual path tree with next call to RefreshVirtualPathTreeIfNeeded()
+	 */
+	void SetVirtualPathTreeNeedsRebuild();
+
+	/**
+	 * Call after a change that could affect rules of virtual path generation.
+	 */
+	void RefreshVirtualPathTreeIfNeeded();
+
+	/**
+	 * Attempt to convert the given virtual path
+	 * @note Does test if virtual portion of path exists
+	 * @note Does not test if internal portion of path exists
+	 *
+	 * @return None if virtual path prefix of InPath does not exist, Virtual if path exists and is fully virtual (stops before it reaches internal root), Internal if virtual path part of prefix exists and there is text after the virtual prefix
+	 */
+	EContentBrowserPathType TryConvertVirtualPath(const FStringView InPath, FStringBuilderBase& OutPath) const;
+	EContentBrowserPathType TryConvertVirtualPath(const FStringView InPath, FString& OutPath) const;
+	EContentBrowserPathType TryConvertVirtualPath(const FStringView InPath, FName& OutPath) const;
+	EContentBrowserPathType TryConvertVirtualPath(const FName InPath, FName& OutPath) const;
+
+	/**
+	 * Rebuilds the tree of virtual paths that ends with internal roots
+	 */
+	virtual void BuildRootPathVirtualTree();
+
+	const FContentBrowserVirtualPathTree& GetRootPathVirtualTree() const { return RootPathVirtualTree; }
+
+	/**
+	 * Creates item data for a fully virtual folder.
+	 */
+	FContentBrowserItemData CreateVirtualFolderItem(const FName InFolderPath);
+
 	/**
 	 * Convert a virtualized path to its internal form, based on the mount root set on this data source.
 	 * @note The default implementation expects to produce a package path like result, eg) "/Folder/Folder/File".
@@ -675,6 +842,18 @@ protected:
 	virtual bool TryConvertInternalPathToVirtual(const FName InInternalPath, FName& OutPath);
 
 	/**
+	 * Tell the data source to remove any cached data for the filter compilation that might not be needed any more.
+	 */
+	virtual void RemoveUnusedCachedFilterData(const FContentBrowserDataFilterCacheIDOwner& IDOwner, TArrayView<const FName> InVirtualPathsInUse, const FContentBrowserDataFilter& DataFilter);
+
+	/**
+	 * Tell the data source to remove the cached data for the filter compilation for this specific owner. 
+	 */
+	virtual void ClearCachedFilterData(const FContentBrowserDataFilterCacheIDOwner& IDOwner);
+
+protected:
+
+	/**
 	 * Queue an incremental item data update, for data sources that can provide delta-updates.
 	 * These updates are flushed out at the end of the next call to Tick on the Content Browser Data Subsystem.
 	 *
@@ -688,15 +867,20 @@ protected:
 	void NotifyItemDataRefreshed();
 
 	/**
-	 * Iterate over each of the root paths in this data source. Path passed to callback must not contain trailing forward slash.
+	 * Adds internal root path to virtual path tree
 	 */
-	virtual void EnumerateRootPaths(const FContentBrowserDataFilter& InFilter, TFunctionRef<void(FName)> InCallback);
+	void RootPathAdded(const FStringView InInternalPath);
 
 	/**
-	 * Convert virtual path to one or more internal paths and any number of virtual paths
-	 * Example: The "/All" virtual path corresponds to more than one internal root paths such as "/Game" and possibly multiple virtual paths such as "/All/Plugins"
+	 * Removes internal root path from virtual path tree
 	 */
-	void ExpandVirtualPath(const FName InPath, const FContentBrowserDataFilter& InFilter, FName& OutInternalPath, TSet<FName>& OutInternalPaths, TMap<FName, TArray<FName>>& OutVirtualPaths);
+	void RootPathRemoved(const FStringView InInternalPath);
+
+
+	/**
+	 * Tree of virtual paths that ends with internal roots. Used for enumeration and conversion of paths.
+	 */
+	FContentBrowserVirtualPathTree RootPathVirtualTree;
 
 private:
 	/**
@@ -705,15 +889,20 @@ private:
 	bool bIsInitialized = false;
 
 	/**
-	 * The virtual root path that items in this data source appear under, in the form "/My/Mount/Root".
+	 * True if this data source's virtual path tree needs rebuilding.
 	 */
-	FName MountRoot;
+	bool bVirtualPathTreeNeedsRebuild = true;
+
+	struct FVirtualPathTreeRulesCachedState
+	{
+		bool bShowAllFolder = false;
+		bool bOrganizeFolders = false;
+	};
 
 	/**
-	 * The virtual folder paths required to get to the virtual mount root of this data source instance.
-	 * eg) A virtual mount root of "/One/Two" would be ["/", "/One", "/One/Two"].
+	 * Cached state of rules used to detect when virtual path tree needs rebuilding
 	 */
-	TArray<FName, TInlineAllocator<2>> MountRootHierarchy;
+	FVirtualPathTreeRulesCachedState VirtualPathTreeRulesCachedState;
 
 	/**
 	 * The data sink that can be used to communicate with the Content Browser Data Subsystem.

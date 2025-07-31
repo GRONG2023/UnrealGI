@@ -3,6 +3,7 @@
 
 #include "K2Node.h"
 #include "BlueprintCompilationManager.h"
+#include "UObject/ReleaseObjectVersion.h"
 #include "UObject/UnrealType.h"
 #include "UObject/CoreRedirects.h"
 #include "EdGraph/EdGraphPin.h"
@@ -12,13 +13,15 @@
 #include "GraphEditorSettings.h"
 #include "EdGraph/EdGraphSchema.h"
 #include "EdGraphSchema_K2.h"
+#include "EdGraphSchema_K2_Actions.h"
 #include "K2Node_CallFunction.h"
 #include "K2Node_MacroInstance.h"
+#include "Kismet/KismetSystemLibrary.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Editor/EditorEngine.h"
 #include "Misc/OutputDeviceNull.h"
 
-#include "Engine/Breakpoint.h"
+#include "Kismet2/Breakpoint.h"
 #include "Kismet2/KismetDebugUtilities.h"
 #include "KismetCompiler.h"
 #include "PropertyCustomizationHelpers.h"
@@ -26,6 +29,8 @@
 #include "ObjectEditorUtils.h"
 #include "UObject/UObjectAnnotation.h"
 #include "UObject/FrameworkObjectVersion.h"
+
+#include "Kismet2/WatchedPin.h"
 
 #define LOCTEXT_NAMESPACE "K2Node"
 
@@ -53,7 +58,6 @@ namespace UK2Node_Private
 UK2Node::UK2Node(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 {
-	bAllowSplitPins_DEPRECATED = true;
 	OrphanedPinSaveMode = ESaveOrphanPinMode::SaveAllButExec;
 }
 
@@ -100,7 +104,7 @@ void UK2Node::PostLoad()
 			{
 				if (UEdGraphPin* NewPin = UEdGraphPin::FindPinCreatedFromDeprecatedPin(WatchedPin))
 				{
-					BP->WatchedPins.Add(NewPin);
+					FKismetDebugUtilities::AddPinWatch(BP, NewPin);
 				}
 
 				BP->DeprecatedPinWatches.RemoveAt(WatchIdx);
@@ -148,12 +152,12 @@ bool UK2Node::HasNonEditorOnlyReferences() const
 
 void UK2Node::FixupPinDefaultValues()
 {
-	const int32 LinkerUE4Version = GetLinkerUE4Version();
+	const FPackageFileVersion LinkerUEVersion = GetLinkerUEVersion();
 	const int32 LinkerFrameworkVersion = GetLinkerCustomVersion(FFrameworkObjectVersion::GUID);
 	const UEdGraphSchema_K2* K2Schema = GetDefault<UEdGraphSchema_K2>();
 
 	// Swap "new" default error tolerance value with zero on vector/rotator equality nodes, in order to preserve current behavior in existing blueprints.
-	if(LinkerUE4Version < VER_UE4_BP_MATH_VECTOR_EQUALITY_USES_EPSILON)
+	if(LinkerUEVersion < VER_UE4_BP_MATH_VECTOR_EQUALITY_USES_EPSILON)
 	{
 		static const FString VectorsEqualFunctionEpsilonPinName = TEXT("KismetMathLibrary.EqualEqual_VectorVector.ErrorTolerance");
 		static const FString VectorsNotEqualFunctionEpsilonPinName = TEXT("KismetMathLibrary.NotEqual_VectorVector.ErrorTolerance");
@@ -289,7 +293,7 @@ FText UK2Node::GetToolTipHeading() const
 
 	if (Blueprint)
 	{
-		if (UBreakpoint* ExistingBreakpoint = FKismetDebugUtilities::FindBreakpointForNode(Blueprint, this))
+		if (FBlueprintBreakpoint* ExistingBreakpoint = FKismetDebugUtilities::FindBreakpointForNode(this, Blueprint))
 		{
 			if (ExistingBreakpoint->IsEnabled())
 			{
@@ -412,14 +416,24 @@ void UK2Node::AutowireNewNode(UEdGraphPin* FromPin)
 
 				// null out the backup connection (so we don't attempt to make it 
 				// once we exit the loop... we successfully made this connection!)
-				BackupConnection = NULL;
+				BackupConnection = nullptr;
+				break;
+			}
+			else if(ConnectResponse == ECanCreateConnectionResponse::CONNECT_RESPONSE_MAKE_WITH_PROMOTION)
+			{
+				if (K2Schema->CreatePromotedConnection(FromPin, Pin))
+				{
+					NodeList.Add(FromPin->GetOwningNode());
+					NodeList.Add(this);
+				}
+				BackupConnection = nullptr;
 				break;
 			}
 		}
 
 		// if we didn't find an ideal connection, then lets connect this pin to 
 		// the BackupConnection (something, like a connection that requires a conversion node, etc.)
-		if ((BackupConnection != NULL) && K2Schema->TryCreateConnection(FromPin, BackupConnection))
+		if ((BackupConnection != nullptr) && K2Schema->TryCreateConnection(FromPin, BackupConnection))
 		{
 			NodeList.Add(FromPin->GetOwningNode());
 			NodeList.Add(this);
@@ -430,10 +444,18 @@ void UK2Node::AutowireNewNode(UEdGraphPin* FromPin)
 		{
 			UEdGraphNode* FromPinNode = FromPin->GetOwningNode();
 			UEdGraphPin* FromThenPin = FromPinNode->FindPin(UEdGraphSchema_K2::PN_Then);
-
+			
+			// Prefer a pin named "Execute", but also accept "Exec" and "In", since some loop macros use those as their input pin names,
+			// and it's easier to add a workaround here that allows them to be better autowired than add more "special" pin names to the schema
 			UEdGraphPin* ToExecutePin = FindPin(UEdGraphSchema_K2::PN_Execute);
 
-			if ((FromThenPin != NULL) && (FromThenPin->LinkedTo.Num() == 0) && (ToExecutePin != NULL) && K2Schema->ArePinsCompatible(FromThenPin, ToExecutePin, NULL))
+			static const FName PN_Exec = TEXT("exec");
+			if (!ToExecutePin) ToExecutePin = FindPin(PN_Exec);
+
+			static const FName PN_In = TEXT("in");
+			if (!ToExecutePin) ToExecutePin = FindPin(PN_In);
+
+			if ((FromThenPin != nullptr) && (FromThenPin->LinkedTo.Num() == 0) && (ToExecutePin != nullptr) && K2Schema->ArePinsCompatible(FromThenPin, ToExecutePin, NULL))
 			{
 				if (K2Schema->TryCreateConnection(FromThenPin, ToExecutePin))
 				{
@@ -515,11 +537,6 @@ void UK2Node::PinConnectionListChanged(UEdGraphPin* Pin)
 	{
 		UEdGraph* OuterGraph = GetGraph();
 
-		if (OuterGraph)
-		{
-			OuterGraph->NotifyGraphChanged();
-		}
-
 		if (Pin->ParentPin == nullptr)
 		{
 			RemovePin(Pin);
@@ -550,7 +567,7 @@ void UK2Node::PinConnectionListChanged(UEdGraphPin* Pin)
 					}
 				}
 
-				NestedPin->MarkPendingKill();
+				NestedPin->MarkAsGarbage();
 			};
 
 			RemoveNestedPin(Pin);
@@ -569,6 +586,11 @@ void UK2Node::PinConnectionListChanged(UEdGraphPin* Pin)
 		if (bOrphanedPinsGone)
 		{
 			ClearCompilerMessage();
+		}
+
+		if (OuterGraph)
+		{
+			OuterGraph->NotifyNodeChanged(this);
 		}
 
 		Pin = nullptr;
@@ -596,6 +618,30 @@ void UK2Node::JumpToDefinition() const
 	{
 		FKismetEditorUtilities::BringKismetToFocusAttentionOnObject(HyperlinkTarget);
 	}
+}
+
+bool UK2Node::CanPlaceBreakpoints() const
+{
+	// Pure nodes have no execs and therefore cannot have breakpoints placed on them
+	if(IsNodePure())
+	{
+		return false;
+	}
+
+	// If this node is within a macro or interface blueprint then it cannot have breakpoints
+	// added to it as they will get expanded during compilation and never get hit. 
+	if(const UEdGraph* Graph = GetGraph())
+	{
+		if (const UBlueprint* Blueprint = FBlueprintEditorUtils::FindBlueprintForGraph(Graph))
+		{
+			return
+				!(Blueprint->BlueprintType == BPTYPE_MacroLibrary ||
+				Blueprint->BlueprintType == BPTYPE_Interface ||
+				Blueprint->MacroGraphs.Contains(Graph));
+		}
+	}
+	
+	return true;
 }
 
 void UK2Node::ReallocatePinsDuringReconstruction(TArray<UEdGraphPin*>& OldPins)
@@ -681,7 +727,7 @@ void UK2Node::ReconstructNode()
 				Pin->LinkedTo.Remove(OtherPin);
 			}
 
-			if (Blueprint->bIsRegeneratingOnLoad && Linker->UE4Ver() < VER_UE4_INJECT_BLUEPRINT_STRUCT_PIN_CONVERSION_NODES)
+			if (Blueprint->bIsRegeneratingOnLoad && Linker->UEVer() < VER_UE4_INJECT_BLUEPRINT_STRUCT_PIN_CONVERSION_NODES)
 			{
 				if (OtherPin == nullptr || (Pin->PinType.PinCategory != UEdGraphSchema_K2::PC_Struct))
 				{
@@ -718,19 +764,33 @@ void UK2Node::ReconstructNode()
 			if (OldPinEntry && *OldPinEntry)
 			{
 				UEdGraphPin* OldPin = *OldPinEntry;
-				if (NewPin->LinkedTo.Num() == 0 &&
-					!OldPin->AutogeneratedDefaultValue.IsEmpty() &&
-					NewPin->AutogeneratedDefaultValue != OldPin->AutogeneratedDefaultValue &&
-					OldPin->DefaultValue == OldPin->AutogeneratedDefaultValue &&
-					NewPin->DefaultValue != OldPin->DefaultValue)
+				if (NewPin->LinkedTo.Num() == 0
+					&& !OldPin->AutogeneratedDefaultValue.IsEmpty()
+					&& Schema->DoesDefaultValueMatchAutogenerated(*OldPin))
 				{
-					Blueprint->CurrentMessageLog->Warning(*LOCTEXT("VerifyDefaultValues", "Default value for @@ on @@ has changed and this asset is from a version that may have had incorrect default value information - verify and resave").ToString(), NewPin, this);
+					// Rather than compare default value strings directly, we utilize the schema to convert and compare against the actual default value type.
+					auto HasPinDefaultValueChanged = [Schema](const UEdGraphPin& PinRef, FString& PinDefaultValueRef, const FString& OldPinDefaultValue) -> bool
+					{
+						TGuardValue<FString> TempSetPinDefaultValue(PinDefaultValueRef, OldPinDefaultValue);
+						return !Schema->DoesDefaultValueMatchAutogenerated(PinRef);
+					};
+
+					// Compare default value strings by temporarily setting the default value and auto-generated default value strings to the equivalent default
+					// value string from the old pin that we wish to compare it against. In some cases, the value string may have changed, but wouldn't otherwise
+					// result in a different value when converted.
+					// 
+					// Example: For vector types, {1, 1, 1} is equivalent to {1.000, 1.000, 1.000}, which can be considered a match that would not require a resave.
+					if (HasPinDefaultValueChanged(*NewPin, NewPin->DefaultValue, OldPin->AutogeneratedDefaultValue)
+						&& HasPinDefaultValueChanged(*NewPin, NewPin->AutogeneratedDefaultValue, OldPin->DefaultValue))
+					{
+						Blueprint->CurrentMessageLog->Warning(*LOCTEXT("VerifyDefaultValues", "Default value for @@ on @@ has changed and this asset is from a version that may have had incorrect default value information - verify and resave").ToString(), NewPin, this);
+					}
 				}
 			}
 		}
 	}
 
-	GetGraph()->NotifyGraphChanged();
+	GetGraph()->NotifyNodeChanged(this);
 }
 
 void UK2Node::GetRedirectPinNames(const UEdGraphPin& Pin, TArray<FString>& RedirectPinNames) const
@@ -837,18 +897,18 @@ UK2Node::ERedirectType UK2Node::DoPinsMatchForReconstruction(const UEdGraphPin* 
 {
 	ERedirectType RedirectType = ERedirectType_None;
 
-	// if the pin names do match
-	if (NewPin->PinName == OldPin->PinName)
+	// if the pin names and directions do match
+	if (NewPin->PinName == OldPin->PinName && NewPin->Direction == OldPin->Direction)
 	{
 		// If the old pin had a default value, only match the new pin if the type is compatible:
 		const UEdGraphSchema_K2* K2Schema = Cast<const UEdGraphSchema_K2>(GetSchema());
-		if (K2Schema &&
+		if (K2Schema && 
 			OldPin->Direction == EGPD_Input &&
 			OldPin->LinkedTo.Num() == 0 &&
 			!OldPin->DoesDefaultValueMatchAutogenerated() &&
 			!K2Schema->ArePinTypesCompatible(OldPin->PinType, NewPin->PinType))
 		{
-			RedirectType = ERedirectType_None;
+			RedirectType = ERedirectType_DefaultValue;
 		}
 		else
 		{
@@ -985,55 +1045,245 @@ void UK2Node::ReconstructSinglePin(UEdGraphPin* NewPin, UEdGraphPin* OldPin, ERe
 		}
 	}
 
-	// Update the blueprints watched pins as the old pin will be going the way of the dodo
-	for (int32 WatchIndex = 0; WatchIndex < Blueprint->WatchedPins.Num(); ++WatchIndex)
-	{
-		UEdGraphPin* WatchedPin = Blueprint->WatchedPins[WatchIndex].Get();
-		if( WatchedPin == OldPin )
+	// if OldPin has any watches, swap the watches for NewPin
+	TArray<TArray<FName>> WatchedPropertyPaths;
+	FKismetDebugUtilities::RemovePinPropertyWatchesByPredicate(
+		Blueprint, 
+		[OldPin, &WatchedPropertyPaths](const FBlueprintWatchedPin& WatchedPin)
 		{
-			WatchedPin = NewPin;
-			break;
+			if (WatchedPin.Get() == OldPin)
+			{
+				WatchedPropertyPaths.Add(WatchedPin.GetPathToProperty());
+				return true;
+			}
+
+			return false;
 		}
+	);
+
+	for (TArray<FName>& WatchedPropertyPath : WatchedPropertyPaths)
+	{
+		FBlueprintWatchedPin WatchedPin(NewPin, MoveTemp(WatchedPropertyPath));
+		FKismetDebugUtilities::AddPinWatch(Blueprint, MoveTemp(WatchedPin));
 	}
 }
 
-void UK2Node::ValidateOrphanPins(FCompilerResultsLog& MessageLog, const bool bStore) const
+void UK2Node::ValidateOrphanPins(FCompilerResultsLog& MessageLog, bool bStore) const
 {
 	for (UEdGraphPin* Pin : Pins)
 	{
 		if (Pin && Pin->bOrphanedPin)
 		{
-			if (Pin->LinkedTo.Num())
+			ValidateOrphanPin(Pin, MessageLog, bStore);
+		}
+	}
+}
+
+void UK2Node::ValidateOrphanPin(UEdGraphPin* Pin, FCompilerResultsLog& MessageLog, bool bStore) const
+{
+	check(Pin);
+	check(Pin->bOrphanedPin);
+
+	if (Pin->LinkedTo.Num())
+	{
+		const FText LinkedMessage = LOCTEXT("RemovedConnectedPin", "In use pin @@ no longer exists on node @@. Please refresh node or break links to remove pin.");
+		if (bStore)
+		{
+			MessageLog.StorePotentialError(this, *LinkedMessage.ToString(), Pin, this);
+		}
+		else
+		{
+			MessageLog.Error(*LinkedMessage.ToString(), Pin, this);
+		}
+	}
+	else if (!Pin->bHidden && !Pin->DoesDefaultValueMatchAutogenerated())
+	{
+		const FText NonDefaultMessage = LOCTEXT("RemovedNonDefaultPin", "Input pin @@ specifying non-default value no longer exists on node @@. Please refresh node or reset pin to default value to remove pin.");
+		if (bStore)
+		{
+			MessageLog.StorePotentialWarning(this, *NonDefaultMessage.ToString(), Pin, this);
+		}
+		else
+		{
+			MessageLog.Warning(*NonDefaultMessage.ToString(), Pin, this);
+		}
+	}
+}
+
+void UK2Node::ValidateLinkedPinTypes(UEdGraphPin* OutputPin, FCompilerResultsLog& MessageLog) const
+{
+	check(OutputPin);
+	check(OutputPin->Direction == EEdGraphPinDirection::EGPD_Output);
+
+	const UEdGraphSchema_K2* K2Schema = CastChecked<const UEdGraphSchema_K2>(GetSchema());
+
+	// Rewiring can mutate the linked pins arrays.
+	TArray<UEdGraphPin*> LinkedToPins = OutputPin->LinkedTo;
+
+	for (UEdGraphPin* InputPin : LinkedToPins)
+	{
+		check(InputPin);
+
+		const bool bInputIsSelfPin = K2Schema->IsSelfPin(*InputPin);
+
+		// Function call nodes implicitly handle interface->object type redirects on self pins.
+		const bool bIsSelfInterfaceObjectConnection =
+			bInputIsSelfPin &&
+			(OutputPin->PinType.PinCategory == UEdGraphSchema_K2::PC_Interface) &&
+			(InputPin->PinType.PinCategory == UEdGraphSchema_K2::PC_Object)
+		;
+
+		const bool bNeedsConversionNode =
+			!bIsSelfInterfaceObjectConnection &&
+			!K2Schema->ArePinTypesCompatible(OutputPin->PinType, InputPin->PinType, GetBlueprintClassFromNode())
+		;
+
+		// Blueprints actually support the connection of an array output to a scalar input for self pins.
+		// Even though the types are actually incompatible, nodes that support multiple selfs will expand
+		// to provide automatic iteration through the array.
+		const UK2Node* InputPinOwner = CastChecked<UK2Node>(InputPin->GetOwningNode());
+		const bool bAllowMultipleSelfs = InputPinOwner->AllowMultipleSelfs(true);
+		const bool bNotAContainer = !InputPin->PinType.IsContainer();
+		const bool bHasMultipleSelfsConnections =
+			bInputIsSelfPin &&
+			bAllowMultipleSelfs &&
+			bNotAContainer
+		;
+
+		if (bNeedsConversionNode && !bHasMultipleSelfsConnections)
+		{
+			if (K2Schema->CreateAutomaticConversionNodeAndConnections(OutputPin, InputPin))
 			{
-				const FText LinkedMessage = LOCTEXT("RemovedConnectedPin", "In use pin @@ no longer exists on node @@. Please refresh node or break links to remove pin.");
-				if (bStore)
+				FFormatNamedArguments Args;
+
+				Args.Add(TEXT("PinName"), FText::FromName(OutputPin->GetFName()));
+				Args.Add(TEXT("LinkedPinName"), FText::FromName(InputPin->GetFName()));
+
+				FText ConversionInfo = FText::Format(
+					NSLOCTEXT("K2Node", "PinConversion_InfoFmt", "Pin '{PinName}' on node @@ doesn't match the type of '{LinkedPinName}' on node @@. A conversion node had to be inserted."),
+					Args
+				);
+
+				if (const UEdGraphPin* SourcePin = FBlueprintEditorUtils::FindFirstCompilerRelevantLinkedPin(OutputPin))
 				{
-					MessageLog.StorePotentialError(this, *LinkedMessage.ToString(), Pin, this);
+					Message_Note(ConversionInfo.ToString(), SourcePin->GetOwningNode(), InputPin->GetOwningNode());
 				}
 				else
 				{
-					MessageLog.Error(*LinkedMessage.ToString(), Pin, this);
-				}
-			}
-			else if (!Pin->bHidden && !Pin->DoesDefaultValueMatchAutogenerated())
-			{
-				const FText NonDefaultMessage = LOCTEXT("RemovedNonDefaultPin", "Input pin @@ specifying non-default value no longer exists on node @@. Please refresh node or reset pin to default value to remove pin.");
-				if (bStore)
-				{
-					MessageLog.StorePotentialWarning(this, *NonDefaultMessage.ToString(), Pin, this);
-				}
-				else
-				{
-					MessageLog.Warning(*NonDefaultMessage.ToString(), Pin, this);
+					const UK2Node* OutputPinOwner = Cast<UK2Node>(OutputPin->GetOwningNode());
+
+					UE_LOG(LogBlueprint, Verbose, TEXT("Missing compiler relevant pin '%s' on node '%s'"), *OutputPin->GetName(), (OutputPinOwner ? *OutputPinOwner->GetFullName() : TEXT("<none>")));
 				}
 			}
 		}
 	}
 }
 
+bool UK2Node::TryInsertDefaultValueConversionNode(const UEdGraphPin& OldPin, UEdGraphPin& NewPin) const
+{
+	static TMap<FName, FName> MakeLiteralFunctionTable =
+	{
+		{ UEdGraphSchema_K2::PC_Boolean,	TEXT("MakeLiteralBool")		},
+		{ UEdGraphSchema_K2::PC_Byte,		TEXT("MakeLiteralByte")		},
+		{ UEdGraphSchema_K2::PC_Int,		TEXT("MakeLiteralInt")		},
+		{ UEdGraphSchema_K2::PC_Int64,		TEXT("MakeLiteralInt64")	},
+		{ UEdGraphSchema_K2::PC_Name,		TEXT("MakeLiteralName")		},
+		{ UEdGraphSchema_K2::PC_Real,		TEXT("MakeLiteralDouble")	},
+		{ UEdGraphSchema_K2::PC_String,		TEXT("MakeLiteralString")	},
+		{ UEdGraphSchema_K2::PC_Text,		TEXT("MakeLiteralText")		},
+	};
+
+	const UEdGraphSchema_K2* K2Schema = CastChecked<UEdGraphSchema_K2>(GetSchema());
+
+	const bool bHasCastFunction = K2Schema->SearchForAutocastFunction(OldPin.PinType, NewPin.PinType).IsSet();
+	const FName* MakeLiteralFunctionName = MakeLiteralFunctionTable.Find(OldPin.PinType.PinCategory);
+
+	const bool bCanConvertDefaultValue =
+		bHasCastFunction &&
+		(MakeLiteralFunctionName != nullptr)
+		;
+
+	if (bCanConvertDefaultValue)
+	{
+		UFunction* MakeLiteralFunction = UKismetSystemLibrary::StaticClass()->FindFunctionByName(*MakeLiteralFunctionName);
+		check(MakeLiteralFunction);
+
+		const int32 NodeXOffset = -600;
+		FVector2D SpawnLocation(NodePosX + NodeXOffset, NodePosY);
+
+		UK2Node_CallFunction* MakeLiteralNode = FEdGraphSchemaAction_K2NewNode::SpawnNode<UK2Node_CallFunction>(
+			GetGraph(),
+			SpawnLocation,
+			EK2NewNodeFlags::None,
+			[MakeLiteralFunction](UK2Node_CallFunction* NewInstance)
+			{
+				NewInstance->SetFromFunction(MakeLiteralFunction);
+			}
+		);
+
+		UEdGraphPin* InputPin = MakeLiteralNode->FindPinByPredicate(
+			[K2Schema](UEdGraphPin* InPin)
+			{
+				check(InPin);
+				return (InPin->Direction == EGPD_Input) && !K2Schema->IsMetaPin(*InPin);
+			}
+		);
+		check(InputPin);
+		InputPin->DefaultValue = OldPin.DefaultValue;
+
+		UEdGraphPin* OutputPin = MakeLiteralNode->GetReturnValuePin();
+		check(OutputPin);
+
+		if (ensure(K2Schema->CreateAutomaticConversionNodeAndConnections(OutputPin, &NewPin)))
+		{
+			FFormatNamedArguments Args;
+
+			Args.Add(TEXT("PinName"), FText::FromName(OutputPin->GetFName()));
+
+			FText ConversionInfo = FText::Format(
+				NSLOCTEXT("K2Node", "PinDefaultConversion_InfoFmt", "Pin '{PinName}' on node @@ has a default value that doesn't match the original type. A literal node and a conversion node had to be inserted."),
+				Args
+			);
+
+			const UEdGraphPin* SourcePin = FBlueprintEditorUtils::FindFirstCompilerRelevantLinkedPin(OutputPin);
+			check(SourcePin);
+			Message_Note(ConversionInfo.ToString(), this);
+		}
+	}
+
+	return bCanConvertDefaultValue;
+}
+
 void UK2Node::EarlyValidation(FCompilerResultsLog& MessageLog) const
 {
-	ValidateOrphanPins(MessageLog, true);
+	UBlueprint* BP = GetBlueprint();
+	const UEdGraphSchema_K2* K2Schema = CastChecked<const UEdGraphSchema_K2>(GetSchema());
+
+	for (UEdGraphPin* Pin : Pins)
+	{
+		check(Pin);
+
+		// We only have to validate pin type compatability after the BP is first loaded.
+		// After the initial load, we can assume that the type won't change again.
+		// 
+		// Additionally, we can just check the output pins for type compatability.
+		// It would be redundant to also include checking input pins.
+		const bool bCheckPinForTypeChange =
+			BP->bIsRegeneratingOnLoad &&
+			!Pin->bOrphanedPin &&
+			!K2Schema->IsExecPin(*Pin) &&
+			(Pin->Direction == EEdGraphPinDirection::EGPD_Output)
+		;
+
+		if (Pin->bOrphanedPin)
+		{
+			ValidateOrphanPin(Pin, MessageLog, true);
+		}
+		else if (bCheckPinForTypeChange)
+		{
+			ValidateLinkedPinTypes(Pin, MessageLog);
+		}
+	}
 }
 
 void UK2Node::ValidateNodeDuringCompilation(FCompilerResultsLog& MessageLog) const
@@ -1111,7 +1361,16 @@ void UK2Node::RewireOldPinsToNewPins(TArray<UEdGraphPin*>& InOldPins, TArray<UEd
 			{
 				UEdGraphPin* NewPin = InNewPins[NewPinIndex];
 
-				const ERedirectType RedirectType = DoPinsMatchForReconstruction(NewPin, NewPinIndex, OldPin, OldPinIndex);
+				ERedirectType RedirectType = DoPinsMatchForReconstruction(NewPin, NewPinIndex, OldPin, OldPinIndex);
+
+				if (RedirectType == ERedirectType_DefaultValue)
+				{
+					if (!TryInsertDefaultValueConversionNode(*OldPin, *NewPin))
+					{
+						RedirectType = ERedirectType_None;
+					}
+				}
+
 				if (RedirectType != ERedirectType_None)
 				{
 					ReconstructSinglePin(NewPin, OldPin, RedirectType);
@@ -1163,8 +1422,8 @@ void UK2Node::RewireOldPinsToNewPins(TArray<UEdGraphPin*>& InOldPins, TArray<UEd
 							UEdGraphPin* SubPin = OldPin->SubPins[SubPinIndex];
 							if (!SubPin->bOrphanedPin)
 							{
-								OldPin->SubPins.RemoveAt(SubPinIndex, 1, false);
-								SubPin->MarkPendingKill();
+								OldPin->SubPins.RemoveAt(SubPinIndex, 1, EAllowShrinking::No);
+								SubPin->MarkAsGarbage();
 							}
 						}
 					}
@@ -1181,7 +1440,7 @@ void UK2Node::RewireOldPinsToNewPins(TArray<UEdGraphPin*>& InOldPins, TArray<UEd
 					OldPin->bOrphanedPin = true;
 					OldPin->bNotConnectable = true;
 					OrphanedOldPins.Add(OldPin);
-					InOldPins.RemoveAt(OldPinIndex, 1, false);
+					InOldPins.RemoveAt(OldPinIndex, 1, EAllowShrinking::No);
 				}
 			}
 		}
@@ -1245,14 +1504,7 @@ void UK2Node::DestroyPinList(TArray<UEdGraphPin*>& InPins)
 
 bool UK2Node::CanSplitPin(const UEdGraphPin* Pin) const
 {
-	PRAGMA_DISABLE_DEPRECATION_WARNINGS
-	// AllowSplitPins is deprecated. Remove this block when that function is eventually removed.
-	if (AllowSplitPins())
-	{
-		return (Pin->GetOwningNode() == this && !Pin->bNotConnectable && Pin->LinkedTo.Num() == 0 && Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Struct);
-	}
-	PRAGMA_ENABLE_DEPRECATION_WARNINGS
-	return false;
+	return (Pin->GetOwningNode() == this && !Pin->bNotConnectable && Pin->LinkedTo.Num() == 0 && Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Struct);
 }
 
 UK2Node* UK2Node::ExpandSplitPin(FKismetCompilerContext* CompilerContext, UEdGraph* SourceGraph, UEdGraphPin* Pin)
@@ -1304,7 +1556,7 @@ UK2Node* UK2Node::ExpandSplitPin(FKismetCompilerContext* CompilerContext, UEdGra
 		{
 			Pins.Remove(SubPin);
 			SubPin->ParentPin = nullptr;
-			SubPin->MarkPendingKill();
+			SubPin->MarkAsGarbage();
 		}
 		Pin->SubPins.Empty();
 	}
@@ -1428,7 +1680,7 @@ ERenamePinResult UK2Node::RenameUserDefinedPinImpl(const FName OldName, const FN
 
 			while (PinsToUpdate.Num() > 0)
 			{
-				UEdGraphPin* PinToRename = PinsToUpdate.Pop(/*bAllowShrinking=*/ false);
+				UEdGraphPin* PinToRename = PinsToUpdate.Pop(EAllowShrinking::No);
 				if (PinToRename->SubPins.Num() > 0)
 				{
 					PinsToUpdate.Append(PinToRename->SubPins);
@@ -1470,43 +1722,50 @@ void FOptionalPinManager::RebuildPropertyList(TArray<FOptionalPinFromProperty>& 
 		OldPinSettings.Add(PropertyEntry.PropertyName, FOldOptionalPinSettings(PropertyEntry.bShowPin, PropertyEntry.bIsOverrideEnabled, PropertyEntry.bIsSetValuePinVisible, PropertyEntry.bIsOverridePinVisible));
 	}
 
+	// This exists to support legacy struct types that used an older convention to declare
+	// override flag properties with a "bOverride_" prefix. Any property that starts with
+	// "bOverride_" will be implicitly excluded from the optional pin set if the suffix matches
+	// another property name within the same scope. For example, a property named "bOverride_MyValue"
+	// will not be included in the output set if we find a matching property named "MyValue".
+	TMap<FString, FProperty*> OverridesMap;
+	const FString OverridePrefix(TEXT("bOverride_"));
+
 	// Rebuild the property list
 	Properties.Reset();
-
-	// find all "bOverride_" properties
-	TMap<FName, FProperty*> OverridesMap;
-	const FString OverridePrefix(TEXT("bOverride_"));
+	TSet<FProperty*> TestProperties;
 	for (TFieldIterator<FProperty> It(SourceStruct, EFieldIteratorFlags::IncludeSuper); It; ++It)
 	{
-		FProperty* TestProperty = *It;
-		if (CanTreatPropertyAsOptional(TestProperty) && TestProperty->GetName().StartsWith(OverridePrefix))
+		FProperty* Property = *It;
+		if (CanTreatPropertyAsOptional(Property))
 		{
-			FString OriginalName = TestProperty->GetName();
+			TestProperties.Add(Property);
+
+			// find all "bOverride_" properties
+			FString OriginalName = Property->GetName();
 			if (OriginalName.RemoveFromStart(OverridePrefix) && !OriginalName.IsEmpty())
 			{
-				OverridesMap.Add(FName(*OriginalName), TestProperty);
+				OverridesMap.Add(OriginalName, Property);
 			}
 		}
 	}
 
 	// handle regular properties
-	for (TFieldIterator<FProperty> It(SourceStruct, EFieldIteratorFlags::IncludeSuper); It; ++It)
+	for (FProperty* TestProperty : TestProperties)
 	{
-		FProperty* TestProperty = *It;
-		if (CanTreatPropertyAsOptional(TestProperty) && !TestProperty->GetName().StartsWith(OverridePrefix))
+		if (!TestProperty->GetName().StartsWith(OverridePrefix))
 		{
 			FName CategoryName = NAME_None;
 #if WITH_EDITOR
 			CategoryName = FObjectEditorUtils::GetCategoryFName(TestProperty);
 #endif //WITH_EDITOR
 
-			OverridesMap.Remove(TestProperty->GetFName());
+			OverridesMap.Remove(TestProperty->GetName());
 			RebuildProperty(TestProperty, CategoryName, Properties, SourceStruct, OldPinSettings);
 		}
 	}
 
 	// add remaining "bOverride_" properties
-	for (const TPair<FName, FProperty*>& Pair : OverridesMap)
+	for (const TPair<FString, FProperty*>& Pair : OverridesMap)
 	{
 		FProperty* TestProperty = Pair.Value;
 
@@ -1527,9 +1786,12 @@ void FOptionalPinManager::RebuildProperty(FProperty* TestProperty, FName Categor
 	Record->PropertyTooltip = TestProperty->GetToolTipText();
 	Record->CategoryName = CategoryName;
 
+	// Determine if the property is bound to a mutable edit condition flag, which historically indicates an additional optional
+	// "override" pin is needed. Note that some manager subtypes may choose not to include these fields in the optional pin set.
 	bool bNegate = false;
 	FProperty* OverrideProperty = PropertyCustomizationHelpers::GetEditConditionProperty(TestProperty, bNegate);
 	Record->bHasOverridePin = OverrideProperty != nullptr && OverrideProperty->HasAllPropertyFlags(CPF_BlueprintVisible) && !OverrideProperty->HasAllPropertyFlags(CPF_BlueprintReadOnly);
+
 	Record->bIsMarkedForAdvancedDisplay = TestProperty->HasAnyPropertyFlags(CPF_AdvancedDisplay);
 
 	// Get the defaults
@@ -1686,7 +1948,14 @@ void FOptionalPinManager::EvaluateOldShownPins(const TArray<FOptionalPinFromProp
 UEdGraphPin* UK2Node::GetExecPin() const
 {
 	UEdGraphPin* Pin = FindPin(UEdGraphSchema_K2::PN_Execute);
-	check(Pin == nullptr || Pin->Direction == EGPD_Input); // If pin exists, it must be input
+	check(Pin == nullptr || Pin->Direction == EGPD_Input);
+	return Pin;
+}
+
+UEdGraphPin* UK2Node::GetThenPin() const
+{
+	UEdGraphPin* Pin = FindPin(UEdGraphSchema_K2::PN_Then);
+	check(Pin == nullptr || Pin->Direction == EGPD_Output);
 	return Pin;
 }
 
@@ -1754,45 +2023,6 @@ bool UK2Node::IsInDevelopmentMode() const
 bool UK2Node::CanCreateUnderSpecifiedSchema(const UEdGraphSchema* DesiredSchema) const
 {
 	return DesiredSchema->GetClass()->IsChildOf(UEdGraphSchema_K2::StaticClass());
-}
-
-void UK2Node::Message_Note(const FString& Message)
-{
-	UBlueprint* OwningBP = GetBlueprint();
-	if( OwningBP )
-	{
-		OwningBP->Message_Note(Message);
-	}
-	else
-	{
-		UE_LOG(LogBlueprint, Log, TEXT("%s"), *Message);
-	}
-}
-
-void UK2Node::Message_Warn(const FString& Message)
-{
-	UBlueprint* OwningBP = GetBlueprint();
-	if( OwningBP )
-	{
-		OwningBP->Message_Warn(Message);
-	}
-	else
-	{
-		UE_LOG(LogBlueprint, Warning, TEXT("%s"), *Message);
-	}
-}
-
-void UK2Node::Message_Error(const FString& Message)
-{
-	UBlueprint* OwningBP = GetBlueprint();
-	if( OwningBP )
-	{
-		OwningBP->Message_Error(Message);
-	}
-	else
-	{
-		UE_LOG(LogBlueprint, Error, TEXT("%s"), *Message);
-	}
 }
 
 FString UK2Node::GetDocumentationLink() const
@@ -1882,7 +2112,7 @@ void UK2Node::GetPinHoverText(const UEdGraphPin& Pin, FString& HoverTextOut) con
 			if (LineCounter >= MaxArrayPinTooltipLineCount)
 			{
 				// truncate WatchText so it contains a finite number of lines
-				WatchText.LeftInline(NewWatchTextLen, false);
+				WatchText.LeftInline(NewWatchTextLen, EAllowShrinking::No);
 				WatchText += "..."; // WatchText should already have a trailing newline (no need to prepend this with one)
 				break;
 			}

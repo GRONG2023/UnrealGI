@@ -2,16 +2,27 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
-#include "UObject/Class.h"
-#include "Templates/SubclassOf.h"
+#include "BlueprintNodeBinder.h"
 #include "BlueprintNodeSignature.h"
 #include "BlueprintNodeSpawner.h"
+#include "CoreMinimal.h"
 #include "K2Node_Event.h"
+#include "Math/Vector2D.h"
+#include "Templates/SubclassOf.h"
+#include "UObject/Class.h"
+#include "UObject/NameTypes.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/UObjectGlobals.h"
+
 #include "BlueprintEventNodeSpawner.generated.h"
 
+class UBlueprint;
 class UEdGraph;
+class UEdGraphNode;
+class UFunction;
+class UK2Node_Event;
+class UObject;
 
 /**
  * Takes care of spawning UK2Node_Event nodes. Acts as the "action" portion of
@@ -76,10 +87,10 @@ public:
 	 */
 	virtual UK2Node_Event const* FindPreExistingEvent(UBlueprint* Blueprint, FBindingSet const& Bindings) const;
 
-private:
+protected:
 	/** The function to configure new nodes with. */
 	UPROPERTY()
-    UFunction const* EventFunc;
+    TObjectPtr<UFunction const> EventFunc;
 
 	/** The custom name to configure new event nodes with. */
 	UPROPERTY()

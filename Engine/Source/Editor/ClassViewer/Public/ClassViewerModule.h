@@ -2,13 +2,23 @@
 
 #pragma once
 
+#include "AssetRegistry/AssetData.h"
+#include "Containers/Array.h"
 #include "CoreMinimal.h"
-#include "AssetData.h"
+#include "CoreTypes.h"
+#include "Delegates/Delegate.h"
+#include "Internationalization/Text.h"
+#include "Logging/LogMacros.h"
 #include "Modules/ModuleInterface.h"
+#include "Templates/SharedPointer.h"
 
+class FClassViewerFilterFuncs;
 class IClassViewerFilter;
 class IPropertyHandle;
-class FClassViewerFilterFuncs;
+class SWidget;
+class UClass;
+
+DEFINE_LOG_CATEGORY_STATIC(LogEditorClassViewer, Log, All);
 
 /** Delegate used with the Class Viewer in 'class picking' mode.  You'll bind a delegate when the
     class viewer widget is created, which will be fired off when a class is selected in the list */
@@ -53,16 +63,37 @@ enum class EClassViewerNameTypeToDisplay : uint8
 	ClassName,
 };
 
+struct FClassViewerSortElementInfo
+{
+	FClassViewerSortElementInfo(TWeakObjectPtr<UClass> InClass, TSharedPtr<FString> InName, TSharedPtr<FString> InDisplayName)
+		: Class(InClass), Name(InName), DisplayName(InDisplayName)
+	{}
+	
+	TWeakObjectPtr<UClass> Class;
+
+	TSharedPtr<FString> Name;
+
+	TSharedPtr<FString> DisplayName;
+};
+
 /**
  * Settings for the Class Viewer set by the programmer before spawning an instance of the widget.  This
  * is used to modify the class viewer's behavior in various ways, such as filtering in or out specific classes.
  */
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 class FClassViewerInitializationOptions
 {
 
 public:
-	/** The filter to use on classes in this instance. */
-	TSharedPtr<class IClassViewerFilter> ClassFilter;
+	/** [Deprecated] The filter to use on classes in this instance. */
+	UE_DEPRECATED(5.0, "Please add to the ClassFilters array member instead.")
+	TSharedPtr<IClassViewerFilter> ClassFilter;
+
+	/** The filter(s) to use on classes in this instance. */
+	TArray<TSharedRef<IClassViewerFilter>> ClassFilters;
+
+	/** Predicate used to sort the class list */
+	TFunction<bool(const FClassViewerSortElementInfo&, const FClassViewerSortElementInfo&)> ClassViewerSortPredicate;
 
 	/** Mode to operate in */
 	EClassViewerMode::Type Mode;
@@ -91,6 +122,9 @@ public:
 	/** If true, root nodes will be expanded by default. */
 	bool bExpandRootNodes;
 
+	/** If true, all nodes will be expanded by default. */
+	bool bExpandAllNodes;
+
 	/** true allows class dynamic loading on selection */
 	bool bEnableClassDynamicLoading;
 
@@ -101,7 +135,7 @@ public:
 	FText ViewerTitleString;
 
 	/** The property this class viewer be working on. */
-	TSharedPtr<class IPropertyHandle> PropertyHandle;
+	TSharedPtr<IPropertyHandle> PropertyHandle;
 
 	/** The passed in property handle will be used to gather referencing assets. If additional referencing assets should be reported, supply them here. */
 	TArray<FAssetData> AdditionalReferencingAssets;
@@ -121,6 +155,12 @@ public:
 	/** Will set the initially selected row, if possible, to this class when the viewer is created */
 	UClass* InitiallySelectedClass;
 
+	/** (true) Will show the default classes if they exist. */
+	bool bShowDefaultClasses;
+
+	/** (true) Will show the classes viewer. */
+	bool bShowClassesViewer;
+
 public:
 
 	/** Constructor */
@@ -134,14 +174,18 @@ public:
 		, bShowNoneOption(false)
 		, bShowObjectRootClass(false)
 		, bExpandRootNodes(true)
+		, bExpandAllNodes(false)
 		, bEnableClassDynamicLoading(true)
 		, NameTypeToDisplay(EClassViewerNameTypeToDisplay::ClassName)
 		, bAllowViewOptions(true)
 		, bEditorClassesOnly(false)
 		, InitiallySelectedClass(nullptr)
+		, bShowDefaultClasses(true)
+		, bShowClassesViewer(true)
 	{
 	}
 };
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 /**
  * Class Viewer module
@@ -169,8 +213,7 @@ public:
 	 *
 	 * @return	New class viewer widget
 	 */
-	virtual TSharedRef<class SWidget> CreateClassViewer(const FClassViewerInitializationOptions& InitOptions,
-		const FOnClassPicked& OnClassPickedDelegate );
+	virtual TSharedRef<SWidget> CreateClassViewer(const FClassViewerInitializationOptions& InitOptions, const FOnClassPicked& OnClassPickedDelegate );
 
 	/** 
 	 * Create a new class filter from the given initialization options.
@@ -178,4 +221,18 @@ public:
 	virtual TSharedRef<IClassViewerFilter> CreateClassFilter(const FClassViewerInitializationOptions& InitOptions);
 
 	virtual TSharedRef<FClassViewerFilterFuncs> CreateFilterFuncs();
+
+	/** Registers a global filter that affects all class viewer instances (gets combined any local filter)*/
+	virtual void RegisterGlobalClassViewerFilter(const TSharedRef<IClassViewerFilter>& Filter);
+
+	/** Returns the global filter that affects all class viewer instances */
+	virtual const TSharedPtr<IClassViewerFilter>& GetGlobalClassViewerFilter();
+
+	FSimpleMulticastDelegate& GetOnGlobalClassViewerFilterModified() { return OnGlobalClassViewerFilterModified; }
+
+private:
+
+	TSharedPtr<IClassViewerFilter> GlobalClassViewerFilter;
+
+	FSimpleMulticastDelegate OnGlobalClassViewerFilterModified;
 };

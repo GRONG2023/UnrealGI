@@ -1,11 +1,24 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "BehaviorTreeEditorTabFactories.h"
-#include "Engine/Blueprint.h"
-#include "EditorStyleSet.h"
-#include "BehaviorTreeEditorTabs.h"
+
 #include "BehaviorTree/BehaviorTree.h"
+#include "BehaviorTreeEditor.h"
+#include "BehaviorTreeEditorTabs.h"
+#include "Containers/Array.h"
+#include "Engine/Blueprint.h"
+#include "GraphEditor.h"
+#include "HAL/PlatformCrt.h"
+#include "Internationalization/Internationalization.h"
+#include "Math/Vector2D.h"
+#include "Misc/AssertionMacros.h"
+#include "Styling/AppStyle.h"
+#include "Styling/ISlateStyle.h"
+#include "Textures/SlateIcon.h"
 #include "Widgets/Docking/SDockTab.h"
+
+class SWidget;
+struct FSlateBrush;
 
 #define LOCTEXT_NAMESPACE "BehaviorTreeEditorFactories"
 
@@ -14,7 +27,7 @@ FBlackboardSummoner::FBlackboardSummoner(TSharedPtr<class FBehaviorTreeEditor> I
 	, BehaviorTreeEditorPtr(InBehaviorTreeEditorPtr)
 {
 	TabLabel = LOCTEXT("BlackboardLabel", "Blackboard");
-	TabIcon = FSlateIcon(FEditorStyle::GetStyleSetName(), "Kismet.Tabs.Components");
+	TabIcon = FSlateIcon(FAppStyle::GetAppStyleSetName(), "BTEditor.Blackboard");
 
 	bIsSingleton = true;
 
@@ -37,7 +50,7 @@ FBlackboardEditorSummoner::FBlackboardEditorSummoner(TSharedPtr<class FBehaviorT
 	, BehaviorTreeEditorPtr(InBehaviorTreeEditorPtr)
 {
 	TabLabel = LOCTEXT("BlackboardLabel", "Blackboard");
-	TabIcon = FSlateIcon(FEditorStyle::GetStyleSetName(), "Kismet.Tabs.Components");
+	TabIcon = FSlateIcon(FAppStyle::GetAppStyleSetName(), "BTEditor.Blackboard");
 
 	bIsSingleton = true;
 
@@ -60,7 +73,7 @@ FBlackboardDetailsSummoner::FBlackboardDetailsSummoner(TSharedPtr<class FBehavio
 	, BehaviorTreeEditorPtr(InBehaviorTreeEditorPtr)
 {
 	TabLabel = LOCTEXT("BlackboardDetailsLabel", "Blackboard Details");
-	TabIcon = FSlateIcon(FEditorStyle::GetStyleSetName(), "Kismet.Tabs.Components");
+	TabIcon = FSlateIcon(FAppStyle::GetAppStyleSetName(), "LevelEditor.Tabs.Details");
 
 	bIsSingleton = true;
 
@@ -84,7 +97,7 @@ FBehaviorTreeDetailsSummoner::FBehaviorTreeDetailsSummoner(TSharedPtr<class FBeh
 	, BehaviorTreeEditorPtr(InBehaviorTreeEditorPtr)
 {
 	TabLabel = LOCTEXT("BehaviorTreeDetailsLabel", "Details");
-	TabIcon = FSlateIcon(FEditorStyle::GetStyleSetName(), "Kismet.Tabs.Components");
+	TabIcon = FSlateIcon(FAppStyle::GetAppStyleSetName(), "LevelEditor.Tabs.Details");
 
 	bIsSingleton = true;
 
@@ -108,7 +121,7 @@ FBehaviorTreeSearchSummoner::FBehaviorTreeSearchSummoner(TSharedPtr<class FBehav
 	, BehaviorTreeEditorPtr(InBehaviorTreeEditorPtr)
 {
 	TabLabel = LOCTEXT("BehaviorTreeSearchLabel", "Search");
-	TabIcon = FSlateIcon(FEditorStyle::GetStyleSetName(), "Kismet.Tabs.FindResults");
+	TabIcon = FSlateIcon(FAppStyle::GetAppStyleSetName(), "Kismet.Tabs.FindResults");
 
 	bIsSingleton = true;
 
@@ -158,7 +171,7 @@ TSharedRef<SWidget> FBTGraphEditorSummoner::CreateTabBodyForObject(const FWorkfl
 
 const FSlateBrush* FBTGraphEditorSummoner::GetTabIconForObject(const FWorkflowTabSpawnInfo& Info, UEdGraph* DocumentID) const
 {
-	return FEditorStyle::GetBrush("NoBrush");
+	return FAppStyle::Get().GetBrush("BTEditor.BehaviorTree");
 }
 
 void FBTGraphEditorSummoner::SaveState(TSharedPtr<SDockTab> Tab, TSharedPtr<FTabPayload> Payload) const

@@ -12,7 +12,7 @@
 UENUM()
 namespace EMaterialSceneAttributeInputMode
 {
-	enum Type
+	enum Type : int
 	{
 		Coordinates,
 		OffsetFraction
@@ -28,7 +28,7 @@ class UMaterialExpressionSceneColor : public UMaterialExpression
 	* Coordinates - UV coordinates to apply to the scene color lookup.
 	* OffsetFraction - 	An offset to apply to the scene color lookup in a 2d fraction of the screen.
 	*/ 
-	UPROPERTY(EditAnywhere, Category=MaterialExpressionSceneColor)
+	UPROPERTY(EditAnywhere, Category=MaterialExpressionSceneColor, meta = (ShowAsInputPin = "Advanced"))
 	TEnumAsByte<enum EMaterialSceneAttributeInputMode::Type> InputMode;
 
 	/**
@@ -43,7 +43,7 @@ class UMaterialExpressionSceneColor : public UMaterialExpression
 	FExpressionInput OffsetFraction_DEPRECATED;
 
 	/** only used if Input is not hooked up */
-	UPROPERTY(EditAnywhere, Category = MaterialExpressionSceneColor)
+	UPROPERTY(EditAnywhere, Category = MaterialExpressionSceneColor, meta = (OverridingInputProperty = "Input"))
 	FVector2D ConstInput;
 
 	//~ Begin UObject Interface.
@@ -55,6 +55,8 @@ class UMaterialExpressionSceneColor : public UMaterialExpression
 	virtual int32 Compile(class FMaterialCompiler* Compiler, int32 OutputIndex) override;
 	virtual void GetCaption(TArray<FString>& OutCaptions) const override;
 	virtual FName GetInputName(int32 InputIndex) const override;
+
+	virtual bool GenerateHLSLExpression(FMaterialHLSLGenerator& Generator, UE::HLSLTree::FScope& Scope, int32 OutputIndex, UE::HLSLTree::FExpression const*& OutExpression) const override;
 #endif
 	//~ End UMaterialExpression Interface
 };

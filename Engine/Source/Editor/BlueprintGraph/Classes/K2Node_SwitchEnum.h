@@ -3,15 +3,27 @@
 
 #pragma once
 
+#include "Containers/Array.h"
 #include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
-#include "EdGraph/EdGraphPin.h"
+#include "EdGraph/EdGraphNode.h"
 #include "EdGraph/EdGraphNodeUtils.h"
+#include "EdGraph/EdGraphPin.h"
+#include "HAL/Platform.h"
+#include "Internationalization/Text.h"
+#include "K2Node.h"
 #include "K2Node_Switch.h"
 #include "NodeDependingOnEnumInterface.h"
+#include "UObject/Class.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/UObjectGlobals.h"
+
 #include "K2Node_SwitchEnum.generated.h"
 
 class FBlueprintActionDatabaseRegistrar;
+class FName;
+class FString;
+class UObject;
 
 UCLASS(MinimalAPI)
 class UK2Node_SwitchEnum : public UK2Node_Switch, public INodeDependingOnEnumInterface
@@ -20,7 +32,7 @@ class UK2Node_SwitchEnum : public UK2Node_Switch, public INodeDependingOnEnumInt
 
 	/** Name of the enum being switched on */
 	UPROPERTY()
-	UEnum* Enum;
+	TObjectPtr<UEnum> Enum;
 
 	/** List of the current entries in the enum */
 	UPROPERTY()
@@ -32,6 +44,7 @@ class UK2Node_SwitchEnum : public UK2Node_Switch, public INodeDependingOnEnumInt
 
 	// INodeDependingOnEnumInterface
 	virtual class UEnum* GetEnum() const override { return Enum; }
+	virtual void ReloadEnum(class UEnum* InEnum) override;
 	virtual bool ShouldBeReconstructedAfterEnumChanged() const override {return true;}
 	// End of INodeDependingOnEnumInterface
 
@@ -54,8 +67,9 @@ class UK2Node_SwitchEnum : public UK2Node_Switch, public INodeDependingOnEnumInt
 	virtual void AddPinToSwitchNode() override;
 	virtual void RemovePinFromSwitchNode(UEdGraphPin* TargetPin) override;
 	virtual ERedirectType DoPinsMatchForReconstruction(const UEdGraphPin* NewPin, int32 NewPinIndex, const UEdGraphPin* OldPin, int32 OldPinIndex) const override;
+	virtual bool SupportsAddPinButton() const { return false; }
 	// End of UK2Node_Switch Interface
-
+	
 	/** Bind the switch to a named enum */
 	void SetEnum(UEnum* InEnum);
 

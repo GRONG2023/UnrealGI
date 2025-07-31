@@ -2,18 +2,31 @@
 
 
 #include "K2Node_LoadAsset.h"
-#include "UObject/UnrealType.h"
-#include "EdGraph/EdGraphPin.h"
-#include "Kismet/KismetSystemLibrary.h"
-#include "EdGraphSchema_K2.h"
-#include "K2Node_CallFunction.h"
-#include "K2Node_AssignmentStatement.h"
-#include "K2Node_CustomEvent.h"
-#include "K2Node_TemporaryVariable.h"
-#include "K2Node_ExecutionSequence.h"
-#include "KismetCompiler.h"
-#include "BlueprintNodeSpawner.h"
+
 #include "BlueprintActionDatabaseRegistrar.h"
+#include "BlueprintNodeSpawner.h"
+#include "Containers/UnrealString.h"
+#include "EdGraph/EdGraph.h"
+#include "EdGraph/EdGraphPin.h"
+#include "EdGraph/EdGraphSchema.h"
+#include "EdGraphSchema_K2.h"
+#include "Engine/MemberReference.h"
+#include "HAL/Platform.h"
+#include "Internationalization/Internationalization.h"
+#include "K2Node_AssignmentStatement.h"
+#include "K2Node_CallFunction.h"
+#include "K2Node_CustomEvent.h"
+#include "K2Node_Event.h"
+#include "K2Node_ExecutionSequence.h"
+#include "K2Node_TemporaryVariable.h"
+#include "Kismet/KismetSystemLibrary.h"
+#include "Kismet2/CompilerResultsLog.h"
+#include "KismetCompiler.h"
+#include "Misc/AssertionMacros.h"
+#include "UObject/Class.h"
+#include "UObject/Object.h"
+#include "UObject/UnrealNames.h"
+#include "UObject/UnrealType.h"
 
 #define LOCTEXT_NAMESPACE "K2Node_LoadAsset"
 
@@ -142,7 +155,7 @@ void UK2Node_LoadAsset::ExpandNode(class FKismetCompilerContext& CompilerContext
 
 	// Create OnLoadEvent
 	const FName DelegateOnLoadedParamName(TEXT("OnLoaded"));
-	UK2Node_CustomEvent* OnLoadEventNode = CompilerContext.SpawnIntermediateEventNode<UK2Node_CustomEvent>(this, CallFunctionAssetPin, SourceGraph);
+	UK2Node_CustomEvent* OnLoadEventNode = CompilerContext.SpawnIntermediateNode<UK2Node_CustomEvent>(this, SourceGraph);
 	OnLoadEventNode->CustomFunctionName = *FString::Printf(TEXT("OnLoaded_%s"), *CompilerContext.GetGuid(this));
 	OnLoadEventNode->AllocateDefaultPins();
 	{

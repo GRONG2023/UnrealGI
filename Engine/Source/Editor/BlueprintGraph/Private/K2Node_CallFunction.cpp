@@ -3,16 +3,19 @@
 #include "K2Node_CallFunction.h"
 #include "BlueprintCompilationManager.h"
 #include "BlueprintEditorSettings.h"
+#include "UObject/ReleaseObjectVersion.h"
 #include "UObject/UObjectHash.h"
 #include "UObject/FrameworkObjectVersion.h"
 #include "UObject/Interface.h"
 #include "UObject/PropertyPortFlags.h"
+#include "UObject/UE5MainStreamObjectVersion.h"
 #include "Kismet/BlueprintFunctionLibrary.h"
 #include "Engine/BlueprintGeneratedClass.h"
 #include "Framework/Notifications/NotificationManager.h"
 #include "GraphEditorSettings.h"
 #include "EdGraph/EdGraph.h"
 #include "EdGraphSchema_K2.h"
+#include "FindInBlueprints.h"
 #include "K2Node_Event.h"
 #include "K2Node_AssignmentStatement.h"
 #include "K2Node_CallArrayFunction.h"
@@ -22,8 +25,11 @@
 #include "K2Node_TemporaryVariable.h"
 #include "K2Node_ExecutionSequence.h"
 #include "Kismet2/BlueprintEditorUtils.h"
-#include "Classes/EditorStyleSettings.h"
+#include "Settings/EditorStyleSettings.h"
 #include "Editor.h"
+#include "Editor/UnrealEdEngine.h"
+#include "Preferences/UnrealEdOptions.h"
+#include "UnrealEdGlobals.h"
 #include "EdGraphUtilities.h"
 
 #include "KismetCompiler.h"
@@ -42,8 +48,42 @@
 #include "HAL/FileManager.h"
 #include "Widgets/Notifications/SNotificationList.h"
 #include "BlueprintNodeStatics.h"
+#include "Settings/BlueprintEditorProjectSettings.h"
+#include "ToolMenu.h"
 
 #define LOCTEXT_NAMESPACE "K2Node"
+
+namespace UE::K2NodeCallFunction::Private
+{
+	UEdGraphPin* FindBoolParamPin(const UK2Node_CallFunction& Node, FName ParameterName)
+	{
+		auto FindPin = [ParameterName](const UEdGraphPin* InPin)
+		{
+			check(InPin);
+			const bool bPinMatches =
+				(InPin->PinName == ParameterName) &&
+				(InPin->PinType.PinCategory == UEdGraphSchema_K2::PC_Boolean);
+			return bPinMatches;
+		};
+
+		return Node.FindPinByPredicate(FindPin);
+	}
+
+	UEdGraphPin* FindEnumParamPin(const UK2Node_CallFunction& Node, FName ParameterName)
+	{
+		auto FindPin = [ParameterName](const UEdGraphPin* InPin)
+		{
+			check(InPin);
+			const bool bPinMatches =
+				(InPin->PinName == ParameterName) &&
+				(InPin->PinType.PinCategory == UEdGraphSchema_K2::PC_Byte) &&
+				(Cast<UEnum>(InPin->PinType.PinSubCategoryObject) != nullptr);
+			return bPinMatches;
+		};
+
+		return Node.FindPinByPredicate(FindPin);
+	}
+}
 
 /*******************************************************************************
  *  FCustomStructureParamHelper
@@ -488,8 +528,25 @@ UK2Node_CallFunction::UK2Node_CallFunction(const FObjectInitializer& ObjectIniti
 
 bool UK2Node_CallFunction::HasDeprecatedReference() const
 {
-	UFunction* Function = GetTargetFunction();
-	return (Function && Function->HasMetaData(FBlueprintMetadata::MD_DeprecatedFunction));
+	if (UFunction* Function = GetTargetFunction())
+	{
+		bool bDeprecated = Function->HasMetaData(FBlueprintMetadata::MD_DeprecatedFunction);
+
+		if (bDeprecated)
+		{
+			const UBlueprintEditorProjectSettings* BlueprintEditorProjectSettings = GetDefault<UBlueprintEditorProjectSettings>();
+			const FString PathName = Function->GetPathName();
+
+			if (BlueprintEditorProjectSettings->SuppressedDeprecationMessages.Contains(PathName))
+			{
+				bDeprecated = false;
+			}
+		}
+
+		return bDeprecated;
+	}
+
+	return false;
 }
 
 FEdGraphNodeDeprecationResponse UK2Node_CallFunction::GetDeprecationResponse(EEdGraphNodeDeprecationType DeprecationType) const
@@ -633,7 +690,7 @@ void UK2Node_CallFunction::AllocateDefaultPins()
 			// class (the blueprint has not be compiled with it yet), so let's 
 			// check the skeleton class as well, see if we can pull pin data 
 			// from there...
-			UBlueprint* FunctionBlueprint = CastChecked<UBlueprint>(BpClassOwner->ClassGeneratedBy, ECastCheckedType::NullAllowed);
+			UBlueprint* FunctionBlueprint = CastChecked<UBlueprint>(BpClassOwner->ClassGeneratedBy.Get(), ECastCheckedType::NullAllowed);
 			if (FunctionBlueprint)
 			{
 				if (UFunction* SkelFunction = FindUField<UFunction>(FunctionBlueprint->SkeletonGeneratedClass, FunctionReference.GetMemberName()))
@@ -731,6 +788,66 @@ void UK2Node_CallFunction::ReallocatePinsDuringReconstruction(TArray<UEdGraphPin
 	}
 	// END TEMP
 
+	const UBlueprint* Blueprint = GetBlueprint();
+	if (Blueprint && Blueprint->bIsRegeneratingOnLoad)
+	{
+		// Older nodes incorrectly used an interface context for the target pin for calls to locally-implemented interface
+		// functions (due to an earlier regression). This was compounded by occasional confusion in the context menu, where
+		// a user might have chosen the wrong calling context for an interface implementation and then linked a term with an
+		// incompatible object type to the target input. At runtime this worked fine because both the calling context as well
+		// as the linked object context both implemented the target interface, which allowed any external object context to
+		// be linked to the target pin, so long as it also implemented the interface. After the target pin context was fixed
+		// to match the function context, the target pin context no longer matched the linked pin's context, so the connection
+		// would otherwise be orphaned and result in a Blueprint compiler error. So, rather than cause confusion about nodes
+		// that were not previously broken prior to the fix, we change the context to an interface for backwards compatibility.
+		const UEdGraphPin* OldSelfPin = FindSelfPin(OldPins);
+		if (OldSelfPin
+			&& OldSelfPin->PinType.PinCategory == UEdGraphSchema_K2::PC_Interface
+			&& OldSelfPin->LinkedTo.Num() > 0)
+		{
+			if (const UFunction* TargetFunction = GetTargetFunction())
+			{
+				// Get the function context. This should match the target pin context, but due to the regression that's noted above,
+				// in older assets this may not match the self pin if the context represents an implementation of an interface function.
+				const UClass* FunctionContext = TargetFunction->GetOwnerClass()->GetAuthoritativeClass();
+
+				// Get the interface context from the old target pin (this should already be non-NULL, but we'll check that below).
+				const UClass* InterfaceContext = Cast<UClass>(OldSelfPin->PinType.PinSubCategoryObject);
+
+				// If we're not already using an interface context, but the function's outer class implements the old target pin's type...
+				if (ensure(FunctionContext)
+					&& !FunctionContext->IsChildOf<UInterface>()
+					&& ensure(InterfaceContext)
+					&& FunctionContext->ImplementsInterface(InterfaceContext))
+				{
+					// Check for any linked object pins that aren't compatible with the current function context.
+					for (const UEdGraphPin* LinkedTo : OldSelfPin->LinkedTo)
+					{
+						if (ensure(LinkedTo)
+							&& LinkedTo->PinType.PinCategory == UEdGraphSchema_K2::PC_Object)
+						{
+							// If any linked object pin is not compatible with the current function context, but implements the old target pin's interface,
+							// reset the function context to reference the interface method instead. This will change the function call to an interface call,
+							// which will be compatible with any object context that's being passed in. When we reallocate the pins below, we'll reconstruct
+							// the node using the proper function context in which all linked pins will remain backwards-compatible with the existing target.
+							const UClass* LinkedToPinContext = Cast<UClass>(LinkedTo->PinType.PinSubCategoryObject);
+							if (LinkedToPinContext
+								&& !LinkedToPinContext->IsChildOf(FunctionContext)
+								&& LinkedToPinContext->ImplementsInterface(InterfaceContext))
+							{
+								if (UFunction* InterfaceFunction = FindUField<UFunction>(InterfaceContext, FunctionReference.GetMemberName()))
+								{
+									SetFromFunction(InterfaceFunction);
+									break;
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
 	Super::ReallocatePinsDuringReconstruction(OldPins);
 
 	// Connect Execute and Then pins for functions, which became pure.
@@ -753,7 +870,7 @@ void UK2Node_CallFunction::CreateExecPinsForFunctionCall(const UFunction* Functi
 	if (!bIsPureFunc)
 	{
 		// If we want enum->exec expansion, and it is not disabled, do it now
-		if(bWantsEnumToExecExpansion)
+		if (bWantsEnumToExecExpansion)
 		{
 			TArray<FName> EnumNames;
 			GetExpandEnumPinNames(Function, EnumNames);
@@ -1028,7 +1145,7 @@ bool UK2Node_CallFunction::CreatePinsForFunctionCall(const UFunction* Function)
 	ensure(BP);
 	if (BP != nullptr)
 	{
-		const bool bIsFunctionCompatibleWithSelf = BP->SkeletonGeneratedClass->IsChildOf(FunctionOwnerClass);
+		const bool bIsFunctionCompatibleWithSelf = BP->SkeletonGeneratedClass && BP->SkeletonGeneratedClass->IsChildOf(FunctionOwnerClass);
 
 		if (bIsStaticFunc)
 		{
@@ -1095,6 +1212,10 @@ bool UK2Node_CallFunction::CreatePinsForFunctionCall(const UFunction* Function)
 			//Flag pin as read only for const reference property
 			Pin->bDefaultValueIsIgnored = Param->HasAllPropertyFlags(CPF_ConstParm | CPF_ReferenceParm) && (!Function->HasMetaData(FBlueprintMetadata::MD_AutoCreateRefTerm) || Pin->PinType.IsContainer());
 
+			const bool bIsRequiredParam = Param->HasAnyPropertyFlags(CPF_RequiredParm);
+			// Don't let the user edit the default value if the parameter is required to be explicit.
+			Pin->bDefaultValueIsIgnored |= bIsRequiredParam;
+
 			const bool bAdvancedPin = Param->HasAllPropertyFlags(CPF_AdvancedDisplay);
 			Pin->bAdvancedView = bAdvancedPin;
 			if(bAdvancedPin && (ENodeAdvancedPins::NoPins == AdvancedPinDisplay))
@@ -1133,15 +1254,17 @@ bool UK2Node_CallFunction::CreatePinsForFunctionCall(const UFunction* Function)
 	}
 
 	// If we have 'enum to exec' parameters, set their default value to something valid so we don't get warnings
-	if(bWantsEnumToExecExpansion)
+	if (bWantsEnumToExecExpansion)
 	{
+		using namespace UE::K2NodeCallFunction::Private;
+
 		TArray<FName> EnumNamesToCheck;
 		GetExpandEnumPinNames(Function, EnumNamesToCheck);
 
 		for (const FName& Name : EnumNamesToCheck)
 		{
-			UEdGraphPin* EnumParamPin = FindPin(Name);
-			if (UEnum* PinEnum = (EnumParamPin ? Cast<UEnum>(EnumParamPin->PinType.PinSubCategoryObject.Get()) : NULL))
+			UEdGraphPin* EnumParamPin = FindEnumParamPin(*this, Name);
+			if (UEnum* PinEnum = (EnumParamPin ? Cast<UEnum>(EnumParamPin->PinType.PinSubCategoryObject.Get()) : nullptr))
 			{
 				EnumParamPin->DefaultValue = PinEnum->GetNameStringByIndex(0);
 			}
@@ -1172,7 +1295,7 @@ void UK2Node_CallFunction::PostReconstructNode()
 		if (UBlueprint* BP = GetBlueprint())
 		{
 			UClass* FunctionOwnerClass = Function->GetOuterUClass();
-			if (!BP->SkeletonGeneratedClass->IsChildOf(FunctionOwnerClass))
+			if (!BP->SkeletonGeneratedClass || !BP->SkeletonGeneratedClass->IsChildOf(FunctionOwnerClass))
 			{
 				SelfPin->DefaultObject = FunctionOwnerClass->GetAuthoritativeClass()->GetDefaultObject();
 			}
@@ -1191,12 +1314,8 @@ void UK2Node_CallFunction::PostReconstructNode()
 
 	if (IsNodePure())
 	{
-		// Remove any pre-existing breakpoint on this node since pure nodes cannot have breakpoints
-		if (UBreakpoint* ExistingBreakpoint = FKismetDebugUtilities::FindBreakpointForNode(GetBlueprint(), this))
-		{
-			// Remove the breakpoint
-			FKismetDebugUtilities::StartDeletingBreakpoint(ExistingBreakpoint, GetBlueprint());
-		}
+		// Remove the breakpoint
+		FKismetDebugUtilities::RemoveBreakpointFromNode(this, GetBlueprint());
 	}
 }
 
@@ -1215,18 +1334,11 @@ void UK2Node_CallFunction::NotifyPinConnectionListChanged(UEdGraphPin* Pin)
 	FCustomStructureParamHelper::UpdateCustomStructurePins(GetTargetFunction(), this, Pin);
 
 	// Refresh the node to hide internal-only pins once the [invalid] connection has been broken
-	if (Pin->bHidden && Pin->bNotConnectable && Pin->LinkedTo.Num() == 0)
+	// If the pin was a container then it needs to be refreshed to get the correct pin literal text boxes
+	// for its default value
+	if (Pin->PinType.IsContainer() || (Pin->bHidden && Pin->bNotConnectable && Pin->LinkedTo.Num() == 0))
 	{
 		GetGraph()->NotifyGraphChanged();
-	}
-
-	if (bIsBeadFunction)
-	{
-		if (Pin->LinkedTo.Num() == 0)
-		{
-			// Commit suicide; bead functions must always have an input and output connection
-			DestroyNode();
-		}
 	}
 
 	InvalidatePinTooltips();
@@ -1316,34 +1428,62 @@ bool UK2Node_CallFunction::CanFunctionSupportMultipleTargets(UFunction const* Fu
 	return !bHasReturnParam && bIsImpure && !bIsLatent;
 }
 
+bool UK2Node_CallFunction::CanEditorOnlyFunctionBeCalled(const UFunction* InFunction, const UObject* InObject)
+{
+	if (InFunction && InObject &&
+		(IsEditorOnlyObject(InFunction) || InFunction->HasAnyFunctionFlags(FUNC_EditorOnly)))
+	{
+		if (!IsEditorOnlyObject(InObject))
+		{
+			// InObject isn't editor-only, but it's still possible that it's a blueprint derived from an editor-only class, so let's check for that case
+			const UBlueprint* InObjectAsBP = Cast<const UBlueprint>(InObject->GetOuter());
+			return (InObjectAsBP && InObjectAsBP->ParentClass && IsEditorOnlyObject(InObjectAsBP->ParentClass));
+		}
+	}
+
+	return true;
+}
+
 bool UK2Node_CallFunction::CanPasteHere(const UEdGraph* TargetGraph) const
 {
+	// If a BP class, prefer using the skeleton class.
+	// This ensures that there's agreement with the target graph's class when we call CanFunctionBeUsedInGraph.
+	const UClass* ParentClass = FunctionReference.GetMemberParentClass(GetBlueprintClassFromNode());
+	const UBlueprint* OwningBP = ParentClass ? Cast<UBlueprint>(ParentClass->ClassGeneratedBy) : nullptr;
+	if (OwningBP)
+	{
+		ParentClass = OwningBP->SkeletonGeneratedClass;
+	}
+	const UFunction* TargetFunction = ParentClass ? ParentClass->FindFunctionByName(FunctionReference.GetMemberName()) : nullptr;
+
 	// Basic check for graph compatibility, etc.
 	bool bCanPaste = Super::CanPasteHere(TargetGraph);
 
+	// Cannot paste editor only functions into runtime graphs
+	if (bCanPaste)
+	{
+		bCanPaste = CanEditorOnlyFunctionBeCalled(TargetFunction, TargetGraph);
+	}
+
 	// We check function context for placability only in the base class case; derived classes are typically bound to
 	// specific functions that should always be placeable, but may not always be explicitly callable (e.g. InternalUseOnly).
-	if(bCanPaste && GetClass() == StaticClass())
+	if (bCanPaste && GetClass() == StaticClass())
 	{
 		const UEdGraphSchema_K2* K2Schema = GetDefault<UEdGraphSchema_K2>();
 		uint32 AllowedFunctionTypes = UEdGraphSchema_K2::EFunctionType::FT_Pure | UEdGraphSchema_K2::EFunctionType::FT_Const | UEdGraphSchema_K2::EFunctionType::FT_Protected;
-		if(K2Schema->DoesGraphSupportImpureFunctions(TargetGraph))
+		if (K2Schema->DoesGraphSupportImpureFunctions(TargetGraph))
 		{
 			AllowedFunctionTypes |= UEdGraphSchema_K2::EFunctionType::FT_Imperative;
 		}
-		UFunction* TargetFunction = GetTargetFunction();
-		if( !TargetFunction )
+
+		if (TargetFunction)
 		{
-			TargetFunction = GetTargetFunctionFromSkeletonClass();
-		}
-		if (!TargetFunction)
-		{
-			// If the function doesn't exist and it is from self context, then it could be created from a CustomEvent node, that was also pasted (but wasn't compiled yet).
-			bCanPaste = FunctionReference.IsSelfContext();
+			bCanPaste = K2Schema->CanFunctionBeUsedInGraph(FBlueprintEditorUtils::FindBlueprintForGraphChecked(TargetGraph)->SkeletonGeneratedClass, TargetFunction, TargetGraph, AllowedFunctionTypes, false);
 		}
 		else
 		{
-			bCanPaste = K2Schema->CanFunctionBeUsedInGraph(FBlueprintEditorUtils::FindBlueprintForGraphChecked(TargetGraph)->GeneratedClass, TargetFunction, TargetGraph, AllowedFunctionTypes, false);
+			// If the function doesn't exist and it is from self context, then it could be created from a CustomEvent node, that was also pasted (but wasn't compiled yet).
+			bCanPaste = FunctionReference.IsSelfContext();
 		}
 	}
 	
@@ -1413,25 +1553,25 @@ FSlateIcon UK2Node_CallFunction::GetPaletteIconForFunction(UFunction const* Func
 
 	if (Function && Function->HasMetaData(NativeMakeFunc))
 	{
-		static FSlateIcon Icon("EditorStyle", "GraphEditor.MakeStruct_16x");
+		static FSlateIcon Icon(FAppStyle::GetAppStyleSetName(), "GraphEditor.MakeStruct_16x");
 		return Icon;
 	}
 	else if (Function && Function->HasMetaData(NativeBrakeFunc))
 	{
-		static FSlateIcon Icon("EditorStyle", "GraphEditor.BreakStruct_16x");
+		static FSlateIcon Icon(FAppStyle::GetAppStyleSetName(), "GraphEditor.BreakStruct_16x");
 		return Icon;
 	}
 	// Check to see if the function is calling an function that could be an event, display the event icon instead.
 	else if (Function && UEdGraphSchema_K2::FunctionCanBePlacedAsEvent(Function))
 	{
-		static FSlateIcon Icon("EditorStyle", "GraphEditor.Event_16x");
+		static FSlateIcon Icon(FAppStyle::GetAppStyleSetName(), "GraphEditor.Event_16x");
 		return Icon;
 	}
 	else
 	{
 		OutColor = GetPalletteIconColor(Function);
 
-		static FSlateIcon Icon("EditorStyle", "Kismet.AllClasses.FunctionIcon");
+		static FSlateIcon Icon(FAppStyle::GetAppStyleSetName(), "Kismet.AllClasses.FunctionIcon");
 		return Icon;
 	}
 }
@@ -1441,6 +1581,32 @@ FLinearColor UK2Node_CallFunction::GetNodeTitleColor() const
 	return GetPalletteIconColor(GetTargetFunction());
 }
 
+FString UK2Node_CallFunction::GetFindReferenceSearchString_Impl(EGetFindReferenceSearchStringFlags InFlags) const
+{
+	if (EnumHasAnyFlags(InFlags, EGetFindReferenceSearchStringFlags::UseSearchSyntax))
+	{
+		// Searching by class member: try to resolve function and construct precise query
+		if (const UFunction* Function = GetTargetFunction())
+		{
+			FString SearchTerm;
+			if (FindInBlueprintsHelpers::ConstructSearchTermFromFunction(Function, SearchTerm))
+			{
+				return SearchTerm;
+			}
+		}
+	}
+
+	// Searching by function name: try to resolve function to return native name
+	if (const UFunction* Function = GetTargetFunction())
+	{
+		const FString NativeName = Function->GetName();
+		return FString::Printf(TEXT("\"%s\""), *NativeName);
+	}
+
+	// Fallback behavior: search by node title
+	return Super::GetFindReferenceSearchString_Impl(InFlags);
+}
+
 FText UK2Node_CallFunction::GetTooltipText() const
 {
 	FText Tooltip;
@@ -1448,7 +1614,15 @@ FText UK2Node_CallFunction::GetTooltipText() const
 	UFunction* Function = GetTargetFunction();
 	if (Function == nullptr)
 	{
-		return FText::Format(LOCTEXT("CallUnknownFunction", "Call unknown function {0}"), FText::FromName(FunctionReference.GetMemberName()));
+		// try to see where this function is meant to come from:
+		if (UClass* FuncOwnerClass = FunctionReference.GetMemberParentClass(GetBlueprintClassFromNode()))
+		{
+			return FText::Format(LOCTEXT("CallUnknownFunctionKnownOuter", "Call unknown function {0} - missing from {1}"), FText::FromName(FunctionReference.GetMemberName()), FText::FromName(FuncOwnerClass->GetFName()));
+		}
+		else
+		{
+			return FText::Format(LOCTEXT("CallUnknownFunction", "Call unknown function {0}"), FText::FromName(FunctionReference.GetMemberName()));
+		}
 	}
 	else if (CachedTooltip.IsOutOfDate(this))
 	{
@@ -1460,21 +1634,30 @@ FText UK2Node_CallFunction::GetTooltipText() const
 		if (Function->HasAllFunctionFlags(FUNC_BlueprintAuthorityOnly))
 		{
 			Args.Add(
-				TEXT("ClientString"),
+				TEXT("Subtitle"),
 				NSLOCTEXT("K2Node", "ServerFunction", "Authority Only. This function will only execute on the server.")
 			);
 			// FText::Format() is slow, so we cache this to save on performance
-			CachedTooltip.SetCachedText(FText::Format(LOCTEXT("CallFunction_SubtitledTooltip", "{DefaultTooltip}\n\n{ClientString}"), Args), this);
+			CachedTooltip.SetCachedText(FText::Format(LOCTEXT("CallFunction_SubtitledTooltip", "{DefaultTooltip}\n\n{Subtitle}"), Args), this);
 		}
 		else if (Function->HasAllFunctionFlags(FUNC_BlueprintCosmetic))
 		{
 			Args.Add(
-				TEXT("ClientString"),
+				TEXT("Subtitle"),
 				NSLOCTEXT("K2Node", "ClientFunction", "Cosmetic. This event is only for cosmetic, non-gameplay actions.")
 			);
 			// FText::Format() is slow, so we cache this to save on performance
-			CachedTooltip.SetCachedText(FText::Format(LOCTEXT("CallFunction_SubtitledTooltip", "{DefaultTooltip}\n\n{ClientString}"), Args), this);
+			CachedTooltip.SetCachedText(FText::Format(LOCTEXT("CallFunction_SubtitledTooltip", "{DefaultTooltip}\n\n{Subtitle}"), Args), this);
 		} 
+		else if (Function->HasMetaData(FBlueprintMetadata::MD_Latent))
+		{
+			Args.Add(
+				TEXT("Subtitle"),
+				NSLOCTEXT("K2Node", "LatentFunction", "Latent. This node will complete at a later time. Latent nodes can only be placed in event graphs.")
+			);
+			// FText::Format() is slow, so we cache this to save on performance
+			CachedTooltip.SetCachedText(FText::Format(LOCTEXT("CallFunction_SubtitledTooltip", "{DefaultTooltip}\n\n{Subtitle}"), Args), this);
+		}
 		else
 		{
 			CachedTooltip.SetCachedText(BaseTooltip, this);
@@ -1718,12 +1901,8 @@ FText UK2Node_CallFunction::GetDefaultCategoryForFunction(const UFunction* Funct
 
 FText UK2Node_CallFunction::GetKeywordsForFunction(const UFunction* Function)
 {
-	// If the friendly name and real function name do not match add the real function name friendly name as a keyword.
-	FString Keywords;
-	if( Function->GetName() != GetUserFacingFunctionName(Function).ToString() )
-	{
-		Keywords = Function->GetName();
-	}
+	// Always add the real function name as the first keyword, even if it matches the display name we don't want to penalize one word function names in later searches
+	FString Keywords = Function->GetName();
 
 	if (ShouldDrawCompact(Function))
 	{
@@ -1808,11 +1987,6 @@ bool UK2Node_CallFunction::ShouldDrawCompact() const
 	UFunction* Function = GetTargetFunction();
 
 	return ShouldDrawCompact(Function);
-}
-
-bool UK2Node_CallFunction::ShouldDrawAsBead() const
-{
-	return bIsBeadFunction;
 }
 
 bool UK2Node_CallFunction::ShouldShowNodeProperties() const
@@ -1946,6 +2120,57 @@ void UK2Node_CallFunction::FixupSelfMemberContext()
 	}
 }
 
+void UK2Node_CallFunction::SuppressDeprecationWarning() const
+{
+	if (UFunction* Function = GetTargetFunction())
+	{
+		FString PathName = Function->GetPathName();
+		UBlueprintEditorProjectSettings* BlueprintEditorProjectSettings = GetMutableDefault<UBlueprintEditorProjectSettings>();
+		BlueprintEditorProjectSettings->SuppressedDeprecationMessages.Add(MoveTemp(PathName));
+		BlueprintEditorProjectSettings->SaveConfig();
+		BlueprintEditorProjectSettings->TryUpdateDefaultConfigFile("", false);
+	}
+}
+
+TSet<FName> UK2Node_CallFunction::GetRequiredParamNames(const UFunction* ForFunction)
+{
+	TSet<FName> Result;
+
+	for (TFieldIterator<FProperty> PropIt(ForFunction); PropIt && (PropIt->PropertyFlags & CPF_Parm); ++PropIt)
+	{
+		FProperty* Param = *PropIt;
+		const bool bIsRequiredParam = Param->HasAnyPropertyFlags(CPF_RequiredParm);
+		if (bIsRequiredParam)
+		{
+			Result.Add(Param->GetFName());
+		}
+	}
+	return Result;
+}
+
+void UK2Node_CallFunction::ValidateRequiredPins(const UFunction* Function, FCompilerResultsLog& MessageLog) const
+{
+	TSet<FName> RequiredPinNames = GetRequiredParamNames(Function);
+
+	if(RequiredPinNames.Num() == 0)
+	{
+		return;
+	}
+
+	for (const UEdGraphPin* Pin : Pins)
+	{
+		if (Pin != nullptr)
+		{
+			const bool bIsRequired = RequiredPinNames.Contains(Pin->GetFName());
+			const bool bIsNotLinked = Pin->LinkedTo.Num() == 0;
+			if (bIsRequired && bIsNotLinked)
+			{
+				MessageLog.Error(*LOCTEXT("MissingRequiredPin", "Pin @@ must be linked to another node (in @@)").ToString(), Pin, this);
+			}
+		}
+	}
+}
+
 void UK2Node_CallFunction::PostPasteNode()
 {
 	Super::PostPasteNode();
@@ -1982,6 +2207,16 @@ void UK2Node_CallFunction::PostPasteNode()
 			}
 		}
 	}
+}
+
+bool UK2Node_CallFunction::CanSplitPin(const UEdGraphPin* Pin) const
+{
+	TSet<FName> RequiredPins;
+	if (UFunction* Function = GetTargetFunction())
+	{
+		RequiredPins = GetRequiredParamNames(Function);
+	}
+	return Super::CanSplitPin(Pin) && !RequiredPins.Contains(Pin->GetFName());
 }
 
 void UK2Node_CallFunction::PostDuplicate(bool bDuplicateForPIE)
@@ -2025,36 +2260,42 @@ void UK2Node_CallFunction::ValidateNodeDuringCompilation(class FCompilerResultsL
 
 	const UClass* BlueprintClass = Blueprint ? Blueprint->ParentClass : nullptr;
 	const bool bIsEditorOnlyBlueprintBaseClass = !BlueprintClass || IsEditorOnlyObject(BlueprintClass);
+	static bool bAllowUnsafeBlueprintCalls = FParse::Param(FCommandLine::Get(), TEXT("AllowUnsafeBlueprintCalls"));
 
-	// This error is disabled while we figure out how we can identify uncooked only
-	// blueprints that want to make use of uncooked only APIs:
-	#if 0
-	const bool bIsUncookedOnlyFunction = Function && Function->GetOutermost()->HasAllPackagesFlags(PKG_UncookedOnly);
-	if (	bIsUncookedOnlyFunction &&
+	if (!bAllowUnsafeBlueprintCalls)
+	{
+		// This error is disabled while we figure out how we can identify uncooked only
+		// blueprints that want to make use of uncooked only APIs:
+		#if 0
+		const bool bIsUncookedOnlyFunction = Function && Function->GetOutermost()->HasAllPackagesFlags(PKG_UncookedOnly);
+		if (bIsUncookedOnlyFunction &&
 			// Only allow calls to uncooked only functions from editor only/uncooked only
 			// contexts:
-			!(	GetOutermost()->HasAnyPackageFlags(PKG_UncookedOnly|PKG_EditorOnly) ||
-				bIsEditorOnlyBlueprintBaseClass ))
-	{
-		MessageLog.Error(*LOCTEXT("UncookedOnlyError", "Attempting to call uncooked only function @@ in runtime blueprint").ToString(), this);
-	}
-	#endif //0
-	
-	// Ensure that editor module BP exposed UFunctions can only be called in blueprints for which the base class is also part of an editor module
-	// Also check for functions wrapped in WITH_EDITOR 
-	if (Function && Blueprint &&
-		(IsEditorOnlyObject(Function) || Function->HasAnyFunctionFlags(FUNC_EditorOnly)))
-	{	
-		if (!bIsEditorOnlyBlueprintBaseClass)
+			!(GetOutermost()->HasAnyPackageFlags(PKG_UncookedOnly | PKG_EditorOnly) ||
+				bIsEditorOnlyBlueprintBaseClass))
 		{
-			FString const FunctName = Function->GetName();
-			FText const WarningFormat = LOCTEXT("EditorFunctionFmt", "Cannot use the editor function \"{0}\" in this runtime Blueprint. Only for use in Editor Utility Blueprints and Blutilities.");
-			MessageLog.Error(*FText::Format(WarningFormat, FText::FromString(FunctName)).ToString(), this);
+			MessageLog.Error(*LOCTEXT("UncookedOnlyError", "Attempting to call uncooked only function @@ in runtime blueprint").ToString(), this);
+		}
+		#endif	// 0
+
+		// Ensure that editor module BP exposed UFunctions can only be called in blueprints for which the base class is also part of an editor module
+		// Also check for functions wrapped in WITH_EDITOR 
+		if (Function && Blueprint &&
+			(IsEditorOnlyObject(Function) || Function->HasAnyFunctionFlags(FUNC_EditorOnly)))
+		{
+			if (!bIsEditorOnlyBlueprintBaseClass)
+			{
+				FString const FunctName = Function->GetName();
+				FText const WarningFormat = LOCTEXT("EditorFunctionFmt", "Cannot use the editor function \"{0}\" in this runtime Blueprint. Only for use in Editor Utility Blueprints and Blutilities.");
+				MessageLog.Error(*FText::Format(WarningFormat, FText::FromString(FunctName)).ToString(), this);
+			}
 		}
 	}
 
 	if (Function)
 	{
+		ValidateRequiredPins(Function, MessageLog);
+
 		// enforce UnsafeDuringActorConstruction keyword
 		if (Function->HasMetaData(FBlueprintMetadata::MD_UnsafeForConstructionScripts))
 		{
@@ -2088,9 +2329,20 @@ void UK2Node_CallFunction::ValidateNodeDuringCompilation(class FCompilerResultsL
 
 		// enforce WorldContext restrictions
 		const bool bInsideBpFuncLibrary = Blueprint && (BPTYPE_FunctionLibrary == Blueprint->BlueprintType);
-		if (!bInsideBpFuncLibrary && 
+		
+		// go through all of the pins and verify if we have a visible world context or not.
+		bool bVisibleWorldContext = false;
+		for (const UEdGraphPin* Pin : Pins)
+		{
+			if (!Pin->bHidden && Pin->PinName.IsEqual(FName("WorldContextObject")))
+			{
+				bVisibleWorldContext = true;
+				break;
+			}
+		}
+		if (!bInsideBpFuncLibrary &&
 			Function->HasMetaData(FBlueprintMetadata::MD_WorldContext) && 
-			!Function->HasMetaData(FBlueprintMetadata::MD_CallableWithoutWorldContext))
+			(!Function->HasMetaData(FBlueprintMetadata::MD_CallableWithoutWorldContext) && !bVisibleWorldContext))
 		{
 			check(Blueprint);
 			UClass* ParentClass = Blueprint->ParentClass;
@@ -2107,7 +2359,7 @@ void UK2Node_CallFunction::ValidateNodeDuringCompilation(class FCompilerResultsL
 			const bool bCanTreatAsError = Blueprint->GetLinkerCustomVersion(FFrameworkObjectVersion::GUID) >= FFrameworkObjectVersion::EnforceBlueprintFunctionVisibility;
 
 			const bool bIsProtected = (Function->FunctionFlags & FUNC_Protected) != 0;
-			const bool bFuncBelongsToSubClass = Blueprint->SkeletonGeneratedClass->IsChildOf(Function->GetOuterUClass());
+			const bool bFuncBelongsToSubClass = Blueprint->SkeletonGeneratedClass && Blueprint->SkeletonGeneratedClass->IsChildOf(Function->GetOuterUClass());
 			if (bIsProtected && !bFuncBelongsToSubClass)
 			{
 				if(bCanTreatAsError)
@@ -2149,6 +2401,24 @@ void UK2Node_CallFunction::ValidateNodeDuringCompilation(class FCompilerResultsL
 			).ToString();
 			MessageLog.Error(*ErrorString, this);
 		}
+		else if (Pin && Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Object && Pin->PinName == UEdGraphSchema_K2::PN_Self)
+		{
+			const UEdGraphPin* SelfPin = MessageLog.FindSourcePin(Pin);
+			for (const UEdGraphPin* LinkedTo : SelfPin->LinkedTo)
+			{
+				if (ensure(LinkedTo) && LinkedTo->PinType.PinCategory == UEdGraphSchema_K2::PC_Interface)
+				{
+					if (LinkedTo->PinType.IsArray())
+					{
+						MessageLog.Note(*FText::Format(LOCTEXT("InterfaceArrayTargetConnectionNote", "@@: An array of interface types can no longer be directly connected to '{0}'. Each entry must first be cast to the object type. However, the existing connection to '{1}' will continue to work for backwards-compatibility."), FText::FromString(SelfPin->GetName()), FText::FromString(LinkedTo->GetName())).ToString(), this);
+					}
+					else
+					{
+						MessageLog.Note(*FText::Format(LOCTEXT("InterfaceTargetConnectionNote", "@@: An interface type can no longer be directly connected to '{0}'. It must first be cast to the object type. However, the existing connection to '{1}' will continue to work for backwards-compatibility."), FText::FromString(SelfPin->GetName()), FText::FromString(LinkedTo->GetName())).ToString(), this);
+					}
+				}
+			}
+		}
 	}
 }
 
@@ -2157,10 +2427,11 @@ void UK2Node_CallFunction::Serialize(FArchive& Ar)
 	Super::Serialize(Ar);
 
 	Ar.UsingCustomVersion(FReleaseObjectVersion::GUID);
+	Ar.UsingCustomVersion(FUE5MainStreamObjectVersion::GUID);
 
 	if (Ar.IsLoading())
 	{
-		if (Ar.UE4Ver() < VER_UE4_SWITCH_CALL_NODE_TO_USE_MEMBER_REFERENCE)
+		if (Ar.UEVer() < VER_UE4_SWITCH_CALL_NODE_TO_USE_MEMBER_REFERENCE)
 		{
 			UFunction* Function = FindUField<UFunction>(CallFunctionClass_DEPRECATED, CallFunctionName_DEPRECATED);
 			const bool bProbablySelfCall = (CallFunctionClass_DEPRECATED == NULL) || ((Function != NULL) && (Function->GetOuterUClass()->ClassGeneratedBy == GetBlueprint()));
@@ -2168,7 +2439,7 @@ void UK2Node_CallFunction::Serialize(FArchive& Ar)
 			FunctionReference.SetDirect(CallFunctionName_DEPRECATED, FGuid(), CallFunctionClass_DEPRECATED, bProbablySelfCall);
 		}
 
-		if(Ar.UE4Ver() < VER_UE4_K2NODE_REFERENCEGUIDS)
+		if(Ar.UEVer() < VER_UE4_K2NODE_REFERENCEGUIDS)
 		{
 			FGuid FunctionGuid;
 
@@ -2223,6 +2494,25 @@ void UK2Node_CallFunction::Serialize(FArchive& Ar)
 						}
 					}
 				}
+			}
+		}
+
+		for (int32 PinIndex = 0; PinIndex < Pins.Num(); ++PinIndex)
+		{
+			UEdGraphPin* Pin = Pins[PinIndex];
+			check(Pin);
+
+			bool bNeedsSubCategoryObjectRepair =
+				(Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Object) &&
+				(Pin->PinType.PinSubCategory != UEdGraphSchema_K2::PSC_Self) &&
+				(Pin->PinType.PinSubCategoryObject == nullptr) &&
+				(Ar.CustomVer(FReleaseObjectVersion::GUID) < FUE5MainStreamObjectVersion::NullPinSubCategoryObjectFix);
+
+			// Prior to NullPinSubCategoryObjectFix, some object pins were serialized with a null PinSubCategoryObject.
+			// Going forward, this will be an error, so we'll attempt to repair the pin by assigning a class.
+			if (bNeedsSubCategoryObjectRepair)
+			{
+				Pin->PinType.PinSubCategoryObject = FunctionReference.GetMemberParentClass();
 			}
 		}
 
@@ -2318,10 +2608,12 @@ void UK2Node_CallFunction::ExpandNode(class FKismetCompilerContext& CompilerCont
 	}
 
 	// If we have an enum param that is expanded, we handle that first
-	if(bWantsEnumToExecExpansion)
+	if (bWantsEnumToExecExpansion)
 	{
 		if(Function)
 		{
+			using namespace UE::K2NodeCallFunction::Private;
+
 			TArray<FName> EnumNamesToCheck;
 			GetExpandEnumPinNames(Function, EnumNamesToCheck);
 
@@ -2370,20 +2662,26 @@ void UK2Node_CallFunction::ExpandNode(class FKismetCompilerContext& CompilerCont
 				}
 			};
 
-			for (const FName& EnumParamName : EnumNamesToCheck)
+			for (const FName& ParamName : EnumNamesToCheck)
 			{
 				UEnum* Enum = nullptr;
+				UEdGraphPin* EnumParamPin = nullptr;
 
-				if (FByteProperty* ByteProp = FindFProperty<FByteProperty>(Function, EnumParamName))
+				if (FBoolProperty* BoolProp = FindFProperty<FBoolProperty>(Function, ParamName))
+				{
+					EnumParamPin = FindBoolParamPin(*this, ParamName);
+				}
+				else if (FByteProperty* ByteProp = FindFProperty<FByteProperty>(Function, ParamName))
 				{
 					Enum = ByteProp->Enum;
+					EnumParamPin = FindEnumParamPin(*this, ParamName);
 				}
-				else if (FEnumProperty* EnumProp = FindFProperty<FEnumProperty>(Function, EnumParamName))
+				else if (FEnumProperty* EnumProp = FindFProperty<FEnumProperty>(Function, ParamName))
 				{
 					Enum = EnumProp->GetEnum();
+					EnumParamPin = FindEnumParamPin(*this, ParamName);
 				}
 
-				UEdGraphPin* EnumParamPin = FindPin(EnumParamName);
 				if (Enum && EnumParamPin)
 				{
 					// Expanded as input execs pins
@@ -2437,7 +2735,7 @@ void UK2Node_CallFunction::ExpandNode(class FKismetCompilerContext& CompilerCont
 								AssignNode->GetValuePin()->DefaultValue = Pin->PinName.ToString();
 
 								// Finally remove this 'cosmetic' exec pin
-								Pins[PinIdx]->MarkPendingKill();
+								Pins[PinIdx]->MarkAsGarbage();
 								Pins.RemoveAt(PinIdx);
 							}
 						}
@@ -2475,7 +2773,7 @@ void UK2Node_CallFunction::ExpandNode(class FKismetCompilerContext& CompilerCont
 										CompilerContext.MovePinLinksToIntermediate(*Pin, *FoundPin);
 
 										// Finally remove this 'cosmetic' exec pin
-										Pins[PinIdx]->MarkPendingKill();
+										Pins[PinIdx]->MarkAsGarbage();
 										Pins.RemoveAt(PinIdx);
 									}
 								}
@@ -2565,11 +2863,8 @@ void UK2Node_CallFunction::ExpandNode(class FKismetCompilerContext& CompilerCont
 		if ( Function )
 		{
 			TArray<FString> AutoCreateRefTermPinNames;
-			const bool bHasAutoCreateRefTerms = Function->HasMetaData(FBlueprintMetadata::MD_AutoCreateRefTerm);
-			if ( bHasAutoCreateRefTerms )
-			{
-				CompilerContext.GetSchema()->GetAutoEmitTermParameters(Function, AutoCreateRefTermPinNames);
-			}
+			CompilerContext.GetSchema()->GetAutoEmitTermParameters(Function, AutoCreateRefTermPinNames);
+			const bool bHasAutoCreateRefTerms = AutoCreateRefTermPinNames.Num() != 0;
 
 			for (UEdGraphPin* Pin : Pins)
 			{
@@ -2620,18 +2915,34 @@ void UK2Node_CallFunction::ExpandNode(class FKismetCompilerContext& CompilerCont
 		}
 	}
 
+	// Older assets may have interface pins wired directly to the target pin in the source graph (due to an earlier regression).
+	UEdGraphPin* SelfPin = Schema->FindSelfPin(*this, EEdGraphPinDirection::EGPD_Input);
+	if (SelfPin && SelfPin->PinType.PinCategory == UEdGraphSchema_K2::PC_Object)
+	{
+		for (UEdGraphPin* PinLinkedToSelfPin : SelfPin->LinkedTo)
+		{
+			if (PinLinkedToSelfPin && PinLinkedToSelfPin->PinType.PinCategory == UEdGraphSchema_K2::PC_Interface && !PinLinkedToSelfPin->PinType.IsContainer())
+			{
+				PinLinkedToSelfPin->BreakLinkTo(SelfPin);
+				if (!Schema->TryCreateConnection(PinLinkedToSelfPin, SelfPin))
+				{
+					PinLinkedToSelfPin->MakeLinkTo(SelfPin);
+				}
+			}
+		}
+	}
+
 	// Then we go through and expand out array iteration if necessary
 	const bool bAllowMultipleSelfs = AllowMultipleSelfs(true);
-	UEdGraphPin* MultiSelf = Schema->FindSelfPin(*this, EEdGraphPinDirection::EGPD_Input);
-	if(bAllowMultipleSelfs && MultiSelf && !MultiSelf->PinType.IsArray())
+	if (bAllowMultipleSelfs && SelfPin && !SelfPin->PinType.IsArray())
 	{
-		const bool bProperInputToExpandForEach = 
-			(1 == MultiSelf->LinkedTo.Num()) && 
-			(nullptr != MultiSelf->LinkedTo[0]) && 
-			(MultiSelf->LinkedTo[0]->PinType.IsArray());
-		if(bProperInputToExpandForEach)
+		const bool bProperInputToExpandForEach =
+			(1 == SelfPin->LinkedTo.Num()) &&
+			(nullptr != SelfPin->LinkedTo[0]) &&
+			(SelfPin->LinkedTo[0]->PinType.IsArray());
+		if (bProperInputToExpandForEach)
 		{
-			CallForEachElementInArrayExpansion(this, MultiSelf, CompilerContext, SourceGraph);
+			CallForEachElementInArrayExpansion(this, SelfPin, CompilerContext, SourceGraph);
 		}
 	}
 }
@@ -3082,7 +3393,7 @@ bool UK2Node_CallFunction::HasExternalDependencies(TArray<class UStruct*>* Optio
 	UFunction* Function = GetTargetFunction();
 	const UClass* SourceClass = Function ? Function->GetOwnerClass() : nullptr;
 	const UBlueprint* SourceBlueprint = GetBlueprint();
-	bool bResult = (SourceClass != nullptr) && (SourceClass->ClassGeneratedBy != SourceBlueprint);
+	bool bResult = (SourceClass != nullptr) && (SourceClass->ClassGeneratedBy.Get() != SourceBlueprint);
 	if (bResult && OptionalOutput)
 	{
 		OptionalOutput->AddUnique(Function);
@@ -3094,7 +3405,7 @@ bool UK2Node_CallFunction::HasExternalDependencies(TArray<class UStruct*>* Optio
 		UStruct* DepStruct = Pin ? Cast<UStruct>(Pin->PinType.PinSubCategoryObject.Get()) : nullptr;
 
 		UClass* DepClass = Cast<UClass>(DepStruct);
-		if (DepClass && (DepClass->ClassGeneratedBy == SourceBlueprint))
+		if (DepClass && (DepClass->ClassGeneratedBy.Get() == SourceBlueprint))
 		{
 			//Don't include self
 			continue;
@@ -3223,6 +3534,24 @@ void UK2Node_CallFunction::AddSearchMetaDataInfo(TArray<struct FSearchTagDataPai
 	}
 }
 
+void UK2Node_CallFunction::AddPinSearchMetaDataInfo(const UEdGraphPin* Pin, TArray<FSearchTagDataPair>& OutTaggedMetaData) const
+{
+	Super::AddPinSearchMetaDataInfo(Pin, OutTaggedMetaData);
+
+	// Blueprint graphs that call a function declared in the same blueprint don't store a target type, but rather PinSubCategory == Self.
+	// When this is the case, we will still explicitly index the ObjectClass for the target pin, so that it can be treated the same as 
+	// any other call function nodes.
+	if (Pin->PinName == UEdGraphSchema_K2::PN_Self && Pin->PinType.PinSubCategory == UEdGraphSchema_K2::PSC_Self && !Pin->PinType.PinSubCategoryObject.IsValid())
+	{
+		// Get the parent or interface class that originally defined this function
+		if (const UClass* FuncOriginClass = FindInBlueprintsHelpers::GetFunctionOriginClass(GetTargetFunction()))
+		{
+			const FString FuncOriginClassName = FuncOriginClass->GetPathName();
+			OutTaggedMetaData.Add(FSearchTagDataPair(FFindInBlueprintSearchTags::FiB_ObjectClass, FText::FromString(FuncOriginClassName)));
+		}
+	}
+}
+
 TSharedPtr<SWidget> UK2Node_CallFunction::CreateNodeImage() const
 {
 	// For set, map and array functions we have a cool icon. This helps users quickly
@@ -3261,69 +3590,97 @@ bool UK2Node_CallFunction::CanJumpToDefinition() const
 {
 	const UFunction* TargetFunction = GetTargetFunction();
 	const bool bNativeFunction = (TargetFunction != nullptr) && (TargetFunction->IsNative());
-	return bNativeFunction || (GetJumpTargetForDoubleClick() != nullptr);
+	const bool bCanJumpToNativeFunction = bNativeFunction && ensure(GUnrealEd) && GUnrealEd->GetUnrealEdOptions()->IsCPPAllowed();
+	return bCanJumpToNativeFunction || (GetJumpTargetForDoubleClick() != nullptr);
 }
 
 void UK2Node_CallFunction::JumpToDefinition() const
 {
-	// For native functions, try going to the function definition in C++ if available
-	if (UFunction* TargetFunction = GetTargetFunction())
+	if (ensure(GUnrealEd) && GUnrealEd->GetUnrealEdOptions()->IsCPPAllowed())
 	{
-		if (TargetFunction->IsNative())
+		// For native functions, try going to the function definition in C++ if available
+		if (UFunction* TargetFunction = GetTargetFunction())
 		{
-			// First try the nice way that will get to the right line number
-			bool bSucceeded = false;
-			const bool bNavigateToNativeFunctions = GetDefault<UBlueprintEditorSettings>()->bNavigateToNativeFunctionsFromCallNodes;
-			
-			if(bNavigateToNativeFunctions) 
+			if (TargetFunction->IsNative())
 			{
-				if(FSourceCodeNavigation::CanNavigateToFunction(TargetFunction))
-				{
-					bSucceeded = FSourceCodeNavigation::NavigateToFunction(TargetFunction);
-				}
+				// First try the nice way that will get to the right line number
+				bool bSucceeded = false;
+				const bool bNavigateToNativeFunctions = GetDefault<UBlueprintEditorSettings>()->bNavigateToNativeFunctionsFromCallNodes;
 
-				// Failing that, fall back to the older method which will still get the file open assuming it exists
-				if (!bSucceeded)
+				if (bNavigateToNativeFunctions)
 				{
-					FString NativeParentClassHeaderPath;
-					const bool bFileFound = FSourceCodeNavigation::FindClassHeaderPath(TargetFunction, NativeParentClassHeaderPath) && (IFileManager::Get().FileSize(*NativeParentClassHeaderPath) != INDEX_NONE);
-					if (bFileFound)
+					if (FSourceCodeNavigation::CanNavigateToFunction(TargetFunction))
 					{
-						const FString AbsNativeParentClassHeaderPath = FPaths::ConvertRelativePathToFull(NativeParentClassHeaderPath);
-						bSucceeded = FSourceCodeNavigation::OpenSourceFile(AbsNativeParentClassHeaderPath);
+						bSucceeded = FSourceCodeNavigation::NavigateToFunction(TargetFunction);
+					}
+
+					// Failing that, fall back to the older method which will still get the file open assuming it exists
+					if (!bSucceeded)
+					{
+						FString NativeParentClassHeaderPath;
+						const bool bFileFound = FSourceCodeNavigation::FindClassHeaderPath(TargetFunction, NativeParentClassHeaderPath) && (IFileManager::Get().FileSize(*NativeParentClassHeaderPath) != INDEX_NONE);
+						if (bFileFound)
+						{
+							const FString AbsNativeParentClassHeaderPath = FPaths::ConvertRelativePathToFull(NativeParentClassHeaderPath);
+							bSucceeded = FSourceCodeNavigation::OpenSourceFile(AbsNativeParentClassHeaderPath);
+						}
 					}
 				}
-			}
-			else
-			{	
-				// Inform user that the function is native, give them opportunity to enable navigation to native
-				// functions:
-				FNotificationInfo Info(LOCTEXT("NavigateToNativeDisabled", "Navigation to Native (c++) Functions Disabled"));
-				Info.ExpireDuration = 10.0f;
-				Info.CheckBoxState = bNavigateToNativeFunctions ? ECheckBoxState::Checked : ECheckBoxState::Unchecked;
-			
-				Info.CheckBoxStateChanged = FOnCheckStateChanged::CreateStatic(
-					[](ECheckBoxState NewState)
-					{
-						const FScopedTransaction Transaction(LOCTEXT("ChangeNavigateToNativeFunctionsFromCallNodes", "Change Navigate to Native Functions from Call Nodes Setting"));
-	
-						UBlueprintEditorSettings* MutableEditorSetings = GetMutableDefault<UBlueprintEditorSettings>();
-						MutableEditorSetings->Modify();
-						MutableEditorSetings->bNavigateToNativeFunctionsFromCallNodes = (NewState == ECheckBoxState::Checked) ? true : false;
-						MutableEditorSetings->SaveConfig();
-					}
-				);
-				Info.CheckBoxText = LOCTEXT("EnableNavigationToNative", "Navigate to Native Functions from Blueprint Call Nodes?");
-			
-				FSlateNotificationManager::Get().AddNotification(Info);
-			}
+				else
+				{
+					// Inform user that the function is native, give them opportunity to enable navigation to native
+					// functions:
+					FNotificationInfo Info(LOCTEXT("NavigateToNativeDisabled", "Navigation to Native (c++) Functions Disabled"));
+					Info.ExpireDuration = 10.0f;
+					Info.CheckBoxState = bNavigateToNativeFunctions ? ECheckBoxState::Checked : ECheckBoxState::Unchecked;
 
-			return;
+					Info.CheckBoxStateChanged = FOnCheckStateChanged::CreateStatic(
+						[](ECheckBoxState NewState)
+						{
+							const FScopedTransaction Transaction(LOCTEXT("ChangeNavigateToNativeFunctionsFromCallNodes", "Change Navigate to Native Functions from Call Nodes Setting"));
+
+							UBlueprintEditorSettings* MutableEditorSetings = GetMutableDefault<UBlueprintEditorSettings>();
+							MutableEditorSetings->Modify();
+							MutableEditorSetings->bNavigateToNativeFunctionsFromCallNodes = (NewState == ECheckBoxState::Checked) ? true : false;
+							MutableEditorSetings->SaveConfig();
+						}
+					);
+					Info.CheckBoxText = LOCTEXT("EnableNavigationToNative", "Navigate to Native Functions from Blueprint Call Nodes?");
+
+					FSlateNotificationManager::Get().AddNotification(Info);
+				}
+
+				return;
+			}
 		}
 	}
 
 	// Otherwise, fall back to the inherited behavior which should go to the function entry node
 	Super::JumpToDefinition();
+}
+
+void UK2Node_CallFunction::GetNodeContextMenuActions(class UToolMenu* Menu, class UGraphNodeContextMenuContext* Context) const
+{
+	Super::GetNodeContextMenuActions(Menu, Context);
+
+	if (HasDeprecatedReference())
+	{
+		FText MenuEntryTitle = LOCTEXT("SuppressFunctionDeprecationWarningTitle", "Suppress Deprecation Warning");
+		FText MenuEntryTooltip = LOCTEXT("SuppressFunctionDeprecationWarningTooltip", "Adds this function to the suppressed deprecation warnings list in the Bluperint Editor Project Settings for this project.");
+
+		FToolMenuSection& Section = Menu->AddSection("K2NodeCallFunction", LOCTEXT("FunctionHeader", "Function"));
+		Section.AddMenuEntry(
+			"SuppressDeprecationWarning",
+			MenuEntryTitle,
+			MenuEntryTooltip,
+			FSlateIcon(),
+			FUIAction(
+				FExecuteAction::CreateUObject(this, &UK2Node_CallFunction::SuppressDeprecationWarning),
+				FCanExecuteAction::CreateUObject(this, &UK2Node_CallFunction::HasDeprecatedReference),
+				FIsActionChecked()
+			)
+		);
+	}
 }
 
 FString UK2Node_CallFunction::GetPinMetaData(FName InPinName, FName InKey)
@@ -3335,10 +3692,21 @@ FString UK2Node_CallFunction::GetPinMetaData(FName InPinName, FName InKey)
 	{
 		if (UFunction* Function = GetTargetFunction())
 		{
-			// Find the corresponding property for the pin
+			// Find the corresponding property for the pin and search that first
 			if (FProperty* Property = Function->FindPropertyByName(InPinName))
 			{
 				MetaData = Property->GetMetaData(InKey);
+			}
+
+			// Also look for metadata like DefaultToSelf on the function itself
+			if (MetaData.IsEmpty())
+			{
+				MetaData = Function->GetMetaData(InKey);
+				if (MetaData != InPinName.ToString())
+				{
+					// Only return if the value matches the pin name as we don't want general function metadata
+					MetaData.Empty();
+				}
 			}
 		}
 	}

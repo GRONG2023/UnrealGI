@@ -74,7 +74,10 @@ FBox2D FSlateAccessibleWidget::GetBounds() const
 	if (Widget.IsValid())
 	{
 		const FGeometry& Geometry = Widget.Pin()->GetCachedGeometry();
-		return FBox2D(Geometry.GetAbsolutePosition(), Geometry.GetAbsolutePosition() + Geometry.GetAbsoluteSize());
+		const FVector2f Min = Geometry.GetAbsolutePosition();
+		const FVector2f Max = Min + Geometry.GetAbsoluteSize();
+
+		return FBox2D(FVector2d(Min), FVector2d(Max));
 	}
 	return FBox2D();
 }
@@ -153,20 +156,45 @@ bool FSlateAccessibleWidget::IsHidden() const
 
 bool FSlateAccessibleWidget::SupportsFocus() const
 {
-	// all widgets that support accessibility support accessibility focus right now 
+	if (Widget.IsValid())
+	{
+		return Widget.Pin()->SupportsKeyboardFocus();
+	}
+	return false;
+}
+
+bool FSlateAccessibleWidget::SupportsAccessibleFocus() const
+{
+	// all widgets that support accessibility support accessible focus right now
 	// This check is analogous to Widget.Pin()->IsAccessible()
-	// By definition all FSlateAccessibleWidgets are accessible. So we just return true 
+	// By definition all FSlateAccessibleWidgets are accessible. So we just return true
 	return true;
 }
 
-bool FSlateAccessibleWidget::HasFocus() const
+bool FSlateAccessibleWidget::CanCurrentlyAcceptAccessibleFocus() const
 {
-	TSharedPtr<FSlateAccessibleWidget> AccessibilityFocusedWidget = FSlateApplicationBase::Get().GetAccessibleMessageHandler()->GetAccessibilityFocusedWidget();
-	return AccessibilityFocusedWidget == AsShared();
+	return IsEnabled() && !IsHidden();
 }
 
-void FSlateAccessibleWidget::SetFocus()
+bool FSlateAccessibleWidget::HasUserFocus(const FAccessibleUserIndex UserIndex) const
 {
+	FGenericAccessibleUserRegistry& UserManager = FSlateApplicationBase::Get().GetAccessibleMessageHandler()->GetAccessibleUserRegistry();
+	TSharedPtr<FGenericAccessibleUser> User = UserManager.GetUser(UserIndex);
+	if (User)
+	{
+		return (User->GetFocusedAccessibleWidget()) == AsShared();
+	}
+	return false;
+}
+
+bool FSlateAccessibleWidget::SetUserFocus(const FAccessibleUserIndex UserIndex)
+{
+	// Most likely a mistake to set focus on a widget that cannot currently accept focus
+	if (!CanCurrentlyAcceptAccessibleFocus())
+	{
+		UE_LOG(LogAccessibility, Warning, TEXT("Accessible widget %s cannot currently be focused. Focus not changed."), *ToString());
+		return false;
+	}
 	if (SupportsFocus())
 	{
 		TSharedPtr<SWindow> WidgetWindow = GetSlateWindow();
@@ -177,14 +205,26 @@ void FSlateAccessibleWidget::SetFocus()
 			FWidgetPath WidgetPath;
 			if (FSlateWindowHelper::FindPathToWidget(WindowArray, Widget.Pin().ToSharedRef(), WidgetPath))
 			{
-				// From FSlateApplication::SetUserFocus(), it seems that 
-				// no focus change will occur if we pass in a widget that cannot accept keyboard focus.
-				// this behavior is fine for widgets that don't support keyboard focus but do support accessibility focus 
-//@TODOAccessibility: Possible early out if not keyboard focusable 				
-				FSlateApplicationBase::Get().SetKeyboardFocus(WidgetPath, EFocusCause::SetDirectly);
+				FSlateApplicationBase& SlateApp = FSlateApplicationBase::Get();
+				// Focus accessible events are already raised from this function call
+				if (!SlateApp.SetUserFocus(UserIndex, WidgetPath, EFocusCause::SetDirectly))
+				{
+					// If the function returns false, it means the SWidget corresponding to the accessible widget is already focused by the application. We will need to
+					// manually raise a focus change event to sync the accessible focus and Slate focus
+					SlateApp.GetAccessibleMessageHandler()->OnWidgetEventRaised(FSlateAccessibleMessageHandler::FSlateWidgetAccessibleEventArgs(Widget.Pin().ToSharedRef(), EAccessibleEvent::FocusChange, false, true, UserIndex));
+				}
+				return true;
 			}
 		}
 	}
+	// The widget is not keyboard/gamepad focusable but supports accessible focus
+	else if (SupportsAccessibleFocus())
+	{
+		// we manually raise an accessible focus event 
+		FSlateApplicationBase::Get().GetAccessibleMessageHandler()->OnWidgetEventRaised(FSlateAccessibleMessageHandler::FSlateWidgetAccessibleEventArgs(Widget.Pin().ToSharedRef(), EAccessibleEvent::FocusChange, false, true, UserIndex));
+		return true;
+	}
+	return false;
 }
 
 void FSlateAccessibleWidget::UpdateParent(TSharedPtr<IAccessibleWidget> NewParent)
@@ -192,9 +232,9 @@ void FSlateAccessibleWidget::UpdateParent(TSharedPtr<IAccessibleWidget> NewParen
 	if (Parent != NewParent)
 	{
 		FSlateApplicationBase::Get().GetAccessibleMessageHandler()->RaiseEvent(
-			AsShared(), EAccessibleEvent::ParentChanged,
+			FAccessibleEventArgs(AsShared(), EAccessibleEvent::ParentChanged,
 			Parent.IsValid() ? Parent.Pin()->GetId() : IAccessibleWidget::InvalidAccessibleWidgetId,
-			NewParent.IsValid() ? NewParent->GetId() : IAccessibleWidget::InvalidAccessibleWidgetId);
+			NewParent.IsValid() ? NewParent->GetId() : IAccessibleWidget::InvalidAccessibleWidgetId));
 		Parent = StaticCastSharedPtr<FSlateAccessibleWidget>(NewParent);
 	}
 }
@@ -226,6 +266,69 @@ TSharedPtr<IAccessibleWidget> FSlateAccessibleWidget::GetPreviousSibling()
 		{
 			return SharedParent->Children[SiblingIndex - 1].Pin();
 		}
+	}
+	return nullptr;
+}
+
+TSharedPtr<IAccessibleWidget> FSlateAccessibleWidget::GetNextWidgetInHierarchy()
+{
+	// 1. if the current widget has children, return the first child
+	// 2. If the widget has no children, return the next sibling of the current widget.
+	// 3. If the widget has no sibling, find the first ancestor with a next sibling and return that ancestor's next sibling.
+	if (GetNumberOfChildren() > 0)
+	{
+		return GetChildAt(0);
+	}
+	else if (TSharedPtr<IAccessibleWidget> NextSibling = GetNextSibling())
+	{
+		return NextSibling;
+	}
+	else if (TSharedPtr<IAccessibleWidget> CurrentAncestor = GetParent())
+	{
+		TSharedPtr<IAccessibleWidget> FoundAncestorSibling;
+		while (CurrentAncestor)
+		{
+			FoundAncestorSibling = CurrentAncestor->GetNextSibling();
+			if (FoundAncestorSibling)
+			{
+				return FoundAncestorSibling;
+			}
+			// if we get here, the current ancestor has no next sibling, move up the tree and try again
+			CurrentAncestor = CurrentAncestor->GetParent();
+		}
+		// if we get here, we are the right most leaf of the tree. There is no next accessible widget
+	}
+		return nullptr;
+}
+
+TSharedPtr<IAccessibleWidget> FSlateAccessibleWidget::GetPreviousWidgetInHierarchy()
+{
+	// 1. Find the previous sibling and see if it has children
+	// 2. If the previous sibling has children, DFS down the right most child until you find the child that is a leaf
+	// 3. If the sibling has no children, just return the previous sibling
+	// 4. If there is no previous sibling, return the parent
+	if (TSharedPtr<IAccessibleWidget> PreviousSibling = GetPreviousSibling())
+	{
+		TSharedPtr<IAccessibleWidget> ReturnWidget = PreviousSibling;
+		while (ReturnWidget)
+		{
+			int32 ReturnWidgetChildrenCount = ReturnWidget->GetNumberOfChildren();
+			if (ReturnWidgetChildrenCount > 0)
+			{
+				// keep taking the last child until we get to the leaf
+				ReturnWidget = ReturnWidget->GetChildAt(ReturnWidgetChildrenCount - 1);
+			}
+			else
+			{
+				// we are at a leaf just return
+				return ReturnWidget;
+			}
+		}
+	}
+	else
+	{
+		// note that it is possible for this widget to be the root of the tree and for this to return nullptr
+		return GetParent();
 	}
 	return nullptr;
 }
@@ -270,7 +373,7 @@ TSharedPtr<IAccessibleWidget> FSlateAccessibleWindow::GetChildAtPosition(int32 X
 		if (UseHitTestGrid)
 		{
 			TSharedPtr<SWindow> SlateWindow = StaticCastSharedPtr<SWindow>(Widget.Pin());
-			TArray<FWidgetAndPointer> Hits = SlateWindow->GetHittestGrid().GetBubblePath(FVector2D(X, Y), 0.0f, false, INDEX_NONE);
+			TArray<FWidgetAndPointer> Hits = SlateWindow->GetHittestGrid().GetBubblePath(FVector2f((float)X, (float)Y), 0.0f, false, INDEX_NONE);
 			TSharedPtr<SWidget> LastAccessibleWidget = nullptr;
 			for (int32 i = 0; i < Hits.Num(); ++i)
 			{
@@ -296,10 +399,10 @@ TSharedPtr<IAccessibleWidget> FSlateAccessibleWindow::GetChildAtPosition(int32 X
 
 			while (ToProcess.Num() > 0)
 			{
-				const TSharedPtr<IAccessibleWidget> Current = ToProcess.Pop(false);
+				const TSharedPtr<IAccessibleWidget> Current = ToProcess.Pop(EAllowShrinking::No);
 				// Because children are weak pointers, Current could be invalid in the case where the SWidget and all
 				// shared pointers were deleted while in the middle of FSlateAccessibleMessageHandler refreshing the data.
-				if (Current.IsValid() && !Current->IsHidden() && Current->GetBounds().IsInside(FVector2D(X, Y)))
+				if (Current.IsValid() && !Current->IsHidden() && Current->GetBounds().IsInside(FVector2D((float)X, (float)Y)))
 				{
 					// The widgets are being traversed in reverse render order, so usually if a widget is rendered
 					// on top of another this will return the rendered one. But it's not 100% guarantee, and opacity
@@ -320,9 +423,10 @@ TSharedPtr<IAccessibleWidget> FSlateAccessibleWindow::GetChildAtPosition(int32 X
 	return HitWidget;
 }
 
-TSharedPtr<IAccessibleWidget> FSlateAccessibleWindow::GetFocusedWidget() const
+TSharedPtr<IAccessibleWidget> FSlateAccessibleWindow::GetUserFocusedWidget(const FAccessibleUserIndex UserIndex) const
 {
-	return FSlateApplicationBase::Get().GetAccessibleMessageHandler()->GetAccessibilityFocusedWidget();
+	TSharedPtr<FGenericAccessibleUser> User = FSlateApplicationBase::Get().GetAccessibleMessageHandler()->GetAccessibleUserRegistry().GetUser(UserIndex);
+	return User ? User->GetFocusedAccessibleWidget() : nullptr;
 }
 
 FString FSlateAccessibleWindow::GetWidgetName() const

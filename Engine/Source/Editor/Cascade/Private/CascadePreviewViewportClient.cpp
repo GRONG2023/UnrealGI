@@ -25,6 +25,7 @@
 #include "Particles/ParticleModuleRequired.h"
 #include "Components/LineBatchComponent.h"
 #include "Physics/PhysicsInterfaceCore.h"
+#include "Physics/PhysicsInterfaceScene.h"
 
 #define LOCTEXT_NAMESPACE "CascadeViewportClient"
 
@@ -466,9 +467,9 @@ void FCascadeEdPreviewViewportClient::Draw(FViewport* InViewport, FCanvas* Canva
 
 	int32 DetailMode = CascadePtr.Pin()->GetDetailMode();
 	
-	if (DetailMode != DM_High)
+	if (DetailMode != DM_Epic)
 	{
-		FString DetailModeOutput = FString::Printf(TEXT("DETAIL MODE: %s"), (DetailMode == DM_Medium)? TEXT("MEDIUM"): TEXT("LOW"));
+		FString DetailModeOutput = FString::Printf(TEXT("DETAIL MODE: %s"), (DetailMode == DM_High) ? TEXT("HIGH") : (DetailMode == DM_Medium) ? TEXT("MEDIUM") : TEXT("LOW"));
 		TextItem.SetColor( FLinearColor::Red );
 		TextItem.Text = FText::FromString( DetailModeOutput );
 		Canvas->DrawItem(TextItem, 5.0f, MiscMessageY);
@@ -590,21 +591,21 @@ void FCascadeEdPreviewViewportClient::Draw(const FSceneView* View, FPrimitiveDra
 	DrawPreviewLightVisualization(View, PDI);
 }
 
-bool FCascadeEdPreviewViewportClient::InputKey(FViewport* InViewport, int32 ControllerId, FKey Key, EInputEvent Event, float AmountDepressed, bool Gamepad)
+bool FCascadeEdPreviewViewportClient::InputKey(const FInputKeyEventArgs& InEventArgs)
 {
 	//Update cursor 
 	UpdateAndApplyCursorVisibility();
 
 	bool bHandled = false;
-	const int32 HitX = InViewport->GetMouseX();
-	const int32 HitY = InViewport->GetMouseY();
+	const int32 HitX = InEventArgs.Viewport->GetMouseX();
+	const int32 HitY = InEventArgs.Viewport->GetMouseY();
 
-	if(Key == EKeys::LeftMouseButton)
+	if(InEventArgs.Key == EKeys::LeftMouseButton)
 	{
-		if (Event == IE_Pressed)
+		if (InEventArgs.Event == IE_Pressed)
 		{
-			InViewport->InvalidateHitProxy();
-			HHitProxy* HitResult = InViewport->GetHitProxy(HitX,HitY);
+			InEventArgs.Viewport->InvalidateHitProxy();
+			HHitProxy* HitResult = InEventArgs.Viewport->GetHitProxy(HitX,HitY);
 			if (HitResult && HitResult->IsA(HWidgetUtilProxy::StaticGetType()))
 			{
 				HWidgetUtilProxy* WidgetProxy = (HWidgetUtilProxy*)HitResult;
@@ -615,13 +616,13 @@ bool FCascadeEdPreviewViewportClient::InputKey(FViewport* InViewport, int32 Cont
 				WidgetAxis = WidgetProxy->Axis;
 
 				// Calculate the scree-space directions for this drag.
-				FSceneViewFamilyContext ViewFamily( FSceneViewFamily::ConstructionValues( InViewport, GetScene(), EngineShowFlags ));
+				FSceneViewFamilyContext ViewFamily( FSceneViewFamily::ConstructionValues( InEventArgs.Viewport, GetScene(), EngineShowFlags ));
 				FSceneView* View = CalcSceneView(&ViewFamily);
-				WidgetProxy->CalcVectors(View, FViewportClick(View, this, Key, Event, HitX, HitY), LocalManipulateDir, WorldManipulateDir, DragX, DragY);
+				WidgetProxy->CalcVectors(View, FViewportClick(View, this, InEventArgs.Key, InEventArgs.Event, HitX, HitY), LocalManipulateDir, WorldManipulateDir, DragX, DragY);
 				bHandled = true;
 			}
 		}
-		else if (Event == IE_Released)
+		else if (InEventArgs.Event == IE_Released)
 		{
 			if (bManipulatingVectorField)
 			{
@@ -632,7 +633,7 @@ bool FCascadeEdPreviewViewportClient::InputKey(FViewport* InViewport, int32 Cont
 			}
 		}
 	}
-	else if (Key == EKeys::SpaceBar && Event == IE_Pressed)
+	else if (InEventArgs.Key == EKeys::SpaceBar && InEventArgs.Event == IE_Pressed)
 	{
 		if (CascadePtr.Pin()->GetSelectedModule() && CascadePtr.Pin()->GetSelectedModule()->IsA(UParticleModuleVectorFieldLocal::StaticClass()))
 		{
@@ -644,7 +645,7 @@ bool FCascadeEdPreviewViewportClient::InputKey(FViewport* InViewport, int32 Cont
 
 	if( !bHandled )
 	{
-		bHandled = FEditorViewportClient::InputKey(InViewport,ControllerId,Key,Event,AmountDepressed,Gamepad);
+		bHandled = FEditorViewportClient::InputKey(InEventArgs);
 	}
 
 
@@ -657,7 +658,7 @@ static auto CVarCascadeDragSpeed = TAutoConsoleVariable<float>(TEXT("CascadeDrag
 static TAutoConsoleVariable<float> CVarCascadeRotateSpeed(TEXT("CascadeRotateSpeed"),0.005f,TEXT("Cascade drag speed."));
 static TAutoConsoleVariable<float> CVarCascadeScaleSpeed(TEXT("CascadeScaleSpeed"),1.0f,TEXT("Cascade scale speed."));
 
-bool FCascadeEdPreviewViewportClient::InputAxis(FViewport* InViewport, int32 ControllerId, FKey Key, float Delta, float DeltaTime, int32 NumSamples, bool bGamepad)
+bool FCascadeEdPreviewViewportClient::InputAxis(FViewport* InViewport, FInputDeviceId DeviceId, FKey Key, float Delta, float DeltaTime, int32 NumSamples, bool bGamepad)
 {
 	bool bHandled = false;
 
@@ -693,7 +694,7 @@ bool FCascadeEdPreviewViewportClient::InputAxis(FViewport* InViewport, int32 Con
 	}
 	else
 	{
-		bHandled = FEditorViewportClient::InputAxis(InViewport,ControllerId,Key,Delta,DeltaTime,NumSamples,bGamepad);
+		bHandled = FEditorViewportClient::InputAxis(InViewport,DeviceId,Key,Delta,DeltaTime,NumSamples,bGamepad);
 	}
 
 	if (!IsRealtime() && !FMath::IsNearlyZero(Delta))

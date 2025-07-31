@@ -5,6 +5,8 @@
 #include "Engine/Engine.h"
 #include "Math/UnrealMathUtility.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(GenlockedTimecodeProvider)
+
 namespace
 {
 	const UGenlockedCustomTimeStep* GetValidGenlock()
@@ -32,7 +34,7 @@ namespace
 		const double FpsB = RateB.AsDecimal();
 
 		// protect against divide by zero
-		if (FMath::IsNearlyEqual(FpsB, 0))
+		if (FMath::IsNearlyEqual(FpsB, 0.0))
 		{
 			return false;
 		}
@@ -63,7 +65,7 @@ FQualifiedFrameTime UGenlockedTimecodeProvider::CorrectFromGenlock(FQualifiedFra
 	}
 	
 	// Protect against divide by zero. Also eliminates timecode rate being faster than genlock rate.
-	if (FMath::IsNearlyEqual(SyncsPerTcFrame, 0))
+	if (FMath::IsNearlyEqual(SyncsPerTcFrame, 0.0))
 	{
 		return InFrameTime;
 	}
@@ -123,7 +125,7 @@ void UGenlockedTimecodeProvider::FetchAndUpdate()
 
 				if (CalcRoundedRateRatio(GenlockRate, LastFrameTime.Rate, RateRatio))
 				{
-					LastFrameTime.Rate.Numerator *= RateRatio; // RateRatio should already be rounded.
+					LastFrameTime.Rate.Numerator = FMath::TruncToInt32(LastFrameTime.Rate.Numerator * RateRatio); // RateRatio should already be rounded.
 					LastFrameTime.Time = FFrameTime::FromDecimal(LastFrameTime.Time.AsDecimal() * RateRatio);
 				}
 			}

@@ -104,7 +104,7 @@ public:
 /**
  * Windows implementation of voice capture using DirectSound
  */
-class FVoiceCaptureWindows : public IVoiceCapture, public FTickerObjectBase
+class FVoiceCaptureWindows : public IVoiceCapture, public FTSTickerObjectBase
 {
 public:
 
@@ -125,7 +125,7 @@ public:
 	virtual void DumpState() const override;
 	virtual float GetCurrentAmplitude() const override;
 
-	// FTickerObjectBase
+	// FTSTickerObjectBase
 	virtual bool Tick(float DeltaTime) override;
 	
 private:
@@ -169,7 +169,7 @@ private:
 	* Envelope following DSP object.
 	* Configured using the MicSilenceDetectionConfig namespace in VoiceConfig.h and the CVars defined in VoiceConfig.cpp.
 	*/
-	Audio::FEnvelopeFollower MicLevelDetector;
+	Audio::FInlineEnvelopeFollower MicLevelDetector;
 	/*
 	* Whether the microphone level is above the threshold set 
 	*/

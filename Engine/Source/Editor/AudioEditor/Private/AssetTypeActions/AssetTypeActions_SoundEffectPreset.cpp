@@ -1,27 +1,28 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "AssetTypeActions_SoundEffectPreset.h"
-#include "Developer/AssetTools/Public/IAssetTools.h"
-#include "Developer/AssetTools/Public/AssetToolsModule.h"
+#include "AssetTypeActions/AssetTypeActions_SoundEffectPreset.h"
+
+#include "Audio/AudioWidgetSubsystem.h"
+#include "Audio/SoundEffectPresetWidgetInterface.h"
+#include "Blueprint/UserWidget.h"
+#include "Containers/UnrealString.h"
+#include "CoreGlobals.h"
+#include "Editor.h"
+#include "Editor/EditorEngine.h"
 #include "Editors/SoundEffectPresetEditor.h"
-#include "HAL/IConsoleManager.h"
-#include "Settings/EditorLoadingSavingSettings.h"
-#include "Toolkits/IToolkitHost.h"
-#include "Toolkits/SimpleAssetEditor.h"
+#include "Engine/Engine.h"
+#include "Misc/AssertionMacros.h"
+#include "Templates/Casts.h"
+#include "Templates/SubclassOf.h"
+#include "Toolkits/IToolkit.h"
+#include "UObject/Class.h"
+#include "UObject/Object.h"
+#include "UObject/UObjectGlobals.h"
+
+class UWorld;
 
 #define LOCTEXT_NAMESPACE "AssetTypeActions"
 
-static bool bPrototypeSFXEditorEnabled = false;
-static FAutoConsoleCommand GEnableSoundEffectEditorPrototype(
-	TEXT("au.AudioEditor.EnableSoundEffectEditorPrototype"),
-	TEXT("Enables's the UE5 prototype sound effect editor.\n"),
-	FConsoleCommandWithArgsDelegate::CreateStatic(
-		[](const TArray<FString>& Args)
-		{
-			bPrototypeSFXEditorEnabled = true;
-		}
-	)
-);
 
 namespace EffectPresets
 {
@@ -91,22 +92,51 @@ const TArray<FText>& FAssetTypeActions_SoundEffectSourcePreset::GetSubMenus() co
 
 void FAssetTypeActions_SoundEffectPreset::OpenAssetEditor(const TArray<UObject*>& InObjects, TSharedPtr<IToolkitHost> ToolkitHost)
 {
-	if (!bPrototypeSFXEditorEnabled)
-	{
-		FAssetTypeActions_Base::OpenAssetEditor(InObjects, ToolkitHost);
-	}
-	else
-	{
-		EToolkitMode::Type Mode = ToolkitHost.IsValid() ? EToolkitMode::WorldCentric : EToolkitMode::Standalone;
+	EToolkitMode::Type Mode = ToolkitHost.IsValid() ? EToolkitMode::WorldCentric : EToolkitMode::Standalone;
 
-		for (UObject* Object : InObjects)
+	TArray<UObject*> Objects = InObjects;
+	if (UWorld* World = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr)
+	{
+		if (UAudioWidgetSubsystem* WidgetSubsystem = GEngine ? GEngine->GetEngineSubsystem<UAudioWidgetSubsystem>() : nullptr)
 		{
-			if (USoundEffectPreset* Preset = Cast<USoundEffectPreset>(Object))
+			for (UObject* Object : InObjects)
 			{
-				TSharedRef<FSoundEffectPresetEditor> PresetEditor = MakeShared<FSoundEffectPresetEditor>();
-				PresetEditor->Init(Mode, ToolkitHost, Preset);
+				USoundEffectPreset* Preset = Cast<USoundEffectPreset>(Object);
+				if (!Preset)
+				{
+					continue;
+				}
+
+				auto FilterFunction = [InPresetClass = Object->GetClass()](UUserWidget* UserWidget)
+				{
+					TSubclassOf<USoundEffectPreset> PresetClass = ISoundEffectPresetWidgetInterface::Execute_GetClass(UserWidget);
+					while (PresetClass)
+					{
+						if (PresetClass == InPresetClass)
+						{
+							return true;
+						}
+
+						PresetClass = PresetClass->GetSuperClass();
+					}
+
+					return false;
+				};
+
+				TArray<UUserWidget*> UserWidgets = WidgetSubsystem->CreateUserWidgets(*World, USoundEffectPresetWidgetInterface::StaticClass(), FilterFunction);
+				if (!UserWidgets.IsEmpty())
+				{
+					TSharedRef<FSoundEffectPresetEditor> PresetEditor = MakeShared<FSoundEffectPresetEditor>();
+					PresetEditor->Init(Mode, ToolkitHost, Preset, UserWidgets);
+					Objects.Remove(Object);
+				}
 			}
 		}
+	}
+
+	if (!Objects.IsEmpty())
+	{
+		FAssetTypeActions_Base::OpenAssetEditor(Objects, ToolkitHost);
 	}
 }
 #undef LOCTEXT_NAMESPACE

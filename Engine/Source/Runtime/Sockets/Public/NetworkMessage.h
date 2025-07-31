@@ -2,10 +2,20 @@
 
 #pragma once
 
+#include "Containers/Array.h"
 #include "CoreMinimal.h"
-#include "Serialization/BufferArchive.h"
-#include "Serialization/ArrayReader.h"
+#include "HAL/Platform.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/ByteSwap.h"
+#include "Misc/Crc.h"
+#include "Misc/DateTime.h"
 #include "Misc/EnumClassFlags.h"
+#include "Serialization/Archive.h"
+#include "Serialization/ArrayReader.h"
+#include "Serialization/BufferArchive.h"
+
+class FArrayReader;
+class FString;
 
 enum
 { 
@@ -66,7 +76,7 @@ enum class EConnectionFlags : uint8
 {
 	None = 0x00000000,
 	Streaming = 0x00000001,
-	PreCookedIterative = 0x00000002,
+	PreCookedIterative = 0x00000002, //DEPRECATED
 };
 ENUM_CLASS_FLAGS(EConnectionFlags);
 
@@ -75,7 +85,7 @@ ENUM_CLASS_FLAGS(EConnectionFlags);
 /**
 * Simple abstraction for sockets that allows FNFSMessageHeader to use either an ordinary socket or a mutichannel socket
 **/
-class SOCKETS_API FSimpleAbstractSocket
+class FSimpleAbstractSocket
 {
 public:
 	/**
@@ -94,12 +104,14 @@ public:
 	virtual bool Send(const uint8 *Buffer, int32 Size) const = 0;
 	/** return the magic number for this message, also used for endian correction on the archives **/
 	virtual uint32 GetMagic() const = 0;
+	/** Destructor */
+	virtual ~FSimpleAbstractSocket() { }
 };
 
 /**
 * Ordinary socket version of FSimpleAbstractSocket
 **/
-class SOCKETS_API FSimpleAbstractSocket_FSocket : public FSimpleAbstractSocket
+class FSimpleAbstractSocket_FSocket : public FSimpleAbstractSocket
 {
 	/** Ordinary socket to forward requests to **/
 	class FSocket* Socket;
@@ -112,8 +124,8 @@ public:
 		: Socket(InSocket)
 	{
 	}
-	virtual bool Receive(uint8 *Results, int32 Size) const;
-	virtual bool Send(const uint8 *Buffer, int32 Size) const;
+	SOCKETS_API virtual bool Receive(uint8 *Results, int32 Size) const;
+	SOCKETS_API virtual bool Send(const uint8 *Buffer, int32 Size) const;
 	virtual uint32 GetMagic() const
 	{
 		return 0x9E2B83C1;
@@ -123,7 +135,7 @@ public:
 /**
 * Multichannel socket version of FSimpleAbstractSocket
 **/
-class SOCKETS_API FSimpleAbstractSocket_FMultichannelTCPSocket : public FSimpleAbstractSocket
+class FSimpleAbstractSocket_FMultichannelTCPSocket : public FSimpleAbstractSocket
 {
 	/** Multichannel socket to forward requests to **/
 	class FMultichannelTcpSocket* Socket;
@@ -146,8 +158,8 @@ public:
 		check(SendChannel);
 		check(ReceiveChannel);
 	}
-	virtual bool Receive(uint8 *Results, int32 Size) const;
-	virtual bool Send(const uint8 *Buffer, int32 Size) const;
+	SOCKETS_API virtual bool Receive(uint8 *Results, int32 Size) const;
+	SOCKETS_API virtual bool Send(const uint8 *Buffer, int32 Size) const;
 	virtual uint32 GetMagic() const
 	{
 		return 0x9E2B83C2;
@@ -157,7 +169,7 @@ public:
 /**
 * Simple wrapper for sending and receiving atomic packets
 **/
-struct SOCKETS_API FNFSMessageHeader
+struct FNFSMessageHeader
 {
 	/** Magic number, used for error checking and endianess checking **/
 	uint32 Magic;
@@ -221,7 +233,7 @@ struct SOCKETS_API FNFSMessageHeader
 	 *
 	 * @return true if successful
 	 */
-	static bool WrapAndSendPayload(const TArray<uint8>& Payload, const FSimpleAbstractSocket& Socket);
+	static SOCKETS_API bool WrapAndSendPayload(const TArray<uint8>& Payload, const FSimpleAbstractSocket& Socket);
 
 	/**
 	 * This function will receive a header, and then the payload array from the network
@@ -231,7 +243,7 @@ struct SOCKETS_API FNFSMessageHeader
 	 *
 	 * @return true if successful
 	 */
-	static bool ReceivePayload(FArrayReader& OutPayload, const FSimpleAbstractSocket& Socket);
+	static SOCKETS_API bool ReceivePayload(FArrayReader& OutPayload, const FSimpleAbstractSocket& Socket);
 
 	/**
 	 * This function will send a payload data (with header) and wait for a response, serializing
@@ -243,7 +255,7 @@ struct SOCKETS_API FNFSMessageHeader
 	 *
 	 * @return true if successful
 	 */
-	static bool SendPayloadAndReceiveResponse(const TArray<uint8>& Payload, class FArrayReader& Response, const FSimpleAbstractSocket& Socket);
+	static SOCKETS_API bool SendPayloadAndReceiveResponse(const TArray<uint8>& Payload, class FArrayReader& Response, const FSimpleAbstractSocket& Socket);
 
 };
 
@@ -251,7 +263,7 @@ struct SOCKETS_API FNFSMessageHeader
 /**
  * A helper class for storing all available file info.
  */
-struct SOCKETS_API FFileInfo
+struct FFileInfo
 {
 	bool FileExists;
 	bool ReadOnly;
@@ -272,7 +284,7 @@ struct SOCKETS_API FFileInfo
 /**
  * A helper class for wrapping some of the network file payload specifics
  */
-class SOCKETS_API FNetworkFileArchive : public FBufferArchive
+class FNetworkFileArchive : public FBufferArchive
 {
 public:
 	FNetworkFileArchive(uint32 Command)

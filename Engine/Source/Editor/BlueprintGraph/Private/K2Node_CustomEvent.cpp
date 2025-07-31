@@ -2,18 +2,43 @@
 
 
 #include "K2Node_CustomEvent.h"
-#include "Classes/EditorStyleSettings.h"
-#include "Engine/BlueprintGeneratedClass.h"
+
+#include "BlueprintActionDatabaseRegistrar.h"
+#include "BlueprintEventNodeSpawner.h"
+#include "BlueprintNodeSpawner.h"
+#include "Containers/EnumAsByte.h"
+#include "Delegates/Delegate.h"
+#include "EdGraph/EdGraph.h"
+#include "EdGraph/EdGraphPin.h"
 #include "EdGraphSchema_K2.h"
+#include "Engine/Blueprint.h"
+#include "Engine/BlueprintGeneratedClass.h"
+#include "Engine/MemberReference.h"
+#include "FindInBlueprintManager.h"
+#include "FindInBlueprints.h"
+#include "HAL/PlatformCrt.h"
+#include "Internationalization/Internationalization.h"
+#include "K2Node.h"
 #include "K2Node_BaseMCDelegate.h"
 #include "Kismet2/BlueprintEditorUtils.h"
-
-#include "Kismet2/Kismet2NameValidators.h"
 #include "Kismet2/CompilerResultsLog.h"
-#include "BlueprintNodeSpawner.h"
-#include "BlueprintEventNodeSpawner.h"
-#include "BlueprintActionDatabaseRegistrar.h"
-#include "FindInBlueprintManager.h"
+#include "Kismet2/Kismet2NameValidators.h"
+#include "Misc/AssertionMacros.h"
+#include "Serialization/Archive.h"
+#include "Settings/EditorStyleSettings.h"
+#include "Styling/AppStyle.h"
+#include "Templates/Casts.h"
+#include "Templates/SubclassOf.h"
+#include "UObject/Class.h"
+#include "UObject/NameTypes.h"
+#include "UObject/Object.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/Script.h"
+#include "UObject/UE5MainStreamObjectVersion.h"
+#include "UObject/UnrealNames.h"
+#include "UObject/UnrealType.h"
+
+struct FLinearColor;
 
 #define LOCTEXT_NAMESPACE "K2Node_CustomEvent"
 
@@ -23,28 +48,29 @@
  * @param  CustomEventFunc	The function you want to find an associated node for.
  * @return A pointer to the found node (NULL if a corresponding node wasn't found)
  */
-static UK2Node_CustomEvent const* FindCustomEventNodeFromFunction(UFunction* CustomEventFunc)
+static const UK2Node_CustomEvent* FindCustomEventNodeFromFunction(UFunction* CustomEventFunc)
 {
-	UK2Node_CustomEvent const* FoundEventNode = NULL;
-	if (CustomEventFunc != NULL)
+	const UK2Node_CustomEvent* FoundEventNode = nullptr;
+	if (CustomEventFunc != nullptr)
 	{
-		UObject const* const FuncOwner = CustomEventFunc->GetOuter();
-		check(FuncOwner != NULL);
+		const UObject* const FuncOwner = CustomEventFunc->GetOuter();
+		check(FuncOwner != nullptr);
 
 		// if the found function is a NOT a native function (it's user generated)
 		if (FuncOwner->IsA(UBlueprintGeneratedClass::StaticClass()))
 		{
-			UBlueprintGeneratedClass* FuncClass = Cast<UBlueprintGeneratedClass>(CustomEventFunc->GetOuter());
-			check(FuncClass != NULL);
-			UBlueprint* FuncBlueprint = Cast<UBlueprint>(FuncClass->ClassGeneratedBy);
-			check(FuncBlueprint != NULL);
+			const UBlueprintGeneratedClass* FuncClass = Cast<UBlueprintGeneratedClass>(CustomEventFunc->GetOuter());
+			check(FuncClass != nullptr);
+			const UBlueprint* FuncBlueprint = Cast<UBlueprint>(FuncClass->ClassGeneratedBy);
+			check(FuncBlueprint != nullptr);
 
 			TArray<UK2Node_CustomEvent*> BpCustomEvents;
 			FBlueprintEditorUtils::GetAllNodesOfClass<UK2Node_CustomEvent>(FuncBlueprint, BpCustomEvents);
 
 			// look to see if the function that this is overriding is a custom-event
-			for (UK2Node_CustomEvent const* const UserEvent : BpCustomEvents)
+			for (const UK2Node_CustomEvent* const UserEvent : BpCustomEvents)
 			{
+				check(UserEvent);
 				if (UserEvent->CustomFunctionName == CustomEventFunc->GetFName())
 				{
 					FoundEventNode = UserEvent;
@@ -67,29 +93,65 @@ public:
 		: FKismetNameValidator(CustomEventIn->GetBlueprint(), CustomEventIn->CustomFunctionName)
 		, CustomEvent(CustomEventIn)
 	{
-		check(CustomEvent != NULL);
+		check(CustomEvent != nullptr);
 	}
 
 	// Begin INameValidatorInterface
 	virtual EValidatorResult IsValid(FString const& Name, bool bOriginal = false) override
 	{
+		UBlueprint* Blueprint = CustomEvent->GetBlueprint();
+		check(Blueprint != nullptr);
+
 		EValidatorResult NameValidity = FKismetNameValidator::IsValid(Name, bOriginal);
 		if ((NameValidity == EValidatorResult::Ok) || (NameValidity == EValidatorResult::ExistingName))
 		{
-			UBlueprint* Blueprint = CustomEvent->GetBlueprint();
-			check(Blueprint != NULL);
-
 			UFunction* ParentFunction = FindUField<UFunction>(Blueprint->ParentClass, *Name);
 			// if this custom-event is overriding a function belonging to the blueprint's parent
-			if (ParentFunction != NULL)
+			if (ParentFunction != nullptr)
 			{
 				UK2Node_CustomEvent const* OverriddenEvent = FindCustomEventNodeFromFunction(ParentFunction);
 				// if the function that we're overriding isn't another custom event,
 				// then we can't name it this (only allow custom-event to override other custom-events)
-				if (OverriddenEvent == NULL)
+				if (OverriddenEvent == nullptr)
 				{
 					NameValidity = EValidatorResult::AlreadyInUse;
 				}		
+			}
+		}
+		else if (NameValidity == EValidatorResult::AlreadyInUse)
+		{
+			auto Predicate_EventGraphs = [Name](const TObjectPtr<UEdGraph>& InEventGraph) -> bool
+			{
+				return InEventGraph && InEventGraph->HasAnyFlags(RF_Transient) && InEventGraph->GetName() == Name;
+			};
+
+			// Allow a transient event subgraph (compiler artifact) that matches the existing name
+			// to pass if there are no other event nodes that would use this name at compile time.
+			// This type of collision is a false positive that won't result in a conflict, because
+			// the custom event node won't enter the Blueprint's namespace until the next compile,
+			// and the compiler will regenerate the transient event subgraphs array on a full pass.
+			if (Blueprint->EventGraphs.FindByPredicate(Predicate_EventGraphs))
+			{
+				TArray<UK2Node_Event*> AllEventNodes;
+				FBlueprintEditorUtils::GetAllNodesOfClass<UK2Node_Event>(Blueprint, AllEventNodes);
+				UK2Node_Event** MatchingNodePtr = AllEventNodes.FindByPredicate([Name](UK2Node_Event* InEventNode)
+				{
+					if (InEventNode->bOverrideFunction)
+					{
+						return InEventNode->EventReference.GetMemberName().ToString() == Name;
+					}
+					else if (InEventNode->CustomFunctionName != NAME_None)
+					{
+						return InEventNode->CustomFunctionName.ToString() == Name;
+					}
+					
+					return false;
+				});
+
+				if (!MatchingNodePtr || *MatchingNodePtr == CustomEvent)
+				{
+					NameValidity = EValidatorResult::Ok;
+				}
 			}
 		}
 		return NameValidity;
@@ -108,15 +170,24 @@ UK2Node_CustomEvent::UK2Node_CustomEvent(const FObjectInitializer& ObjectInitial
 	bCanRenameNode = true;
 	bIsDeprecated = false;
 	bCallInEditor = false;
+
+	FunctionFlags = (FUNC_BlueprintCallable | FUNC_BlueprintEvent | FUNC_Public);
 }
 
 void UK2Node_CustomEvent::Serialize(FArchive& Ar)
 {
+	Ar.UsingCustomVersion(FUE5MainStreamObjectVersion::GUID);
+
 	Super::Serialize(Ar);
 
 	if (Ar.IsLoading())
 	{
 		CachedNodeTitle.MarkDirty();
+
+		if (Ar.CustomVer(FUE5MainStreamObjectVersion::GUID) < FUE5MainStreamObjectVersion::AccessSpecifiersForCustomEvents)
+		{
+			FunctionFlags |= (FUNC_BlueprintCallable | FUNC_BlueprintEvent | FUNC_Public);
+		}
 	}
 }
 
@@ -393,29 +464,42 @@ void UK2Node_CustomEvent::SetDelegateSignature(const UFunction* DelegateSignatur
 
 	const UEdGraphSchema_K2* K2Schema = GetDefault<UEdGraphSchema_K2>();
 	
-		UserDefinedPins.Empty();
-		for (TFieldIterator<FProperty> PropIt(DelegateSignature); PropIt && (PropIt->PropertyFlags & CPF_Parm); ++PropIt)
+	TArray < TSharedPtr<FUserPinInfo> > OldPins = UserDefinedPins;
+	UserDefinedPins.Empty();
+	for (TFieldIterator<FProperty> PropIt(DelegateSignature); PropIt && (PropIt->PropertyFlags & CPF_Parm); ++PropIt)
+	{
+		const FProperty* Param = *PropIt;
+		if (!Param->HasAnyPropertyFlags(CPF_OutParm) || Param->HasAnyPropertyFlags(CPF_ReferenceParm))
 		{
-			const FProperty* Param = *PropIt;
-			if (!Param->HasAnyPropertyFlags(CPF_OutParm) || Param->HasAnyPropertyFlags(CPF_ReferenceParm))
-			{
-				FEdGraphPinType PinType;
-				K2Schema->ConvertPropertyToPinType(Param, /*out*/ PinType);
+			FEdGraphPinType PinType;
+			K2Schema->ConvertPropertyToPinType(Param, /*out*/ PinType);
 
-				FName NewPinName = Param->GetFName();
-				int32 Index = 1;
-				while ((DelegateOutputName == NewPinName) || (UEdGraphSchema_K2::PN_Then == NewPinName))
-				{
-					++Index;
-					NewPinName = *FString::Printf(TEXT("%s%d"), *NewPinName.ToString(), Index);
-				}
-			TSharedPtr<FUserPinInfo> NewPinInfo = MakeShareable(new FUserPinInfo());
-				NewPinInfo->PinName = NewPinName;
-				NewPinInfo->PinType = PinType;
-				NewPinInfo->DesiredPinDirection = EGPD_Output;
-				UserDefinedPins.Add(NewPinInfo);
+			FName NewPinName = Param->GetFName();
+			int32 Index = 1;
+			while ((DelegateOutputName == NewPinName) || (UEdGraphSchema_K2::PN_Then == NewPinName))
+			{
+				++Index;
+				NewPinName = *FString::Printf(TEXT("%s%d"), *NewPinName.ToString(), Index);
 			}
+			TSharedPtr<FUserPinInfo> NewPinInfo = MakeShareable(new FUserPinInfo());
+			NewPinInfo->PinName = NewPinName;
+			NewPinInfo->PinType = PinType;
+			NewPinInfo->DesiredPinDirection = EGPD_Output;
+			int32 NewIndex = UserDefinedPins.Num();
+
+			// Copy over old default value if type matches
+			if (OldPins.IsValidIndex(NewIndex) && OldPins[NewIndex].IsValid())
+			{
+				TSharedPtr<FUserPinInfo> OldPinInfo = OldPins[NewIndex];
+				if (NewPinInfo->PinName == OldPinInfo->PinName && NewPinInfo->PinType == OldPinInfo->PinType && NewPinInfo->DesiredPinDirection == OldPinInfo->DesiredPinDirection)
+				{
+					NewPinInfo->PinDefaultValue = OldPinInfo->PinDefaultValue;
+				}
+			}
+
+			UserDefinedPins.Add(NewPinInfo);
 		}
+	}
 }
 
 UK2Node_CustomEvent* UK2Node_CustomEvent::CreateFromFunction(FVector2D GraphPosition, UEdGraph* ParentGraph, const FString& Name, const UFunction* Function, bool bSelectNewNode/* = true*/)
@@ -444,8 +528,8 @@ UK2Node_CustomEvent* UK2Node_CustomEvent::CreateFromFunction(FVector2D GraphPosi
 			}
 		}
 
-		CustomEventNode->NodePosX = GraphPosition.X;
-		CustomEventNode->NodePosY = GraphPosition.Y;
+		CustomEventNode->NodePosX = static_cast<int32>(GraphPosition.X);
+		CustomEventNode->NodePosY = static_cast<int32>(GraphPosition.Y);
 		CustomEventNode->SnapToGrid(GetDefault<UEditorStyleSettings>()->GridSnapSize);
 	}
 
@@ -498,7 +582,7 @@ FString UK2Node_CustomEvent::GetDocumentationExcerptName() const
 
 FSlateIcon UK2Node_CustomEvent::GetIconAndTint(FLinearColor& OutColor) const
 {
-	return FSlateIcon("EditorStyle", bCallInEditor ? "GraphEditor.CallInEditorEvent_16x" : "GraphEditor.CustomEvent_16x");
+	return FSlateIcon(FAppStyle::GetAppStyleSetName(), bCallInEditor ? "GraphEditor.CallInEditorEvent_16x" : "GraphEditor.CustomEvent_16x");
 }
 
 void UK2Node_CustomEvent::AutowireNewNode(UEdGraphPin* FromPin)
@@ -518,16 +602,28 @@ void UK2Node_CustomEvent::AddSearchMetaDataInfo(TArray<struct FSearchTagDataPair
 {
 	Super::AddSearchMetaDataInfo(OutTaggedMetaData);
 
+	bool bNeedsNameUpdate = true;
+	bool bNeedsNativeNameUpdate = true;
 	for (FSearchTagDataPair& SearchData : OutTaggedMetaData)
 	{
 		// Should always be the first item, but there is no guarantee
-		if (SearchData.Key.CompareTo(FFindInBlueprintSearchTags::FiB_Name) == 0)
+		if (bNeedsNameUpdate && SearchData.Key.CompareTo(FFindInBlueprintSearchTags::FiB_Name) == 0)
 		{
 			SearchData.Value = FText::FromString(FName::NameToDisplayString(CustomFunctionName.ToString(), false));
+			bNeedsNameUpdate = false;
+		}
+		else if (bNeedsNativeNameUpdate && SearchData.Key.CompareTo(FFindInBlueprintSearchTags::FiB_NativeName) == 0)
+		{
+			SearchData.Value = FText::FromName(CustomFunctionName);
+			bNeedsNativeNameUpdate = false;
+		}
+
+		// If no more keys need updating, break
+		if (!bNeedsNameUpdate && !bNeedsNativeNameUpdate)
+		{
 			break;
 		}
 	}
-	OutTaggedMetaData.Add(FSearchTagDataPair(FFindInBlueprintSearchTags::FiB_NativeName, FText::FromName(CustomFunctionName)));
 }
 
 FText UK2Node_CustomEvent::GetKeywords() const
@@ -560,6 +656,26 @@ FEdGraphNodeDeprecationResponse UK2Node_CustomEvent::GetDeprecationResponse(EEdG
 	}
 
 	return Response;
+}
+
+bool UK2Node_CustomEvent::HasExternalDependencies(TArray<class UStruct*>* OptionalOutput) const
+{
+	bool bResult = false;
+
+	// We use the dependencies of the linked node instead of the resulting function signature because a globally defined 
+	// delegate won't match a dependency check (it has no owner). 
+	const UEdGraphPin* DelegateOutPin = FindPin(DelegateOutputName);
+	const UEdGraphPin* LinkedPin = (DelegateOutPin && DelegateOutPin->LinkedTo.Num() && DelegateOutPin->LinkedTo[0]) ? FBlueprintEditorUtils::FindFirstCompilerRelevantLinkedPin(DelegateOutPin->LinkedTo[0]) : nullptr;
+	if (LinkedPin)
+	{
+		if (UK2Node* OtherNode = Cast<UK2Node>(LinkedPin->GetOwningNode()))
+		{
+			bResult = OtherNode->HasExternalDependencies(OptionalOutput);
+		}
+	}
+
+	bResult |= Super::HasExternalDependencies(OptionalOutput);
+	return bResult;
 }
 
 #undef LOCTEXT_NAMESPACE

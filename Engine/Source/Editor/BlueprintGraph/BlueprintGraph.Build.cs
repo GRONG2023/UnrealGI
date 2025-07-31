@@ -7,15 +7,8 @@ public class BlueprintGraph : ModuleRules
 {
 	public BlueprintGraph(ReadOnlyTargetRules Target) : base(Target)
 	{
-		PrivateIncludePaths.AddRange(
-            new string[] {
-                "Editor/BlueprintGraph/Private",
-                "Editor/KismetCompiler/Public",
-            }
-		);
-
 		OverridePackageType = PackageOverrideType.EngineDeveloper;
-
+		 
 		PublicDependencyModuleNames.AddRange(
 			new string[] { 
 				"Core", 
@@ -23,15 +16,15 @@ public class BlueprintGraph : ModuleRules
 				"Engine",
                 "InputCore",
 				"Slate",
-                "EditorStyle",
-				"EditorSubsystem",
+				"DeveloperSettings"
 			}
 		);
 
 		PrivateDependencyModuleNames.AddRange( 
 			new string[] {
-				"EditorStyle",
+				
                 "KismetCompiler",
+				"EditorFramework",
 				"UnrealEd",
                 "GraphEditor",
 				"SlateCore",
@@ -39,6 +32,8 @@ public class BlueprintGraph : ModuleRules
                 "KismetWidgets",
                 "PropertyEditor",
 				"ToolMenus",
+				"AssetTools",
+				"EditorSubsystem",
 			}
 		);
 

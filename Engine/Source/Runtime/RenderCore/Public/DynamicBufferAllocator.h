@@ -6,7 +6,12 @@ DynamicBufferAllocator.h: Classes for allocating transient rendering data.
 
 #pragma once
 
+#include "Containers/Array.h"
+#include "HAL/PlatformMath.h"
+#include "RHI.h"
+#include "RHIUtilities.h"
 #include "RenderResource.h"
+#include "Async/Mutex.h"
 
 struct FDynamicReadBufferPool;
 
@@ -17,19 +22,25 @@ struct FDynamicAllocReadBuffer : public FDynamicReadBuffer
 	int32 NumFramesUnused = 0;
 
 	TArray<FShaderResourceViewRHIRef> SubAllocations;
+	
+	UE_DEPRECATED(5.3, "Lock now requires a command list.")
+	void Lock() { Lock(FRHICommandListImmediate::Get()); }
+	
+	UE_DEPRECATED(5.3, "Lock now requires a command list.")
+	void Unlock() { Unlock(FRHICommandListImmediate::Get()); }
 
-	void Lock()
+	void Lock(FRHICommandListBase& RHICmdList)
 	{
 		SubAllocations.Reset();
-		FDynamicReadBuffer::Lock();
+		FDynamicReadBuffer::Lock(RHICmdList);
 	}
 
 	/**
 	* Unocks the buffer so the GPU may read from it.
 	*/
-	void Unlock()
+	void Unlock(FRHICommandListBase& RHICmdList)
 	{
-		FDynamicReadBuffer::Unlock();
+		FDynamicReadBuffer::Unlock(RHICmdList);
 		AllocatedByteCount = 0;
 		NumFramesUnused = 0;
 	}
@@ -41,7 +52,7 @@ struct FDynamicAllocReadBuffer : public FDynamicReadBuffer
   the renderer RHI will have already been destroyed and we can execute code on invalid data. By making ourself a render resource, we
   clean up immediately before the renderer dies.
 */
-class RENDERCORE_API FGlobalDynamicReadBuffer : public FRenderResource
+class FGlobalDynamicReadBuffer : public FRenderResource
 {
 public:
 	/**
@@ -70,34 +81,44 @@ public:
 		}
 	};
 
-	FGlobalDynamicReadBuffer();
-	~FGlobalDynamicReadBuffer();
+	RENDERCORE_API FGlobalDynamicReadBuffer();
+	RENDERCORE_API ~FGlobalDynamicReadBuffer();
 	
-	FAllocation AllocateHalf(uint32 Num);
-	FAllocation AllocateFloat(uint32 Num);
-	FAllocation AllocateInt32(uint32 Num);
+	RENDERCORE_API FAllocation AllocateHalf(uint32 Num);
+	RENDERCORE_API FAllocation AllocateFloat(uint32 Num);
+	RENDERCORE_API FAllocation AllocateInt32(uint32 Num);
+	RENDERCORE_API FAllocation AllocateUInt32(uint32 Num);
 
 	/**
 	* Commits allocated memory to the GPU.
 	*		WARNING: Once this buffer has been committed to the GPU, allocations
 	*		remain valid only until the next call to Allocate!
 	*/
-	void Commit();
+	RENDERCORE_API void Commit(FRHICommandListImmediate& RHICmdList);
 
+	UE_DEPRECATED(5.3, "Commit now requires a command list.")
+	void Commit() { Commit(FRHICommandListImmediate::Get()); }
 
 	/** Returns true if log statements should be made because we exceeded GMaxVertexBytesAllocatedPerFrame */
-	bool IsRenderAlarmLoggingEnabled() const;
+	RENDERCORE_API bool IsRenderAlarmLoggingEnabled() const;
 
 protected:
-	virtual void InitRHI() override;
-	virtual void ReleaseRHI() override;
-	void Cleanup();
-	void IncrementTotalAllocations(uint32 Num);
+	RENDERCORE_API virtual void InitRHI(FRHICommandListBase& RHICmdList) override;
+	RENDERCORE_API virtual void ReleaseRHI() override;
+	RENDERCORE_API void Cleanup();
+	RENDERCORE_API void IncrementTotalAllocations(uint32 Num);
+
+	template<EPixelFormat Format, typename Type>
+	FAllocation AllocateInternal(FDynamicReadBufferPool* BufferPool, uint32 Num);
+
+	UE::FMutex Mutex;
+	FRHICommandListBase* RHICmdList = nullptr;
 
 	/** The pools of read buffers from which allocations are made. */
 	FDynamicReadBufferPool* HalfBufferPool;
 	FDynamicReadBufferPool* FloatBufferPool;
 	FDynamicReadBufferPool* Int32BufferPool;
+	FDynamicReadBufferPool* UInt32BufferPool;
 
 	/** A total of all allocations made since the last commit. Used to alert about spikes in memory usage. */
 	size_t TotalAllocatedSinceLastCommit;

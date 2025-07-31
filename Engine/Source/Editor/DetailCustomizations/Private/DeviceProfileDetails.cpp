@@ -1,33 +1,62 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "DeviceProfileDetails.h"
-#include "HAL/IConsoleManager.h"
-#include "Layout/Margin.h"
-#include "Widgets/DeclarativeSyntaxSupport.h"
-#include "Widgets/SCompoundWidget.h"
-#include "Widgets/SBoxPanel.h"
-#include "Framework/Application/SlateApplication.h"
-#include "Widgets/Images/SImage.h"
-#include "Widgets/Text/STextBlock.h"
-#include "Widgets/Layout/SBox.h"
-#include "Widgets/Input/SEditableTextBox.h"
-#include "Widgets/Input/SButton.h"
-#include "Widgets/Input/SComboButton.h"
-#include "Widgets/Views/STableViewBase.h"
-#include "Widgets/Views/STableRow.h"
-#include "Widgets/Views/SListView.h"
-#include "Widgets/Input/SComboBox.h"
-#include "EditorStyleSet.h"
-#include "DeviceProfiles/DeviceProfile.h"
-#include "DeviceProfiles/DeviceProfileManager.h"
-#include "PropertyHandle.h"
+
+#include "Containers/BitArray.h"
+#include "Containers/Set.h"
+#include "Containers/SparseArray.h"
+#include "CoreTypes.h"
+#include "Delegates/Delegate.h"
+#include "DetailCategoryBuilder.h"
 #include "DetailLayoutBuilder.h"
 #include "DetailWidgetRow.h"
+#include "DeviceProfiles/DeviceProfile.h"
+#include "DeviceProfiles/DeviceProfileManager.h"
+#include "Fonts/SlateFontInfo.h"
+#include "Framework/Application/SlateApplication.h"
+#include "HAL/IConsoleManager.h"
+#include "HAL/PlatformCrt.h"
 #include "IDetailGroup.h"
-#include "DetailCategoryBuilder.h"
+#include "Internationalization/Internationalization.h"
+#include "Internationalization/Text.h"
+#include "Layout/Children.h"
+#include "Layout/Margin.h"
+#include "Layout/Visibility.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/Attribute.h"
+#include "Misc/EnumRange.h"
+#include "Misc/Optional.h"
+#include "PropertyEditorModule.h"
+#include "PropertyHandle.h"
+#include "Serialization/Archive.h"
+#include "SlotBase.h"
+#include "Styling/AppStyle.h"
+#include "Styling/SlateColor.h"
+#include "Templates/Casts.h"
+#include "Templates/Less.h"
+#include "Templates/Tuple.h"
+#include "Templates/UnrealTemplate.h"
 #include "TextureLODSettingsDetails.h"
+#include "Types/SlateStructs.h"
+#include "UObject/UnrealType.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
+#include "Widgets/Images/SImage.h"
+#include "Widgets/Input/SButton.h"
+#include "Widgets/Input/SComboBox.h"
+#include "Widgets/Input/SComboButton.h"
+#include "Widgets/Input/SEditableTextBox.h"
 #include "Widgets/Input/SSearchBox.h"
+#include "Widgets/Layout/SBox.h"
+#include "Widgets/SBoxPanel.h"
+#include "Widgets/SCompoundWidget.h"
+#include "Widgets/Text/STextBlock.h"
+#include "Widgets/Views/SListView.h"
+#include "Widgets/Views/STableRow.h"
 
+class ITableRow;
+class STableViewBase;
+class SWidget;
+class UObject;
 
 #define LOCTEXT_NAMESPACE "DeviceProfileDetails"
 
@@ -96,146 +125,111 @@ namespace DeviceProfileCVarFormatHelper
 
 
 	/**
-	 *	Convert the enum to a string version
+	 *	Convert the CVar group enum enum its display name.
 	 *
 	 *	@param CatEnum - The ECVarGroup index
 	 *
-	 *	@return The name of the group.
+	 *	@return The display name of the group.
 	 */
-	FText CategoryTextFromEnum(DeviceProfileCVarFormatHelper::ECVarGroup CatEnum)
+	FText CategoryTextFromEnum(ECVarGroup CatEnum)
 	{
-		FText CategoryText;
-		if (CatEnum == ECVarGroup::CVG_Uncategorized)
+		switch(CatEnum)
 		{
-			CategoryText = LOCTEXT("UncategorizedCVarGroupTitle","Uncategorized");
+		case CVG_Rendering:
+			return LOCTEXT("RenderingCVarGroupTitle", "Rendering");
+		case CVG_Physics:
+			return LOCTEXT("PhysicsCVarGroupTitle", "Physics");
+		case CVG_Network:
+			return LOCTEXT("NetworkCVarGroupTitle", "Network");
+		case CVG_Console:
+			return LOCTEXT("ConsoleCVarGroupTitle", "Console");
+		case CVG_Compatibility:
+			return LOCTEXT("CompatibilityCVarGroupTitle", "Compatibility");
+		case CVG_UserInterface:
+			return LOCTEXT("UICVarGroupTitle", "User Interface");
+		case CVG_ScalabilityGroups:
+			return LOCTEXT("ScalabilityGroupCVarGroupTitle", "Scalability Group");
+		default:
+			break;
 		}
-		else if (CatEnum == ECVarGroup::CVG_Rendering)
-		{
-			CategoryText = LOCTEXT("RenderingCVarGroupTitle","Rendering");
-		}
-		else if (CatEnum == ECVarGroup::CVG_Physics)
-		{
-			CategoryText = LOCTEXT("PhysicsCVarGroupTitle","Physics");
-		}
-		else if (CatEnum == ECVarGroup::CVG_Network)
-		{
-			CategoryText = LOCTEXT("NetworkCVarGroupTitle","Network");
-		}
-		else if (CatEnum == ECVarGroup::CVG_Console)
-		{
-			CategoryText = LOCTEXT("ConsoleCVarGroupTitle","Console");
-		}
-		else if (CatEnum == ECVarGroup::CVG_Compatibility)
-		{
-			CategoryText = LOCTEXT("CompatibilityCVarGroupTitle","Compatibility");
-		}
-		else if (CatEnum == ECVarGroup::CVG_UserInterface)
-		{
-			CategoryText = LOCTEXT("UICVarGroupTitle", "User Interface");
-		}
-		else if (CatEnum == ECVarGroup::CVG_ScalabilityGroups)
-		{
-			CategoryText = LOCTEXT("ScalabilityGroupCVarGroupTitle", "Scalability Group");
-		}
-
-		return CategoryText;
+		return LOCTEXT("UncategorizedCVarGroupTitle", "Uncategorized");
 	}
 
 
 	/**
-	*	Convert the Console Variable Category from the CVar prefix
-	*
-	*	@param InPrefix - The Prefix of the Console Variable
-	*
-	*	@return The name of the group.
-	*/
-	FText CategoryTextFromPrefix(const FString& InPrefix)
+	 *	Convert the CVar group enum enum its CVar prefix.
+	 *
+	 *	@param CatEnum - The ECVarGroup index
+	 *
+	 *	@return The prefix of the group.
+	 */
+	FString CategoryPrefixFromEnum(ECVarGroup CatEnum)
 	{
-		FString LowerPrefix = InPrefix.ToLower();
-
-		FText CategoryText;
-		if (LowerPrefix == TEXT("r") || LowerPrefix == TEXT("r."))
+		switch (CatEnum)
 		{
-			CategoryText = LOCTEXT("RenderingCVarGroupTitle", "Rendering");
+		case CVG_Rendering:
+			return TEXT("r");
+		case CVG_Physics:
+			return TEXT("p");
+		case CVG_Network:
+			return TEXT("net");
+		case CVG_Console:
+			return TEXT("con");
+		case CVG_Compatibility:
+			return TEXT("compat");
+		case CVG_UserInterface:
+			return TEXT("ui");
+		case CVG_ScalabilityGroups:
+			return TEXT("sg");
+		default:
+			break;
 		}
-		else if (LowerPrefix == TEXT("p") || LowerPrefix == TEXT("p."))
-		{
-			CategoryText = LOCTEXT("PhysicsCVarGroupTitle", "Physics");
-		}
-		else if (LowerPrefix == TEXT("net") || LowerPrefix == TEXT("net."))
-		{
-			CategoryText = LOCTEXT("NetworkCVarGroupTitle", "Network");
-		}
-		else if (LowerPrefix == TEXT("con") || LowerPrefix == TEXT("con."))
-		{
-			CategoryText = LOCTEXT("ConsoleCVarGroupTitle", "Console");
-		}
-		else if (LowerPrefix == TEXT("compat") || LowerPrefix == TEXT("compat."))
-		{
-			CategoryText = LOCTEXT("CompatibilityCVarGroupTitle", "Compatibility");
-		}
-		else if (LowerPrefix == TEXT("ui") || LowerPrefix == TEXT("ui."))
-		{
-			CategoryText = LOCTEXT("UICVarGroupTitle", "User Interface");
-		}
-		else if (LowerPrefix == TEXT("sg") || LowerPrefix == TEXT("sg."))
-		{
-			CategoryText = LOCTEXT("ScalabilityGroupCVarGroupTitle", "Scalability Group");
-		}
-		else
-		{
-			CategoryText = LOCTEXT("UncategorizedCVarGroupTitle", "Uncategorized");
-		}
-
-		return CategoryText;
+		return FString();
 	}
 
 
 	/**
-	*	Convert the Console Variable Category from the CVar prefix
-	*
-	*	@param InPrefix - The Prefix of the Console Variable
-	*
-	*	@return The name of the group.
-	*/
-	FString CVarPrefixFromCategoryString(const FString& CategoryName)
+	 *	Convert the CVar prefix to the CVar group enum entry.
+	 *
+	 *	@param InPrefix - The Prefix of the Console Variable
+	 *
+	 *	@return The enum entry of the group.
+	 */
+	ECVarGroup CategoryEnumFromPrefix(const FString& InPrefix)
 	{
-		FString CVarPrefix;
-
-		FString LowerCategory = CategoryName.ToLower();
-		if (LowerCategory == TEXT("rendering"))
+		if (InPrefix == TEXT("r") || InPrefix == TEXT("r."))
 		{
-			CVarPrefix = TEXT("r");
+			return CVG_Rendering;
 		}
-		else if (LowerCategory == TEXT("physics"))
+		if (InPrefix == TEXT("p") || InPrefix == TEXT("p."))
 		{
-			CVarPrefix = TEXT("p");
+			return CVG_Physics;
 		}
-		else if (LowerCategory == TEXT("network"))
+		if (InPrefix == TEXT("net") || InPrefix == TEXT("net."))
 		{
-			CVarPrefix = TEXT("net");
+			return CVG_Network;
 		}
-		else if (LowerCategory == TEXT("console"))
+		if (InPrefix == TEXT("con") || InPrefix == TEXT("con."))
 		{
-			CVarPrefix = TEXT("con");
+			return CVG_Console;
 		}
-		else if (LowerCategory == TEXT("compatibility"))
+		if (InPrefix == TEXT("compat") || InPrefix == TEXT("compat."))
 		{
-			CVarPrefix = TEXT("compat");
+			return CVG_Compatibility;
 		}
-		else if (LowerCategory == TEXT("user interface"))
+		if (InPrefix == TEXT("ui") || InPrefix == TEXT("ui."))
 		{
-			CVarPrefix = TEXT("ui");
+			return CVG_UserInterface;
 		}
-		else if (LowerCategory == TEXT("scalability group"))
+		if (InPrefix == TEXT("sg") || InPrefix == TEXT("sg."))
 		{
-			CVarPrefix = TEXT("sg");
+			return CVG_ScalabilityGroups;
 		}
-
-		return CVarPrefix;
+		return CVG_Uncategorized;
 	}
 };
 
+ENUM_RANGE_BY_COUNT(DeviceProfileCVarFormatHelper::ECVarGroup, DeviceProfileCVarFormatHelper::Max_CVarCategories);
 
 ////////////////////////////////////////////////
 // FConsoleVariablesAvailableVisitor
@@ -249,11 +243,11 @@ class FConsoleVariablesAvailableVisitor
 public:
 	// @param Name must not be 0
 	// @param CVar must not be 0
-	static void OnConsoleVariable(const TCHAR *Name, IConsoleObject* CVar, TArray<TSharedPtr<FString>>& Sink)
+	static void OnConsoleVariable(const TCHAR *Name, IConsoleObject* CVar, TArray<TSharedPtr<FString>>* Sink)
 	{
 		if(CVar->AsVariable())
 		{
-			Sink.Add(MakeShareable(new FString(Name)));
+			Sink->Add(MakeShareable(new FString(Name)));
 		}
 
 	}
@@ -338,26 +332,61 @@ void SCVarSelectionPanel::Construct(const FArguments& InArgs, const FString& CVa
 	TArray<TSharedPtr<FString>> UnprocessedCVars;
 
 	IConsoleManager::Get().ForEachConsoleObjectThatStartsWith(
-		FConsoleObjectVisitor::CreateStatic< TArray<TSharedPtr<FString>>& >(
+		FConsoleObjectVisitor::CreateStatic(
 		&FConsoleVariablesAvailableVisitor::OnConsoleVariable,
-		UnprocessedCVars), *CVarPrefix);
+		&UnprocessedCVars), *CVarPrefix);
 
-	if (DeviceProfileCVarFormatHelper::CategoryTextFromPrefix(CVarPrefix).ToString() == DeviceProfileCVarFormatHelper::CategoryTextFromEnum(DeviceProfileCVarFormatHelper::CVG_Uncategorized).ToString())
+	if (DeviceProfileCVarFormatHelper::CategoryEnumFromPrefix(CVarPrefix) == DeviceProfileCVarFormatHelper::CVG_Uncategorized)
 	{
-		for(TArray<TSharedPtr<FString>>::TIterator CVarIt(UnprocessedCVars); CVarIt; ++CVarIt)
+		// Make a list of existing prefixes
+		TSet<FString> CategoryPrefixes;
+		for (DeviceProfileCVarFormatHelper::ECVarGroup PrefixEnum : TEnumRange<DeviceProfileCVarFormatHelper::ECVarGroup>())
 		{
-			if((*CVarIt)->Contains(TEXT(".")) == false)
+			FString Prefix = DeviceProfileCVarFormatHelper::CategoryPrefixFromEnum(PrefixEnum);
+			if (Prefix.Len() > 0)
 			{
-				AllAvailableCVars.Add(*CVarIt);
-				CVarsToDisplay.Add(*CVarIt);
+				CategoryPrefixes.Add(Prefix + TEXT("."));
+			}
+		}
+		
+		// Add all cvars that *don't* match one of the other groups
+		for (const TSharedPtr<FString>& TestCVarPtr : UnprocessedCVars)
+		{
+			const FString& TestCVar = *TestCVarPtr.Get();
+
+			bool bBelongsInUncategorized = false;
+
+			// Figure out if the prefix on this variable belongs to any other category or if it's missing a prefix
+			int32 FirstPeriodIndex = INDEX_NONE;
+			TestCVar.FindChar(TEXT('.'), /*out*/ FirstPeriodIndex);
+
+			if (FirstPeriodIndex != INDEX_NONE)
+			{
+				const FString TestPrefix(TestCVar.Left(FirstPeriodIndex+1));
+				bBelongsInUncategorized = !CategoryPrefixes.Contains(TestPrefix);
+			}
+			else
+			{
+				// No period means no prefix, so it couldn't be in any other category
+				bBelongsInUncategorized = true;
+			}
+
+			if (bBelongsInUncategorized)			
+			{
+				AllAvailableCVars.Add(TestCVarPtr);
 			}
 		}
 	}
 	else
 	{
 		AllAvailableCVars = UnprocessedCVars;
-		CVarsToDisplay = UnprocessedCVars;
 	}
+
+	// Sort the list
+	AllAvailableCVars.Sort([](const TSharedPtr<FString>& A, const TSharedPtr<FString>& B) { return *A < *B; });
+
+	// Duplicate the list	
+	CVarsToDisplay = AllAvailableCVars;
 
 	ChildSlot
 	[
@@ -395,14 +424,21 @@ FReply SCVarSelectionPanel::HandleCVarSelected(const TSharedPtr<FString> CVar)
 
 TSharedRef<ITableRow> SCVarSelectionPanel::GenerateCVarItemRow(TSharedPtr<FString> InItem, const TSharedRef<STableViewBase>& OwnerTable)
 {
+	FText ComposedTooltip = LOCTEXT("CVarSelectionMenuTooltip", "Select a Console Variable to add to the device profile");
+
+	if (IConsoleVariable* Var = IConsoleManager::Get().FindConsoleVariable(**InItem))
+	{
+		ComposedTooltip = FText::Format(LOCTEXT("CVarSelectionMenuTooltipWithHelp", "{0}\n\n{1}"), ComposedTooltip, FText::FromString(Var->GetHelp()));
+	}
+
 	return SNew(STableRow<TSharedPtr<FString>>, OwnerTable)
 		[
 			SNew(SButton)
 			.ForegroundColor(FSlateColor::UseForeground())
-			.ButtonStyle(FEditorStyle::Get(), "HoverHintOnly")
+			.ButtonStyle(FAppStyle::Get(), "HoverHintOnly")
 			.OnClicked(this, &SCVarSelectionPanel::HandleCVarSelected, InItem)
 			.ContentPadding(DeviceProfilePropertyConstants::CVarSelectionMenuPadding)
-			.ToolTipText(LOCTEXT("CVarSelectionMenuTooltip","Select a Console Variable to add to the device profile"))
+			.ToolTipText(ComposedTooltip)
 			[
 				SNew(STextBlock)
 				.Text(FText::FromString(*InItem))
@@ -521,6 +557,8 @@ void FDeviceProfileParentPropertyDetails::CreateParentPropertyView()
 		ActiveDeviceProfile->GatherParentCVarInformationRecursively(ParentCVarInformation);
 
 		IDetailGroup* ParentCVarsGroup = nullptr;
+
+		ParentCVarInformation.KeySort(TLess<>());
 		for(auto& ParentCVar : ParentCVarInformation)
 		{
 			FString ParentCVarName;
@@ -619,12 +657,12 @@ void FDeviceProfileConsoleVariablesPropertyDetails::CreateConsoleVariablesProper
 	ensure(CVarsArrayHandle->GetNumElements(CVarCount) == FPropertyAccess::Success);
 
 	// Sort the properties handles into Categories
-	TMap<FString, TArray<TSharedRef<IPropertyHandle>>> CategoryPropertyMap;
+	TMap<DeviceProfileCVarFormatHelper::ECVarGroup, TArray<TSharedRef<IPropertyHandle>>> CategoryPropertyMap;
 
 	// Add all the CVar groups, even if these are empty
 	for (int32 CategoryIdx = 0; CategoryIdx < (int32)DeviceProfileCVarFormatHelper::Max_CVarCategories; CategoryIdx++)
 	{
-		CategoryPropertyMap.FindOrAdd(DeviceProfileCVarFormatHelper::CategoryTextFromEnum((DeviceProfileCVarFormatHelper::ECVarGroup)CategoryIdx).ToString());
+		CategoryPropertyMap.FindOrAdd((DeviceProfileCVarFormatHelper::ECVarGroup)CategoryIdx);
 	}
 
 	for (uint32 CVarPropertyIdx = 0; CVarPropertyIdx < CVarCount; CVarPropertyIdx++)
@@ -639,9 +677,9 @@ void FDeviceProfileConsoleVariablesPropertyDetails::CreateConsoleVariablesProper
 		int32 CategoryEndIndex = CVarName.Find(TEXT("."));
 
 		FString CVarAbrv = CVarName.Left(CategoryEndIndex);
-		FText CVarCategory = DeviceProfileCVarFormatHelper::CategoryTextFromPrefix(CVarAbrv);
+		DeviceProfileCVarFormatHelper::ECVarGroup CVarCategory = DeviceProfileCVarFormatHelper::CategoryEnumFromPrefix(CVarAbrv);
 
-		TArray<TSharedRef<IPropertyHandle>>* CurrentPropertyCategoryGroup = CategoryPropertyMap.Find(CVarCategory.ToString());
+		TArray<TSharedRef<IPropertyHandle>>* CurrentPropertyCategoryGroup = CategoryPropertyMap.Find(CVarCategory);
 		CurrentPropertyCategoryGroup->Add(CVarElementHandle);
 	}
 
@@ -649,10 +687,19 @@ void FDeviceProfileConsoleVariablesPropertyDetails::CreateConsoleVariablesProper
 	// Put the property handles into the UI group for the details view.
 	for (auto& Current : CategoryPropertyMap)
 	{
-		const TArray<TSharedRef<IPropertyHandle>>& CurrentGroupsProperties = Current.Value;
-		const FText GroupName = FText::FromString(Current.Key);
+		TArray<TSharedRef<IPropertyHandle>>& CurrentGroupsProperties = Current.Value;
+		CurrentGroupsProperties.Sort([](const TSharedRef<IPropertyHandle>& A, const TSharedRef<IPropertyHandle>& B)
+		{ 
+			FString AVal;
+			A->GetValue(AVal);
+			FString BVal;
+			B->GetValue(BVal);
+			return AVal < BVal;
+		});
 
-		FString CVarPrefix = DeviceProfileCVarFormatHelper::CVarPrefixFromCategoryString(GroupName.ToString());
+		const FText GroupName = DeviceProfileCVarFormatHelper::CategoryTextFromEnum(Current.Key);
+
+		FString CVarPrefix = DeviceProfileCVarFormatHelper::CategoryPrefixFromEnum(Current.Key);
 		if (CVarPrefix.Len() > 0)
 		{
 			CVarPrefix += TEXT(".");
@@ -678,14 +725,14 @@ void FDeviceProfileConsoleVariablesPropertyDetails::CreateConsoleVariablesProper
 				.AutoWidth()
 				[
 					SNew(SComboButton)
-					.ButtonStyle(FEditorStyle::Get(), "HoverHintOnly")
+					.ButtonStyle(FAppStyle::Get(), "HoverHintOnly")
 					.ContentPadding(4.0f)
 					.ForegroundColor(FSlateColor::UseForeground())
 					.IsFocusable(false)
 					.ButtonContent()
 					[
 						SNew(SImage)
-						.Image(FEditorStyle::GetBrush("PropertyWindow.Button_AddToArray"))
+						.Image(FAppStyle::GetBrush("Icons.PlusCircle"))
 					]
 					.MenuContent()
 					[
@@ -698,14 +745,14 @@ void FDeviceProfileConsoleVariablesPropertyDetails::CreateConsoleVariablesProper
 				.AutoWidth()
 				[
 					SNew(SButton)
-					.ButtonStyle(FEditorStyle::Get(), "HoverHintOnly")
-					.OnClicked(this, &FDeviceProfileConsoleVariablesPropertyDetails::OnRemoveAllFromGroup, GroupName)
+					.ButtonStyle(FAppStyle::Get(), "HoverHintOnly")
+					.OnClicked(this, &FDeviceProfileConsoleVariablesPropertyDetails::OnRemoveAllFromGroup, (int32)Current.Key)
 					.ContentPadding(4.0f)
 					.ForegroundColor(FSlateColor::UseForeground())
 					.IsFocusable(false)
 					[
 						SNew(SImage)
-						.Image(FEditorStyle::GetBrush("PropertyWindow.Button_EmptyArray"))
+						.Image(FAppStyle::GetBrush("Icons.Delete"))
 					]
 				]
 			];
@@ -730,6 +777,12 @@ void FDeviceProfileConsoleVariablesPropertyDetails::CreateRowWidgetForCVarProper
 	const FString CVarName = UnformattedCVar.Left(CVarNameValueSplitIdx);
 	const FString CVarValueAsString = UnformattedCVar.Right(UnformattedCVar.Len() - (CVarNameValueSplitIdx + 1));
 
+	FText CVarHelp;
+	if (IConsoleVariable* Var = IConsoleManager::Get().FindConsoleVariable(*CVarName))
+	{
+		CVarHelp = FText::FromString(Var->GetHelp());
+	}
+
 	InGroup.AddWidgetRow()
 	.IsEnabled(true)
 	.Visibility(EVisibility::Visible)
@@ -737,6 +790,7 @@ void FDeviceProfileConsoleVariablesPropertyDetails::CreateRowWidgetForCVarProper
 	[
 		SNew(STextBlock)
 		.Text(FText::FromString(CVarName))
+		.ToolTipText(CVarHelp)
 		.Font(IDetailLayoutBuilder::GetDetailFont())
 	]
 	.ValueContent()
@@ -754,14 +808,14 @@ void FDeviceProfileConsoleVariablesPropertyDetails::CreateRowWidgetForCVarProper
 		.AutoWidth()
 		[
 			SNew(SButton)
-			.ButtonStyle(FEditorStyle::Get(), "HoverHintOnly")
+			.ButtonStyle(FAppStyle::Get(), "HoverHintOnly")
 			.OnClicked(const_cast<FDeviceProfileConsoleVariablesPropertyDetails*>(this), &FDeviceProfileConsoleVariablesPropertyDetails::OnRemoveCVarProperty, InProperty)
 			.ContentPadding(4.0f)
 			.ForegroundColor(FSlateColor::UseForeground())
 			.IsFocusable(false)
 			[
 				SNew(SImage)
-				.Image(FEditorStyle::GetBrush("PropertyWindow.Button_Delete"))
+				.Image(FAppStyle::GetBrush("Icons.X"))
 			]
 		]
 	];
@@ -786,7 +840,7 @@ void FDeviceProfileConsoleVariablesPropertyDetails::HandleCVarAdded(const FStrin
 
 				Array.Add(CompleteCVarString);
 			}
-			CVarsHandle->NotifyPostChange();
+			CVarsHandle->NotifyPostChange(EPropertyChangeType::ArrayAdd);
 		}
 
 		// Update the UI with the selection
@@ -837,14 +891,14 @@ FReply FDeviceProfileConsoleVariablesPropertyDetails::OnRemoveCVarProperty(TShar
 }
 
 
-FReply FDeviceProfileConsoleVariablesPropertyDetails::OnRemoveAllFromGroup(FText GroupName)
+FReply FDeviceProfileConsoleVariablesPropertyDetails::OnRemoveAllFromGroup(int32 CVarCategory)
 {
 	const TSharedPtr<IPropertyHandleArray> CVarsArrayHandle = CVarsHandle->AsArray();
 
 	uint32 CVarCount = 0;
 	ensure(CVarsArrayHandle->GetNumElements(CVarCount) == FPropertyAccess::Success);
 
-	FString CVarPrefix = DeviceProfileCVarFormatHelper::CVarPrefixFromCategoryString(GroupName.ToString());
+	FString CVarPrefix = DeviceProfileCVarFormatHelper::CategoryPrefixFromEnum((DeviceProfileCVarFormatHelper::ECVarGroup)CVarCategory);
 
 	for (int32 CVarPropertyIdx = CVarCount-1; CVarPropertyIdx >= 0; CVarPropertyIdx--)
 	{

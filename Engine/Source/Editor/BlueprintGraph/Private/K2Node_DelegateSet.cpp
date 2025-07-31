@@ -1,14 +1,29 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "K2Node_DelegateSet.h"
-#include "UObject/UnrealType.h"
-#include "Engine/MemberReference.h"
-#include "EdGraphSchema_K2.h"
-#include "K2Node_Event.h"
-#include "EdGraphUtilities.h"
+
 #include "BPTerminal.h"
-#include "KismetCompilerMisc.h"
+#include "BlueprintCompiledStatement.h"
+#include "Containers/Array.h"
+#include "Containers/EnumAsByte.h"
+#include "Containers/IndirectArray.h"
+#include "Containers/Map.h"
+#include "EdGraph/EdGraphPin.h"
+#include "EdGraphSchema_K2.h"
+#include "EdGraphUtilities.h"
+#include "Engine/MemberReference.h"
+#include "HAL/PlatformCrt.h"
+#include "Internationalization/Internationalization.h"
+#include "K2Node_Event.h"
+#include "Kismet2/CompilerResultsLog.h"
+#include "KismetCompiledFunctionContext.h"
 #include "KismetCompiler.h"
+#include "KismetCompilerMisc.h"
+#include "Misc/AssertionMacros.h"
+#include "Templates/Casts.h"
+#include "UObject/Class.h"
+#include "UObject/Object.h"
+#include "UObject/UnrealType.h"
 
 #define LOCTEXT_NAMESPACE "K2Node_DelegateSet"
 
@@ -270,7 +285,7 @@ void UK2Node_DelegateSet::ExpandNode(class FKismetCompilerContext& CompilerConte
 		if (UFunction* TargetFunction = GetDelegateSignature())
 		{
 			// First, create an event node matching the delegate signature
-			UK2Node_Event* DelegateEvent = CompilerContext.SpawnIntermediateEventNode<UK2Node_Event>(this, nullptr, SourceGraph);
+			UK2Node_Event* DelegateEvent = CompilerContext.SpawnIntermediateNode<UK2Node_Event>(this, SourceGraph);
 			DelegateEvent->EventReference.SetFromField<UFunction>(TargetFunction, false);
 			DelegateEvent->CustomFunctionName = GetDelegateTargetEntryPointName();
 			DelegateEvent->bInternalEvent = true;

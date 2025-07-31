@@ -2,37 +2,47 @@
 
 #pragma once
 
-#include "CoreTypes.h"
-#include "Templates/TypeHash.h"
+#include "Algo/ForEach.h"
 #include "Containers/Array.h"
 #include "Containers/ArrayView.h"
-#include "Templates/SharedPointer.h"
-#include "Delegates/Delegate.h"
+#include "Containers/ContainerAllocationPolicies.h"
+#include "Containers/Map.h"
+#include "CoreTypes.h"
 #include "CurveEditorTypes.h"
+#include "Delegates/Delegate.h"
+#include "HAL/PlatformCrt.h"
+#include "Misc/EnumClassFlags.h"
+#include "Templates/SharedPointer.h"
+#include "Templates/TypeHash.h"
 
 enum class ECurveEditorTreeFilterType : uint32;
 
-struct ICurveEditorTreeItem;
-struct FCurveEditorTreeFilter;
-
 class FCurveEditor;
 class FCurveEditorTree;
+struct FCurveEditorTreeFilter;
+struct ICurveEditorTreeItem;
 
-/** Enumeration specifying how a specific tree item has matched the current set of filters */
+/** Enumeration of bitmask values specifying how a specific tree item is interpreted by the current set of filters */
 enum class ECurveEditorTreeFilterState : uint8
 {
 	/** The item did not match any filter, and neither did any of its parents or children */
-	NoMatch,
+	NoMatch        = 0x00,
 
-	/** Neither this item nor any of its children match filters, but one of its parents did (ie it resides within a matched item) */
-	ImplicitChild,
-
-	/** Neither this item nor any of its parents match the filters, but one of its descendant children did (ie it is a parent of a matched item) */
-	ImplicitParent,
-
+	/** One of this item's parents matched a filter (ie it resides within a matched item) */
+	ImplicitChild  = (1<<0),
+	
+	/** One of this item's descendant children matched a filter (ie it is a parent of a matched item) */
+	ImplicitParent = (1<<1),
+	
 	/** This item itself matched one or more of the filters */
-	Match,
+	Match          = (1<<2),
+
+	/** This item in the tree should be expanded according to one or more of the filters */
+	Expand         = (1<<3),
+
+	MatchBitMask   = (ImplicitParent | Match | ImplicitChild),
 };
+ENUM_CLASS_FLAGS(ECurveEditorTreeFilterState);
 
 /**
  * Scoped guard that prevents the broadcast of tree events for the duration of its lifetime. Will trigger necessary events after the last remaining guard has been destroyed.
@@ -141,6 +151,16 @@ struct CURVEEDITOR_API FCurveEditorTreeItem
 	}
 
 	/**
+	*Get optional unique path name for the tree editor item
+	*/
+	TOptional<FString> GetUniquePathName() const { return UniquePathName; } 
+
+	/**
+	*Set optional unique path name for the tree editor item
+	*/
+	void SetUniquePathName(const TOptional<FString>& InName) { UniquePathName = InName; }
+
+	/**
 	 * Access the user-specified implementation for this tree item
 	 * @return A strong pointer to the implementation or null if it has expired, or was never assigned
 	 */
@@ -198,6 +218,8 @@ private:
 	FCurveEditorTreeItemID ThisID;
 	/** This parent's ID or FCurveEditorTreeItemID::Invalid() for root nodes */
 	FCurveEditorTreeItemID ParentID;
+	/** Optional Unique Path Name*/
+	TOptional<FString> UniquePathName;
 	/** A weak pointer to an externally held implementation. Mutually exclusive to StrongItemImpl. */
 	TWeakPtr<ICurveEditorTreeItem> WeakItemImpl;
 	/** A strong pointer to an implementation for this tree item. Mutually exclusive to WeakItemImpl. */
@@ -250,6 +272,12 @@ struct FCurveEditorFilterStates
 		return State ? *State : ECurveEditorTreeFilterState::NoMatch;
 	}
 
+	template <typename CallableT>
+	void ForEachItemState(CallableT Callable) const
+	{
+		Algo::ForEach(FilterStates, Callable);
+	}
+
 	/**
 	 * Assign a new filter state to an item
 	 */
@@ -258,17 +286,17 @@ struct FCurveEditorFilterStates
 		const ECurveEditorTreeFilterState* Existing = FilterStates.Find(ItemID);
 		if (Existing)
 		{
-			if (*Existing  == ECurveEditorTreeFilterState::Match)
+			if ((*Existing & ECurveEditorTreeFilterState::Match) != ECurveEditorTreeFilterState::NoMatch)
 			{
 				--NumMatched;
 			}
-			else if (*Existing != ECurveEditorTreeFilterState::NoMatch)
+			else if ((*Existing & ECurveEditorTreeFilterState::MatchBitMask) != ECurveEditorTreeFilterState::NoMatch)
 			{
 				--NumMatchedImplicitly;
 			}
 		}
 
-		if (NewState == ECurveEditorTreeFilterState::NoMatch)
+		if ((NewState & ECurveEditorTreeFilterState::MatchBitMask) == ECurveEditorTreeFilterState::NoMatch)
 		{
 			FilterStates.Remove(ItemID);
 		}
@@ -276,7 +304,7 @@ struct FCurveEditorFilterStates
 		{
 			FilterStates.Add(ItemID, NewState);
 
-			if (NewState == ECurveEditorTreeFilterState::Match)
+			if ((NewState & ECurveEditorTreeFilterState::Match) != ECurveEditorTreeFilterState::NoMatch)
 			{
 				++NumMatched;
 			}
@@ -484,7 +512,33 @@ public:
 	 */
 	void ToggleExpansionState(bool bRecursive);
 
-	FOnCurveEditorToggleExpansionState& GetToggleExpansionState() { return ToggleExpansionStateDelegate; }
+	FOnCurveEditorToggleExpansionState& GetToggleExpansionState()
+	{ 
+		return ToggleExpansionStateDelegate;
+	}
+
+	/*
+	* Get cached expanded items
+	*/
+	TArray<FCurveEditorTreeItemID> GetCachedExpandedItems() const;
+	
+	/*
+	* Set Item expansion state
+	*/
+	void SetItemExpansion(FCurveEditorTreeItemID InTreeItemID, bool bInExpansion);
+
+	/**
+	Whether or not we are are doign a direct selection, could be used to see why a curve model is being created or destroyed, by direct selection or by sequencer filtering?
+	*/
+	bool IsDoingDirectSelection() const
+	{
+		return bIsDoingDirectSelection;
+	}
+
+	/**
+	Recreate the curve models from the existing selection, this may be needed in case of a setting change.
+	*/
+	void RecreateModelsFromExistingSelection(FCurveEditor* CurveEditor);
 
 private:
 
@@ -497,9 +551,9 @@ private:
 	 * @param FilterPtrs     Array of non-null pointers to filters to use. Items are considered matched if they match any filter in this array.
 	 * @param ItemsToFilter  Array item IDs to filter
 	 * @param InheritedState The filter state for each item to receive if it does not directly match a filter (either ECurveEditorTreeFilterState::NoMatch or ECurveEditorTreeFilterState::InheritedChild)
-	 * @return Whether any of the items or any their recursive children matched any filter
+	 * @return Raised state flags which should be applied to parents of the filtered items.
 	 */
-	bool PerformFilterPass(TArrayView<const FCurveEditorTreeFilter* const> FilterPtrs, TArrayView<const FCurveEditorTreeItemID> ItemsToFilter, ECurveEditorTreeFilterState InheritedState);
+	ECurveEditorTreeFilterState PerformFilterPass(TArrayView<const FCurveEditorTreeFilter* const> FilterPtrs, TArrayView<const FCurveEditorTreeItemID> ItemsToFilter, ECurveEditorTreeFilterState InheritedState);
 
 	/** 
 	 * Recursively sorts the tree item ids using the sort predicate.
@@ -530,4 +584,10 @@ private:
 
 	/** Delegate for when toggle expansion state is invoked */
 	FOnCurveEditorToggleExpansionState ToggleExpansionStateDelegate;
+
+	/** Set of cached expanded items, based on GetTypedHash(FString)*/
+	TSet<int32> CachedExpandedItems;
+
+	/** Whether or not we are are doign a direct selection, could be used to see why a curve model is being created or destroyed, by direct selection or by sequencer filtering?*/
+	bool bIsDoingDirectSelection = false;
 };

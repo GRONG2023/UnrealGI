@@ -3,24 +3,37 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
-#include "Textures/SlateIcon.h"
-#include "K2Node.h"
+#include "EdGraph/EdGraphNode.h"
 #include "EdGraph/EdGraphNodeUtils.h"
+#include "Internationalization/Text.h"
+#include "K2Node.h"
+#include "KismetCompilerMisc.h"
+#include "NodeDependingOnEnumInterface.h"
+#include "Textures/SlateIcon.h"
+#include "UObject/Class.h"
+#include "UObject/NameTypes.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/UObjectGlobals.h"
+
 #include "K2Node_CastByteToEnum.generated.h"
 
 class FBlueprintActionDatabaseRegistrar;
 class FKismetCompilerContext;
 class FNodeHandlingFunctor;
+class FString;
 class UEdGraph;
+class UEdGraphPin;
+class UObject;
+struct FLinearColor;
 
 UCLASS(MinimalAPI)
-class UK2Node_CastByteToEnum : public UK2Node
+class UK2Node_CastByteToEnum : public UK2Node, public INodeDependingOnEnumInterface
 {
 	GENERATED_UCLASS_BODY()
 
 	UPROPERTY()
-	UEnum* Enum;
+	TObjectPtr<UEnum> Enum;
 
 	/* if true, the node returns always a valid value */
 	UPROPERTY()
@@ -46,6 +59,12 @@ class UK2Node_CastByteToEnum : public UK2Node
 	virtual void GetMenuActions(FBlueprintActionDatabaseRegistrar& ActionRegistrar) const override;
 	virtual FText GetMenuCategory() const override;
 	//~ End UK2Node Interface
+
+	// INodeDependingOnEnumInterface
+	virtual class UEnum* GetEnum() const override { return Enum; }
+	virtual void ReloadEnum(class UEnum* InEnum) override;
+	virtual bool ShouldBeReconstructedAfterEnumChanged() const override { return false; }
+	// End of INodeDependingOnEnumInterface
 
 	virtual FName GetFunctionName() const;
 

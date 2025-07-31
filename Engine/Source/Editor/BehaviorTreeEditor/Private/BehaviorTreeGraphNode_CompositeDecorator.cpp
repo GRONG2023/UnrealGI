@@ -1,14 +1,28 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "BehaviorTreeGraphNode_CompositeDecorator.h"
-#include "BehaviorTree/BTNode.h"
-#include "BehaviorTree/BTDecorator.h"
+
+#include "BehaviorTreeColors.h"
 #include "BehaviorTree/BTCompositeNode.h"
-#include "Kismet2/BlueprintEditorUtils.h"
+#include "BehaviorTree/BTDecorator.h"
+#include "BehaviorTree/BTNode.h"
+#include "BehaviorTree/BehaviorTree.h"
+#include "BehaviorTree/BehaviorTreeTypes.h"
+#include "BehaviorTree/Decorators/BTDecorator_Blackboard.h"
 #include "BehaviorTreeDecoratorGraph.h"
 #include "BehaviorTreeDecoratorGraphNode_Decorator.h"
+#include "Containers/EnumAsByte.h"
+#include "EdGraph/EdGraphSchema.h"
 #include "EdGraphSchema_BehaviorTreeDecorator.h"
-#include "BehaviorTree/BehaviorTree.h"
+#include "HAL/PlatformCrt.h"
+#include "HAL/PlatformMath.h"
+#include "Internationalization/Internationalization.h"
+#include "Kismet2/BlueprintEditorUtils.h"
+#include "Misc/AssertionMacros.h"
+#include "Templates/Casts.h"
+#include "UObject/NameTypes.h"
+#include "UObject/Object.h"
+#include "UObject/UnrealType.h"
 
 #define LOCTEXT_NAMESPACE "BehaviorTreeEditor"
 
@@ -20,6 +34,8 @@ UBehaviorTreeGraphNode_CompositeDecorator::UBehaviorTreeGraphNode_CompositeDecor
 
 	FirstExecutionIndex = INDEX_NONE;
 	LastExecutionIndex = INDEX_NONE;
+
+	GraphClass = UBehaviorTreeDecoratorGraph::StaticClass();
 }
 
 void UBehaviorTreeGraphNode_CompositeDecorator::ResetExecutionRange()
@@ -46,6 +62,16 @@ FText UBehaviorTreeGraphNode_CompositeDecorator::GetNodeTitle(ENodeTitleType::Ty
 FText UBehaviorTreeGraphNode_CompositeDecorator::GetDescription() const
 {
 	return FText::FromString(CachedDescription);
+}
+
+FText UBehaviorTreeGraphNode_CompositeDecorator::GetTooltipText() const
+{
+	if (ErrorMessage.IsEmpty() == false)
+	{
+		return FText::FromString(ErrorMessage);
+	}
+
+	return LOCTEXT("CompositeTooltip", "This node enables you to set up more advanced conditions using logic gates.");
 }
 
 void UBehaviorTreeGraphNode_CompositeDecorator::PostPlacedNewNode()
@@ -97,6 +123,14 @@ void UBehaviorTreeGraphNode_CompositeDecorator::PostCopyNode()
 			}
 		}
 	}
+}
+
+void UBehaviorTreeGraphNode_CompositeDecorator::PostPasteNode()
+{
+	Super::PostPasteNode();
+
+	// Clear reference to the parent since it will be set when creating/updating the BT from the graph nodes
+	ParentNodeInstance = nullptr;
 }
 
 void UBehaviorTreeGraphNode_CompositeDecorator::ResetNodeOwner()
@@ -178,8 +212,11 @@ void UBehaviorTreeGraphNode_CompositeDecorator::CreateBoundGraph()
 	// Create a new animation graph
 	check(BoundGraph == NULL);
 
+	const TSubclassOf<UEdGraphSchema> SchemaClass = GetDefault<UBehaviorTreeDecoratorGraph>(GraphClass)->Schema;
+	check(SchemaClass);
+
 	// don't use white space in name here, it prevents links from being copied correctly
-	BoundGraph = FBlueprintEditorUtils::CreateNewGraph(this, TEXT("CompositeDecorator"), UBehaviorTreeDecoratorGraph::StaticClass(), UEdGraphSchema_BehaviorTreeDecorator::StaticClass());
+	BoundGraph = FBlueprintEditorUtils::CreateNewGraph(this, TEXT("CompositeDecorator"), GraphClass, SchemaClass);
 	check(BoundGraph);
 
 	// Initialize the anim graph
@@ -280,6 +317,15 @@ void UBehaviorTreeGraphNode_CompositeDecorator::PostEditChangeProperty(struct FP
 	}
 }
 
+FLinearColor UBehaviorTreeGraphNode_CompositeDecorator::GetBackgroundColor(bool bIsActiveForDebugger) const
+{
+	return bIsActiveForDebugger
+		? BehaviorTreeColors::Debugger::ActiveDecorator
+		: (bInjectedNode || bRootLevel)
+			? BehaviorTreeColors::NodeBody::InjectedSubNode
+			: BehaviorTreeColors::NodeBody::Decorator;
+}
+
 struct FLogicDesc
 {
 	FString OperationDesc;
@@ -296,7 +342,7 @@ void UpdateLogicOpStack(TArray<FLogicDesc>& OpStack, FString& Description, FStri
 		if (OpStack[LastIdx].NumLeft <= 0)
 		{
 			OpStack.RemoveAt(LastIdx);
-			Indent.LeftChopInline(2, false);
+			Indent.LeftChopInline(2, EAllowShrinking::No);
 
 			UpdateLogicOpStack(OpStack, Description, Indent);
 		}
@@ -368,6 +414,11 @@ void UBehaviorTreeGraphNode_CompositeDecorator::BuildDescription()
 				bPendingNotOp = false;
 			}
 
+			// Composite decorator based on blackboard might need to rebuild inner decorators description before aggregating it
+			if (UBTDecorator_Blackboard* Decorator = Cast<UBTDecorator_Blackboard>(NodeInstances[TestOp.Number]))
+			{
+				Decorator->BuildDescription();
+			}
 			Description += NodeInstances[TestOp.Number]->GetStaticDescription();
 			UpdateLogicOpStack(OpStack, Description, Indent);
 		}

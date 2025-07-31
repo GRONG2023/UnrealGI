@@ -1,9 +1,17 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 #pragma once
 
-#include "CoreMinimal.h"
-#include "Editor/ClassViewer/Private/ClassViewerNode.h"
 #include "ClassViewerFilter.h"
+#include "Containers/Array.h"
+#include "Containers/UnrealString.h"
+#include "CoreTypes.h"
+#include "Templates/SharedPointer.h"
+#include "UObject/NameTypes.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/TopLevelAssetPath.h"
+
+class FClassViewerNode;
+class UClass;
 
 class FUnloadedBlueprintData : public IUnloadedBlueprintData
 {
@@ -30,7 +38,10 @@ public:
 
 	virtual TSharedPtr<FString> GetClassName() const override;
 
+	UE_DEPRECATED(5.1, "Class names are now represented by path names. Please use GetClassPathName.")
 	virtual FName GetClassPath() const override;
+
+	virtual FTopLevelAssetPath GetClassPathName() const override;
 
 	virtual const UClass* GetClassWithin() const override;
 
@@ -39,8 +50,8 @@ public:
 	/** Retrieves the Class Viewer node this data is associated with. */
 	const TWeakPtr<FClassViewerNode>& GetClassViewerNode() const;
 
-	/** Adds the name of an interface that this blueprint implements directly. */
-	void AddImplementedInterface(const FString& InterfaceName);
+	/** Adds the path of an interface that this blueprint implements directly. */
+	void AddImplementedInterface(const FString& InterfacePath);
 
 private:
 	/** Flags for the class. */
@@ -49,7 +60,7 @@ private:
 	/** Is this a normal blueprint type? */
 	bool bNormalBlueprintType;
 
-	/** The implemented interfaces for this class. */
+	/** The full paths for all directly implemented interfaces for this class. */
 	TArray<FString> ImplementedInterfaces;
 
 	/** The node this class is contained in, used to gather hierarchical data as needed. */

@@ -6,8 +6,6 @@ public class SlateNullRenderer : ModuleRules
 {
 	public SlateNullRenderer(ReadOnlyTargetRules Target) : base(Target)
 	{
-        PrivateIncludePaths.Add("Runtime/SlateNullRenderer/Private");
-
 		PrivateDependencyModuleNames.AddRange(
 			new string[] {
 				"Core",
@@ -18,13 +16,17 @@ public class SlateNullRenderer : ModuleRules
 
 		if (Target.bCompileAgainstEngine)
 		{
+			PrivateDefinitions.Add("UE_SLATE_NULL_RENDERER_WITH_ENGINE=1");
 			PrivateDependencyModuleNames.AddRange(
-			new string[] {
-				"Engine",
-				"RenderCore",
-				"RHI"
-			}
-		);
+				new string[] {
+					"Engine",
+					"RenderCore",
+					"RHI"
+				});
+		}
+		else
+		{
+			PrivateDefinitions.Add("UE_SLATE_NULL_RENDERER_WITH_ENGINE=0");
 		}
 	}
 }

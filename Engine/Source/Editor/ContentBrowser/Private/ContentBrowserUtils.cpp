@@ -2,65 +2,79 @@
 
 
 #include "ContentBrowserUtils.h"
-#include "ContentBrowserSingleton.h"
-#include "HAL/IConsoleManager.h"
-#include "Misc/MessageDialog.h"
-#include "HAL/FileManager.h"
-#include "HAL/PlatformApplicationMisc.h"
-#include "Misc/Paths.h"
-#include "Misc/ConfigCacheIni.h"
-#include "Misc/FeedbackContext.h"
-#include "Misc/ScopedSlowTask.h"
-#include "Misc/App.h"
-#include "Misc/FileHelper.h"
-#include "Modules/ModuleManager.h"
-#include "Widgets/DeclarativeSyntaxSupport.h"
-#include "Widgets/SCompoundWidget.h"
-#include "Widgets/SBoxPanel.h"
-#include "Layout/WidgetPath.h"
-#include "SlateOptMacros.h"
-#include "Framework/Application/MenuStack.h"
-#include "Framework/Application/SlateApplication.h"
-#include "Widgets/Layout/SBorder.h"
-#include "Widgets/Images/SImage.h"
-#include "Widgets/Text/STextBlock.h"
-#include "Widgets/Layout/SUniformGridPanel.h"
-#include "Widgets/Input/SButton.h"
-#include "EditorStyleSet.h"
-#include "UnrealClient.h"
-#include "Engine/World.h"
-#include "Settings/ContentBrowserSettings.h"
-#include "Settings/EditorExperimentalSettings.h"
-#include "SourceControlOperations.h"
-#include "ISourceControlModule.h"
-#include "SourceControlHelpers.h"
-#include "FileHelpers.h"
-#include "ARFilter.h"
-#include "AssetRegistryModule.h"
-#include "IAssetTools.h"
-#include "AssetToolsModule.h"
-#include "Settings/EditorExperimentalSettings.h"
 
-#include "PackagesDialog.h"
-#include "PackageTools.h"
-#include "ObjectTools.h"
-#include "ImageUtils.h"
-#include "Logging/MessageLog.h"
-#include "Misc/EngineBuildSettings.h"
-#include "Framework/Notifications/NotificationManager.h"
-#include "Widgets/Notifications/SNotificationList.h"
-#include "Interfaces/IPluginManager.h"
-#include "SAssetView.h"
-#include "SPathView.h"
-#include "ContentBrowserLog.h"
-#include "Subsystems/AssetEditorSubsystem.h"
-#include "Editor.h"
-
-#include "IContentBrowserDataModule.h"
+#include "AssetRegistry/ARFilter.h"
+#include "AssetRegistry/AssetData.h"
+#include "Containers/Map.h"
+#include "Containers/StringView.h"
+#include "ContentBrowserConfig.h"
+#include "ContentBrowserDataFilter.h"
 #include "ContentBrowserDataSource.h"
 #include "ContentBrowserDataSubsystem.h"
+#include "ContentBrowserItem.h"
+#include "ContentBrowserItemData.h"
+#include "ContentBrowserSingleton.h"
+#include "CoreGlobals.h"
+#include "Framework/Application/IMenu.h"
+#include "Framework/Application/MenuStack.h"
+#include "Framework/Application/SlateApplication.h"
+#include "HAL/FileManager.h"
+#include "HAL/PlatformApplicationMisc.h"
+#include "HAL/PlatformCrt.h"
+#include "HAL/PlatformMisc.h"
+#include "HAL/PlatformProcess.h"
+#include "IContentBrowserDataModule.h"
+#include "Input/Reply.h"
+#include "Layout/Children.h"
+#include "Layout/Margin.h"
+#include "Layout/SlateRect.h"
+#include "Layout/WidgetPath.h"
+#include "Math/Color.h"
+#include "Math/UnrealMathSSE.h"
+#include "Math/Vector2D.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/Attribute.h"
+#include "Misc/ConfigCacheIni.h"
+#include "Misc/MessageDialog.h"
+#include "Misc/NamePermissionList.h"
+#include "Misc/Optional.h"
+#include "Misc/Paths.h"
+#include "SAssetView.h"
+#include "SPathView.h"
+#include "SlateOptMacros.h"
+#include "SlotBase.h"
+#include "SourceControlOperations.h"
+#include "Styling/AppStyle.h"
+#include "Styling/SlateColor.h"
+#include "Templates/UnrealTemplate.h"
+#include "Types/SlateEnums.h"
+#include "UObject/TopLevelAssetPath.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
+#include "Widgets/Images/SImage.h"
+#include "Widgets/Input/SButton.h"
+#include "Widgets/Layout/SBorder.h"
+#include "Widgets/Layout/SUniformGridPanel.h"
+#include "Widgets/SBoxPanel.h"
+#include "Widgets/SCompoundWidget.h"
+#include "Widgets/Text/STextBlock.h"
+#include "Algo/Transform.h"
+
+class SWidget;
+struct FGeometry;
+struct FPointerEvent;
 
 #define LOCTEXT_NAMESPACE "ContentBrowser"
+
+namespace ContentBrowserUtils
+{
+	/** Converts a virtual path such as /All/Plugins -> /Plugins or /All/Game -> /Game */
+	FString ConvertVirtualPathToInvariantPathString(const FString& VirtualPath)
+	{
+		FName ConvertedPath;
+		IContentBrowserDataModule::Get().GetSubsystem()->TryConvertVirtualPath(FName(VirtualPath), ConvertedPath);
+		return ConvertedPath.ToString();
+	}
+}
 
 class SContentBrowserPopup : public SCompoundWidget
 {
@@ -78,8 +92,8 @@ public:
 		ChildSlot
 		[
 			SNew(SBorder)
-			.BorderImage(FEditorStyle::GetBrush("Menu.Background"))
-			.Padding(10)
+			.BorderImage(FAppStyle::GetBrush("Menu.Background"))
+			.Padding(10.f)
 			.OnMouseButtonDown(this, &SContentBrowserPopup::OnBorderClicked)
 			.BorderBackgroundColor(this, &SContentBrowserPopup::GetBorderBackgroundColor)
 			[
@@ -88,9 +102,9 @@ public:
 				+SHorizontalBox::Slot()
 				.AutoWidth()
 				.VAlign(VAlign_Center)
-				.Padding(0, 0, 4, 0)
+				.Padding(0.f, 0.f, 4.f, 0.f)
 				[
-					SNew(SImage) .Image( FEditorStyle::GetBrush("ContentBrowser.PopupMessageIcon") )
+					SNew(SImage) .Image( FAppStyle::GetBrush("ContentBrowser.PopupMessageIcon") )
 				]
 
 				+SHorizontalBox::Slot()
@@ -183,13 +197,13 @@ public:
 		ChildSlot
 		[
 			SNew(SBorder)
-			. BorderImage(FEditorStyle::GetBrush("Menu.Background"))
-			. Padding(10)
+			. BorderImage(FAppStyle::GetBrush("Menu.Background"))
+			. Padding(10.f)
 			[
 				SNew(SVerticalBox)
 				+SVerticalBox::Slot()
 				.AutoHeight()
-				.Padding(0, 0, 0, 5)
+				.Padding(0.f, 0.f, 0.f, 5.f)
 				.HAlign(HAlign_Center)
 				[
 					SNew(STextBlock)
@@ -201,7 +215,7 @@ public:
 				.HAlign(HAlign_Center)
 				[
 					SNew(SUniformGridPanel)
-					.SlotPadding(3)
+					.SlotPadding(3.f)
 					+ SUniformGridPanel::Slot(0, 0)
 					.HAlign(HAlign_Fill)
 					[
@@ -298,21 +312,66 @@ void ContentBrowserUtils::DisplayConfirmationPopup(const FText& Message, const F
 	Popup->OpenPopup(ParentContent);
 }
 
-void ContentBrowserUtils::CopyItemReferencesToClipboard(const TArray<FContentBrowserItem>& ItemsToCopy)
+FString ContentBrowserUtils::GetItemReferencesText(const TArray<FContentBrowserItem>& Items)
 {
-	TArray<FContentBrowserItem> SortedItems = ItemsToCopy;
+	TArray<FContentBrowserItem> SortedItems = Items;
 	SortedItems.Sort([](const FContentBrowserItem& One, const FContentBrowserItem& Two)
 	{
 		return One.GetVirtualPath().Compare(Two.GetVirtualPath()) < 0;
 	});
 
-	FString ClipboardText;
+	FString Result;
 	for (const FContentBrowserItem& Item : SortedItems)
 	{
-		Item.AppendItemReference(ClipboardText);
+		if (ensure(!Item.IsFolder()))
+		{
+			Item.AppendItemReference(Result);
+		}
 	}
 
-	FPlatformApplicationMisc::ClipboardCopy(*ClipboardText);
+	return Result;
+}
+
+FString ContentBrowserUtils::GetFolderReferencesText(const TArray<FContentBrowserItem>& Folders)
+{
+	TArray<FContentBrowserItem> SortedItems = Folders;
+	SortedItems.Sort([](const FContentBrowserItem& One, const FContentBrowserItem& Two)
+	{
+		return One.GetVirtualPath().Compare(Two.GetVirtualPath()) < 0;
+	});
+
+	TStringBuilder<2048> Result;
+	for (const FContentBrowserItem& Item : SortedItems)
+	{
+		if (ensure(Item.IsFolder()))
+		{
+			FName InternalPath = Item.GetInternalPath();
+			if (!InternalPath.IsNone())
+			{
+				Result << InternalPath << LINE_TERMINATOR;
+			}
+		}
+	}
+
+	return Result.ToString();
+}
+
+void ContentBrowserUtils::CopyItemReferencesToClipboard(const TArray<FContentBrowserItem>& ItemsToCopy)
+{
+	FString Text = GetItemReferencesText(ItemsToCopy);
+	if (!Text.IsEmpty())
+	{
+		FPlatformApplicationMisc::ClipboardCopy(*Text);
+	}
+}
+
+void ContentBrowserUtils::CopyFolderReferencesToClipboard(const TArray<FContentBrowserItem>& FoldersToCopy)
+{
+	FString Text = GetFolderReferencesText(FoldersToCopy);
+	if (!Text.IsEmpty())
+	{
+		FPlatformApplicationMisc::ClipboardCopy(*Text);
+	}
 }
 
 void ContentBrowserUtils::CopyFilePathsToClipboard(const TArray<FContentBrowserItem>& ItemsToCopy)
@@ -375,6 +434,26 @@ bool ContentBrowserUtils::IsItemPluginContent(const FContentBrowserItem& InItem)
 {
 	const FContentBrowserItemDataAttributeValue IsPluginAttributeValue = InItem.GetItemAttribute(ContentBrowserItemAttributes::ItemIsPluginContent);
 	return IsPluginAttributeValue.IsValid() && IsPluginAttributeValue.GetValue<bool>();
+}
+
+bool ContentBrowserUtils::IsItemPluginRootFolder(const FContentBrowserItem& InItem)
+{
+	if (!InItem.IsFolder())
+	{
+		return false;
+	}
+	FName InternalPath = InItem.GetInternalPath();
+	if (InternalPath.IsNone())
+	{
+		return false;
+	}
+	FNameBuilder PathBuffer(InternalPath);
+	FStringView Path = PathBuffer.ToView();
+	if (int32 Index = 0; Path.RightChop(1).FindChar('/', Index) && Index != INDEX_NONE)
+	{
+		return false; // Contains a second slash, is not a root
+	}
+	return IsItemPluginContent(InItem);
 }
 
 bool ContentBrowserUtils::IsCollectionPath(const FString& InPath, FName* OutCollectionName, ECollectionShareType::Type* OutCollectionShareType)
@@ -448,9 +527,10 @@ void ContentBrowserUtils::CountItemTypes(const TArray<FAssetData>& InItems, int3
 	OutNumAssetItems = 0;
 	OutNumClassItems = 0;
 
+	const FTopLevelAssetPath ClassPath(TEXT("/Script/CoreUObject"), TEXT("Class"));
 	for(const FAssetData& Item : InItems)
 	{
-		if(Item.AssetClass == NAME_Class)
+		if(Item.AssetClassPath == ClassPath)
 		{
 			++OutNumClassItems;
 		}
@@ -466,6 +546,62 @@ FText ContentBrowserUtils::GetExploreFolderText()
 	FFormatNamedArguments Args;
 	Args.Add(TEXT("FileManagerName"), FPlatformMisc::GetFileManagerName());
 	return FText::Format(NSLOCTEXT("GenericPlatform", "ShowInFileManager", "Show in {FileManagerName}"), Args);
+}
+
+void ContentBrowserUtils::ExploreFolders(const TArray<FContentBrowserItem>& InItems, const TSharedRef<SWidget>& InParentContent)
+{
+	TArray<FString> ExploreItems;
+
+	for (const FContentBrowserItem& SelectedItem : InItems)
+	{
+		FString ItemFilename;
+		if (SelectedItem.GetItemPhysicalPath(ItemFilename))
+		{
+			const bool bExists = SelectedItem.IsFile() ? FPaths::FileExists(ItemFilename) : FPaths::DirectoryExists(ItemFilename);
+			if (bExists)
+			{
+				ExploreItems.Add(IFileManager::Get().ConvertToAbsolutePathForExternalAppForRead(*ItemFilename));
+			}
+		}
+	}
+
+	const int32 BatchSize = 10;
+	const FText FileManagerName = FPlatformMisc::GetFileManagerName();
+	const bool bHasMultipleBatches = ExploreItems.Num() > BatchSize;
+	for (int32 i = 0; i < ExploreItems.Num(); ++i)
+	{
+		bool bIsBatchBoundary = (i % BatchSize) == 0;
+		if (bHasMultipleBatches && bIsBatchBoundary)
+		{
+			int32 RemainingCount = ExploreItems.Num() - i;
+			int32 NextCount = FMath::Min(BatchSize, RemainingCount);
+			FText Prompt = FText::Format(LOCTEXT("ExecuteExploreConfirm", "Show {0} {0}|plural(one=item,other=items) in {1}?\nThere {2}|plural(one=is,other=are) {2} remaining."), NextCount, FileManagerName, RemainingCount);
+			if (FMessageDialog::Open(EAppMsgType::YesNo, Prompt) != EAppReturnType::Yes)
+			{
+				return;
+			}
+		}
+
+		FPlatformProcess::ExploreFolder(*ExploreItems[i]);
+	}
+}
+
+bool ContentBrowserUtils::CanExploreFolders(const TArray<FContentBrowserItem>& InItems)
+{
+	for (const FContentBrowserItem& SelectedItem : InItems)
+	{
+		FString ItemFilename;
+		if (SelectedItem.GetItemPhysicalPath(ItemFilename))
+		{
+			const bool bExists = SelectedItem.IsFile() ? FPaths::FileExists(ItemFilename) : FPaths::DirectoryExists(ItemFilename);
+			if (bExists)
+			{
+				return true;
+			}
+		}
+	}
+
+	return false;
 }
 
 template <typename OutputContainerType>
@@ -506,40 +642,77 @@ void ContentBrowserUtils::ConvertLegacySelectionToVirtualPaths(TArrayView<const 
 	ConvertLegacySelectionToVirtualPathsImpl(InAssets, InFolders, InUseFolderPaths, OutVirtualPaths);
 }
 
-void ContentBrowserUtils::AppendAssetFilterToContentBrowserFilter(const FARFilter& InAssetFilter, const TSharedPtr<FBlacklistNames>& InAssetClassBlacklist, const TSharedPtr<FBlacklistPaths>& InFolderBlacklist, FContentBrowserDataFilter& OutDataFilter)
+void ContentBrowserUtils::AppendAssetFilterToContentBrowserFilter(const FARFilter& InAssetFilter, const TSharedPtr<FPathPermissionList>& InAssetClassPermissionList, const TSharedPtr<FPathPermissionList>& InFolderPermissionList, FContentBrowserDataFilter& OutDataFilter)
 {
-	if (InAssetFilter.ObjectPaths.Num() > 0 || InAssetFilter.TagsAndValues.Num() > 0 || InAssetFilter.bIncludeOnlyOnDiskAssets)
+	if (InAssetFilter.SoftObjectPaths.Num() > 0 || InAssetFilter.TagsAndValues.Num() > 0 || InAssetFilter.bIncludeOnlyOnDiskAssets)
 	{
 		FContentBrowserDataObjectFilter& ObjectFilter = OutDataFilter.ExtraFilters.FindOrAddFilter<FContentBrowserDataObjectFilter>();
-		ObjectFilter.ObjectNamesToInclude = InAssetFilter.ObjectPaths;
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
+		// TODO: Modify this API to also use FSoftObjectPath with deprecation
+		ObjectFilter.ObjectNamesToInclude = UE::SoftObjectPath::Private::ConvertSoftObjectPaths(InAssetFilter.SoftObjectPaths);
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 		ObjectFilter.TagsAndValuesToInclude = InAssetFilter.TagsAndValues;
 		ObjectFilter.bOnDiskObjectsOnly = InAssetFilter.bIncludeOnlyOnDiskAssets;
 	}
 
-	if (InAssetFilter.PackageNames.Num() > 0 || InAssetFilter.PackagePaths.Num() > 0 || (InFolderBlacklist && InFolderBlacklist->HasFiltering()))
+	if (InAssetFilter.PackageNames.Num() > 0 || InAssetFilter.PackagePaths.Num() > 0 || (InFolderPermissionList && InFolderPermissionList->HasFiltering()))
 	{
 		FContentBrowserDataPackageFilter& PackageFilter = OutDataFilter.ExtraFilters.FindOrAddFilter<FContentBrowserDataPackageFilter>();
 		PackageFilter.PackageNamesToInclude = InAssetFilter.PackageNames;
 		PackageFilter.PackagePathsToInclude = InAssetFilter.PackagePaths;
 		PackageFilter.bRecursivePackagePathsToInclude = InAssetFilter.bRecursivePaths;
-		PackageFilter.PathBlacklist = InFolderBlacklist;
+		PackageFilter.PathPermissionList = InFolderPermissionList;
 	}
 
-	if (InAssetFilter.ClassNames.Num() > 0 || (InAssetClassBlacklist && InAssetClassBlacklist->HasFiltering()))
+	if (InAssetFilter.ClassPaths.Num() > 0 || (InAssetClassPermissionList && InAssetClassPermissionList->HasFiltering()))
 	{
 		FContentBrowserDataClassFilter& ClassFilter = OutDataFilter.ExtraFilters.FindOrAddFilter<FContentBrowserDataClassFilter>();
-		ClassFilter.ClassNamesToInclude = InAssetFilter.ClassNames;
+		for (FTopLevelAssetPath ClassPathName : InAssetFilter.ClassPaths)
+		{
+			ClassFilter.ClassNamesToInclude.Add(ClassPathName.ToString());
+		}
 		ClassFilter.bRecursiveClassNamesToInclude = InAssetFilter.bRecursiveClasses;
 		if (InAssetFilter.bRecursiveClasses)
 		{
-			ClassFilter.ClassNamesToExclude = InAssetFilter.RecursiveClassesExclusionSet.Array();
+			for (FTopLevelAssetPath ClassPathName : InAssetFilter.RecursiveClassPathsExclusionSet)
+			{
+				ClassFilter.ClassNamesToExclude.Add(ClassPathName.ToString());
+			}
 			ClassFilter.bRecursiveClassNamesToExclude = false;
 		}
-		ClassFilter.ClassBlacklist = InAssetClassBlacklist;
+		ClassFilter.ClassPermissionList = InAssetClassPermissionList;
 	}
 }
 
-bool ContentBrowserUtils::CanDeleteFromAssetView(TWeakPtr<SAssetView> AssetView)
+TSharedPtr<FPathPermissionList> ContentBrowserUtils::GetCombinedFolderPermissionList(const TSharedPtr<FPathPermissionList>& FolderPermissionList, const TSharedPtr<FPathPermissionList>& WritableFolderPermissionList)
+{
+	TSharedPtr<FPathPermissionList> CombinedFolderPermissionList;
+
+	const bool bHidingFolders = FolderPermissionList && FolderPermissionList->HasFiltering();
+	const bool bHidingReadOnlyFolders = WritableFolderPermissionList && WritableFolderPermissionList->HasFiltering();
+	if (bHidingFolders || bHidingReadOnlyFolders)
+	{
+		CombinedFolderPermissionList = MakeShared<FPathPermissionList>();
+
+		if (bHidingReadOnlyFolders && bHidingFolders)
+		{
+			FPathPermissionList IntersectedFilter = FolderPermissionList->CombinePathFilters(*WritableFolderPermissionList.Get());
+			CombinedFolderPermissionList->Append(IntersectedFilter);
+		}
+		else if (bHidingReadOnlyFolders)
+		{
+			CombinedFolderPermissionList->Append(*WritableFolderPermissionList);
+		}
+		else if (bHidingFolders)
+		{
+			CombinedFolderPermissionList->Append(*FolderPermissionList);
+		}
+	}
+
+	return CombinedFolderPermissionList;
+}
+
+bool ContentBrowserUtils::CanDeleteFromAssetView(TWeakPtr<SAssetView> AssetView, FText* OutErrorMsg)
 {
 	if (TSharedPtr<SAssetView> AssetViewPin = AssetView.Pin())
 	{
@@ -548,24 +721,24 @@ bool ContentBrowserUtils::CanDeleteFromAssetView(TWeakPtr<SAssetView> AssetView)
 		bool bCanDelete = false;
 		for (const FContentBrowserItem& SelectedItem : SelectedItems)
 		{
-			bCanDelete |= SelectedItem.CanDelete();
+			bCanDelete |= SelectedItem.CanDelete(OutErrorMsg);
 		}
 		return bCanDelete;
 	}
 	return false;
 }
 
-bool ContentBrowserUtils::CanRenameFromAssetView(TWeakPtr<SAssetView> AssetView)
+bool ContentBrowserUtils::CanRenameFromAssetView(TWeakPtr<SAssetView> AssetView, FText* OutErrorMsg)
 {
 	if (TSharedPtr<SAssetView> AssetViewPin = AssetView.Pin())
 	{
 		const TArray<FContentBrowserItem> SelectedItems = AssetViewPin->GetSelectedItems();
-		return SelectedItems.Num() == 1 && SelectedItems[0].CanRename(nullptr) && !AssetViewPin->IsThumbnailEditMode();
+		return SelectedItems.Num() == 1 && SelectedItems[0].CanRename(nullptr, OutErrorMsg) && !AssetViewPin->IsThumbnailEditMode();
 	}
 	return false;
 }
 
-bool ContentBrowserUtils::CanDeleteFromPathView(TWeakPtr<SPathView> PathView)
+bool ContentBrowserUtils::CanDeleteFromPathView(TWeakPtr<SPathView> PathView, FText* OutErrorMsg)
 {
 	if (TSharedPtr<SPathView> PathViewPin = PathView.Pin())
 	{
@@ -574,59 +747,178 @@ bool ContentBrowserUtils::CanDeleteFromPathView(TWeakPtr<SPathView> PathView)
 		bool bCanDelete = false;
 		for (const FContentBrowserItem& SelectedItem : SelectedItems)
 		{
-			bCanDelete |= SelectedItem.CanDelete();
+			bCanDelete |= SelectedItem.CanDelete(OutErrorMsg);
 		}
 		return bCanDelete;
 	}
 	return false;
 }
 
-bool ContentBrowserUtils::CanRenameFromPathView(TWeakPtr<SPathView> PathView)
+bool ContentBrowserUtils::CanRenameFromPathView(TWeakPtr<SPathView> PathView, FText* OutErrorMsg)
 {
 	if (TSharedPtr<SPathView> PathViewPin = PathView.Pin())
 	{
 		const TArray<FContentBrowserItem> SelectedItems = PathViewPin->GetSelectedFolderItems();
-		return SelectedItems.Num() == 1 && SelectedItems[0].CanRename(nullptr);
+		return SelectedItems.Num() == 1 && SelectedItems[0].CanRename(nullptr, OutErrorMsg);
 	}
 	return false;
+}
+
+FName ContentBrowserUtils::GetInvariantPath(const FContentBrowserItemPath& ItemPath)
+{
+	if (!ItemPath.HasInternalPath())
+	{
+		FName InvariantPath;
+		const EContentBrowserPathType AssetPathType = IContentBrowserDataModule::Get().GetSubsystem()->TryConvertVirtualPath(ItemPath.GetVirtualPathName(), InvariantPath);
+		if (AssetPathType == EContentBrowserPathType::Virtual)
+		{
+			return InvariantPath;
+		}
+		else
+		{
+			return NAME_None;
+		}
+	}
+
+	return ItemPath.GetInternalPathName();
+}
+
+EContentBrowserIsFolderVisibleFlags ContentBrowserUtils::GetIsFolderVisibleFlags(const bool bDisplayEmpty)
+{
+	return EContentBrowserIsFolderVisibleFlags::Default | (bDisplayEmpty ? EContentBrowserIsFolderVisibleFlags::None : EContentBrowserIsFolderVisibleFlags::HideEmptyFolders);
 }
 
 bool ContentBrowserUtils::IsFavoriteFolder(const FString& FolderPath)
 {
-	return FContentBrowserSingleton::Get().FavoriteFolderPaths.Contains(FolderPath);
+	return IsFavoriteFolder(FContentBrowserItemPath(FolderPath, EContentBrowserPathType::Virtual));
+}
+
+bool ContentBrowserUtils::IsFavoriteFolder(const FContentBrowserItemPath& FolderPath)
+{
+	const FName InvariantPath = ContentBrowserUtils::GetInvariantPath(FolderPath);
+	if (!InvariantPath.IsNone())
+	{
+		return FContentBrowserSingleton::Get().FavoriteFolderPaths.Contains(InvariantPath.ToString());
+	}
+
+	return false;
 }
 
 void ContentBrowserUtils::AddFavoriteFolder(const FString& FolderPath, bool bFlushConfig /*= true*/)
 {
-	FContentBrowserSingleton::Get().FavoriteFolderPaths.AddUnique(FolderPath);
+	AddFavoriteFolder(FContentBrowserItemPath(FolderPath, EContentBrowserPathType::Virtual));
 }
 
-void ContentBrowserUtils::RemoveFavoriteFolder(const FString& FolderPath, bool bFlushConfig /*= true*/)
+void ContentBrowserUtils::AddFavoriteFolder(const FContentBrowserItemPath& FolderPath)
 {
-	TArray<FString> FoldersToRemove;
-	FoldersToRemove.Add(FolderPath);
-	
-	// Find and remove any subfolders
-	for (const FString& FavoritePath : FContentBrowserSingleton::Get().FavoriteFolderPaths)
+	const FName InvariantPath = ContentBrowserUtils::GetInvariantPath(FolderPath);
+	if (InvariantPath.IsNone())
 	{
-		if (FavoritePath.StartsWith(FolderPath + TEXT("/")))
-		{
-			FoldersToRemove.Add(FavoritePath);
-		}
+		return;
 	}
-	for (const FString& FolderToRemove : FoldersToRemove)
+
+	const FString InvariantFolder = InvariantPath.ToString();
+
+	FContentBrowserSingleton::Get().FavoriteFolderPaths.AddUnique(InvariantFolder);
+
+	if (UContentBrowserConfig* EditorConfig = UContentBrowserConfig::Get())
 	{
-		FContentBrowserSingleton::Get().FavoriteFolderPaths.Remove(FolderToRemove);
+		EditorConfig->Favorites.Add(InvariantFolder);
+
+		UContentBrowserConfig::Get()->SaveEditorConfig();
 	}
-	if (bFlushConfig)
+
+	FContentBrowserSingleton::Get().BroadcastFavoritesChanged();
+}
+
+void ContentBrowserUtils::RemoveFavoriteFolder(const FContentBrowserItemPath& FolderPath)
+{
+	const FName InvariantPath = ContentBrowserUtils::GetInvariantPath(FolderPath);
+	if (InvariantPath.IsNone())
 	{
-		GConfig->Flush(false, GEditorPerProjectIni);
+		return;
 	}
+
+	FString InvariantFolder = InvariantPath.ToString();
+
+	FContentBrowserSingleton::Get().FavoriteFolderPaths.Remove(InvariantFolder);
+
+	if (UContentBrowserConfig* EditorConfig = UContentBrowserConfig::Get())
+	{
+		EditorConfig->Favorites.Remove(InvariantFolder);
+
+		UContentBrowserConfig::Get()->SaveEditorConfig();
+	}
+
+	FContentBrowserSingleton::Get().BroadcastFavoritesChanged();
+}
+
+void ContentBrowserUtils::RemoveFavoriteFolder(const FString& FolderPath, bool bFlushConfig)
+{
+	RemoveFavoriteFolder(FContentBrowserItemPath(FolderPath, EContentBrowserPathType::Virtual));
 }
 
 const TArray<FString>& ContentBrowserUtils::GetFavoriteFolders()
 {
 	return FContentBrowserSingleton::Get().FavoriteFolderPaths;
+}
+
+void ContentBrowserUtils::AddShowPrivateContentFolder(const FStringView VirtualFolderPath, const FName Owner)
+{
+	FContentBrowserSingleton& ContentBrowserSingleton = FContentBrowserSingleton::Get();
+
+	if (!ContentBrowserSingleton.IsFolderShowPrivateContentToggleable(VirtualFolderPath))
+	{
+		return;
+	}
+
+	FName InvariantPath;
+	IContentBrowserDataModule::Get().GetSubsystem()->TryConvertVirtualPath(VirtualFolderPath, InvariantPath);
+
+	const TSharedPtr<FPathPermissionList>& ShowPrivateContentPermissionList = ContentBrowserSingleton.GetShowPrivateContentPermissionList();
+
+	ShowPrivateContentPermissionList->AddAllowListItem(Owner, InvariantPath);
+
+	ContentBrowserSingleton.SetPrivateContentPermissionListDirty();
+}
+
+void ContentBrowserUtils::RemoveShowPrivateContentFolder(const FStringView VirtualFolderPath, const FName Owner)
+{
+	FContentBrowserSingleton& ContentBrowserSingleton = FContentBrowserSingleton::Get();
+
+	if (!ContentBrowserSingleton.IsFolderShowPrivateContentToggleable(VirtualFolderPath))
+	{
+		return;
+	}
+
+	FName InvariantPath;
+	IContentBrowserDataModule::Get().GetSubsystem()->TryConvertVirtualPath(VirtualFolderPath, InvariantPath);
+
+	const TSharedPtr<FPathPermissionList>& ShowPrivateContentPermissionList = ContentBrowserSingleton.GetShowPrivateContentPermissionList();
+
+	ShowPrivateContentPermissionList->RemoveAllowListItem(Owner, InvariantPath);
+
+	ContentBrowserSingleton.SetPrivateContentPermissionListDirty();
+}
+
+FAutoConsoleVariable CVarShowCustomVirtualFolderIcon(
+	TEXT("ContentBrowser.ShowCustomVirtualFolderIcon"),
+	1,
+	TEXT("Whether to show a special icon for custom virtual folders added for organizational purposes in the content browser. E.g. EditorCustomVirtualPath field in plugins"));
+
+bool ContentBrowserUtils::ShouldShowCustomVirtualFolderIcon()
+{
+	return CVarShowCustomVirtualFolderIcon->GetBool();
+}
+
+FAutoConsoleVariable CVarShowPluginFolderIcon(
+	TEXT("ContentBrowser.ShowPluginFolderIcon"),
+	1,
+	TEXT("Whether to show a special icon for plugin folders in the content browser."));
+
+bool ContentBrowserUtils::ShouldShowPluginFolderIcon()
+{
+	return CVarShowPluginFolderIcon->GetBool();
 }
 
 #undef LOCTEXT_NAMESPACE

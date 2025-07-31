@@ -27,7 +27,7 @@ struct FGPUSpriteLocalVectorFieldInfo
 
 	/** Local vector field to apply to this emitter. */
 	UPROPERTY()
-	class UVectorField* Field;
+	TObjectPtr<class UVectorField> Field;
 
 	/** Local vector field transform. */
 	UPROPERTY()
@@ -97,19 +97,19 @@ struct FGPUSpriteEmitterInfo
 
 	/** The required module. Needed for now, but should be divorced from the runtime. */
 	UPROPERTY()
-	class UParticleModuleRequired* RequiredModule;
+	TObjectPtr<class UParticleModuleRequired> RequiredModule;
 
 	/** The spawn module. Needed for now, but should be divorced from the runtime. */
 	UPROPERTY()
-	class UParticleModuleSpawn* SpawnModule;
+	TObjectPtr<class UParticleModuleSpawn> SpawnModule;
 
 	/** The spawn-per-unit module. */
 	UPROPERTY()
-	class UParticleModuleSpawnPerUnit* SpawnPerUnitModule;
+	TObjectPtr<class UParticleModuleSpawnPerUnit> SpawnPerUnitModule;
 
 	/** List of spawn modules that must be evaluated at runtime. */
 	UPROPERTY()
-	TArray<class UParticleModule*> SpawnModules;
+	TArray<TObjectPtr<class UParticleModule>> SpawnModules;
 
 	/** Local vector field info. */
 	UPROPERTY()
@@ -181,6 +181,10 @@ struct FGPUSpriteEmitterInfo
 	UPROPERTY()
 	TEnumAsByte<EParticleCollisionMode::Type> CollisionMode;
 	
+	/** If true, use velocity to approximate motion blur */
+	UPROPERTY()
+	uint32 bUseVelocityForMotionBlur :1;
+
 	/** If true, removes the HMD view roll (e.g. in VR) */
 	UPROPERTY()
 	uint32 bRemoveHMDRoll : 1;
@@ -226,6 +230,7 @@ struct FGPUSpriteEmitterInfo
 		, LockAxisFlag(0)
 		, bEnableCollision(false)
 		, CollisionMode(EParticleCollisionMode::SceneDepth)
+		, bUseVelocityForMotionBlur(0)
 		, bRemoveHMDRoll(0)
 		, MinFacingCameraBlendDistance(0.f)
 		, MaxFacingCameraBlendDistance(0.f)
@@ -388,6 +393,10 @@ struct FGPUSpriteResourceData
 	UPROPERTY()
 	FVector2D PivotOffset;
 	
+	/** If true, use velocity to approximate motion blur */
+	UPROPERTY()
+	uint32 bUseVelocityForMotionBlur :1;
+
 	/** If true, removes the HMD view roll (e.g. in VR) */
 	UPROPERTY()
 	uint32 bRemoveHMDRoll:1;
@@ -435,6 +444,7 @@ struct FGPUSpriteResourceData
 		, ScreenAlignment(0)
 		, LockAxisFlag(0)
 		, PivotOffset(-0.5f,-0.5f)
+		, bUseVelocityForMotionBlur(0)
 		, bRemoveHMDRoll(0)
 		, MinFacingCameraBlendDistance(0.f)
 		, MaxFacingCameraBlendDistance(0.f)		
@@ -473,6 +483,8 @@ class UParticleModuleTypeDataGpu : public UParticleModuleTypeDataBase
 	virtual void Build( struct FParticleEmitterBuildInfo& EmitterBuildInfo ) override;
 	virtual bool RequiresBuild() const override { return true; }
 	virtual FParticleEmitterInstance* CreateInstance(UParticleEmitter* InEmitterParent, UParticleSystemComponent* InComponent) override;
+	virtual const FVertexFactoryType* GetVertexFactoryType() const override;
+	virtual void CollectPSOPrecacheData(const UParticleEmitter* Emitter, FPSOPrecacheParams& OutParams) override;
 	//~ End UParticleModuleTypeDataBase Interface
 };
 

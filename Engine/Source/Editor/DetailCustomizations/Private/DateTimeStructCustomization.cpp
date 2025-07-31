@@ -1,12 +1,25 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "DateTimeStructCustomization.h"
-#include "Widgets/DeclarativeSyntaxSupport.h"
-#include "Engine/GameViewportClient.h"
-#include "PropertyHandle.h"
-#include "Widgets/Input/SEditableTextBox.h"
+
+#include "Containers/Array.h"
 #include "DetailWidgetRow.h"
+#include "Fonts/SlateFontInfo.h"
+#include "HAL/PlatformCrt.h"
+#include "Internationalization/Internationalization.h"
 #include "InternationalizationSettingsModel.h"
+#include "Math/UnrealMathSSE.h"
+#include "Misc/Attribute.h"
+#include "Misc/CString.h"
+#include "Misc/Timespan.h"
+#include "PropertyHandle.h"
+#include "Styling/AppStyle.h"
+#include "Styling/ISlateStyle.h"
+#include "UObject/NameTypes.h"
+#include "UObject/UObjectGlobals.h"
+#include "UObject/UnrealType.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
+#include "Widgets/Input/SEditableTextBox.h"
 
 
 #define LOCTEXT_NAMESPACE "DateTimeStructCustomization"
@@ -41,6 +54,7 @@ void FDateTimeStructCustomization::CustomizeHeader(TSharedRef<IPropertyHandle> S
 				.OnTextChanged(this, &FDateTimeStructCustomization::HandleTextBoxTextChanged)
 				.OnTextCommitted(this, &FDateTimeStructCustomization::HandleTextBoxTextCommited)
 				.SelectAllTextOnCommit(true)
+				.Font(IPropertyTypeCustomizationUtils::GetRegularFont())
 				.Text(this, &FDateTimeStructCustomization::HandleTextBoxText)
 		];
 }
@@ -59,11 +73,13 @@ FSlateColor FDateTimeStructCustomization::HandleTextBoxForegroundColor() const
 {
 	if (InputValid)
 	{
-		static const FName InvertedForegroundName("InvertedForeground");
-		return FEditorStyle::GetSlateColor(InvertedForegroundName);
+		static const FName DefaultForeground("Colors.Foreground");
+		return FAppStyle::Get().GetSlateColor(DefaultForeground);
 	}
 
-	return FLinearColor::Red;
+	static const FName Red("Colors.AccentRed");
+
+	return FAppStyle::Get().GetSlateColor(Red);
 }
 
 
@@ -109,7 +125,7 @@ void FDateTimeStructCustomization::HandleTextBoxTextCommited(const FText& NewTex
 		{
 			*(FDateTime*)RawDataInstance = ParsedDateTime;
 		}
-		PropertyHandle->NotifyPostChange();
+		PropertyHandle->NotifyPostChange(EPropertyChangeType::ValueSet);
 		PropertyHandle->NotifyFinishedChangingProperties();
 	}
 }

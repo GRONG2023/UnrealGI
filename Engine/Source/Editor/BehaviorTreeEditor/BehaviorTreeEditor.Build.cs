@@ -6,59 +6,24 @@ public class BehaviorTreeEditor : ModuleRules
 {
 	public BehaviorTreeEditor(ReadOnlyTargetRules Target) : base(Target)
 	{
-        PrivateIncludePaths.AddRange(
-            new string[] {
-				"Editor/GraphEditor/Private",
-				"Editor/AIGraph/Private",
-				"Editor/BehaviorTreeEditor/Private",
-			}
-		);
-
-        PrivateIncludePathModuleNames.AddRange(
-            new string[] {
-				"AssetRegistry",
-				"AssetTools",
-                "PropertyEditor",
-				"ContentBrowser"
-			}
-		);
-
 		PrivateDependencyModuleNames.AddRange(
-			new string[] {
-				"Core", 
-				"CoreUObject", 
+			new string[]
+			{
+				"AIGraph",
+				"AIModule",
 				"ApplicationCore",
-				"Engine", 
-                "RenderCore",
-                "InputCore",
+				"AssetDefinition",
+				"Core",
+				"CoreUObject",
+				"Engine",
+				"GraphEditor",
+				"InputCore",
+				"KismetWidgets",
 				"Slate",
 				"SlateCore",
-                "EditorStyle",
-				"UnrealEd", 
-                "AudioEditor",
-				"MessageLog", 
-				"GraphEditor",
-                "Kismet",
-				"KismetWidgets",
-                "PropertyEditor",
-				"AnimGraph",
-				"BlueprintGraph",
-                "AIGraph",
-                "AIModule",
-				"ClassViewer",
 				"ToolMenus",
+				"UnrealEd",
 			}
-		);
-
-		PublicIncludePathModuleNames.Add("LevelEditor");
-
-		DynamicallyLoadedModuleNames.AddRange(
-            new string[] { 
-                "WorkspaceMenuStructure",
-				"AssetTools",
-				"AssetRegistry",
-				"ContentBrowser"
-            }
 		);
 	}
 }

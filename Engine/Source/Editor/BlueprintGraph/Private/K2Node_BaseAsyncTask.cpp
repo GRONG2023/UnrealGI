@@ -1,27 +1,50 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-
 #include "K2Node_BaseAsyncTask.h"
+
+#include "BlueprintActionDatabaseRegistrar.h"
+#include "BlueprintNodeSpawner.h"
+#include "Containers/EnumAsByte.h"
+#include "Containers/Set.h"
+#include "CoreGlobals.h"
+#include "EdGraph/EdGraph.h"
 #include "EdGraph/EdGraphPin.h"
-#include "UObject/UnrealType.h"
+#include "EdGraph/EdGraphSchema.h"
 #include "EdGraphSchema_K2.h"
-#include "Misc/ConfigCacheIni.h"
-#include "Kismet/KismetSystemLibrary.h"
-#include "K2Node_CallFunction.h"
+#include "Engine/Blueprint.h"
+#include "Engine/MemberReference.h"
+#include "EngineLogs.h"
+#include "HAL/PlatformCrt.h"
+#include "Internationalization/Internationalization.h"
 #include "K2Node_AddDelegate.h"
 #include "K2Node_AssignmentStatement.h"
+#include "K2Node_CallFunction.h"
 #include "K2Node_CreateDelegate.h"
 #include "K2Node_CustomEvent.h"
 #include "K2Node_IfThenElse.h"
 #include "K2Node_MacroInstance.h"
 #include "K2Node_Self.h"
 #include "K2Node_TemporaryVariable.h"
+#include "Kismet/KismetSystemLibrary.h"
 #include "Kismet2/BlueprintEditorUtils.h"
-#include "Engine/MemberReference.h"
-
+#include "Kismet2/CompilerResultsLog.h"
 #include "KismetCompiler.h"
-#include "BlueprintNodeSpawner.h"
-#include "BlueprintActionDatabaseRegistrar.h"
+#include "Logging/LogCategory.h"
+#include "Logging/LogMacros.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/ConfigCacheIni.h"
+#include "Misc/Parse.h"
+#include "Templates/Casts.h"
+#include "Trace/Detail/Channel.h"
+#include "UObject/Class.h"
+#include "UObject/Field.h"
+#include "UObject/Object.h"
+#include "UObject/UnrealNames.h"
+#include "UObject/UnrealType.h"
+#include "UObject/WeakObjectPtr.h"
+#include "UObject/WeakObjectPtrTemplates.h"
+
+struct FStringFormatArg;
 
 #define LOCTEXT_NAMESPACE "UK2Node_BaseAsyncTask"
 
@@ -33,12 +56,16 @@ UK2Node_BaseAsyncTask::UK2Node_BaseAsyncTask(const FObjectInitializer& ObjectIni
 	, ProxyActivateFunctionName(NAME_None)
 	, bPinTooltipsValid(false)
 {
+	OrphanedPinSaveMode = ESaveOrphanPinMode::SaveAll;
 }
 
 FText UK2Node_BaseAsyncTask::GetTooltipText() const
 {
-	const FString FunctionToolTipText = UK2Node_CallFunction::GetDefaultTooltipForFunction(GetFactoryFunction());
-	return FText::FromString(FunctionToolTipText);
+	FFormatNamedArguments Args;
+	Args.Add(TEXT("FunctionTooltip"), FText::FromString(UK2Node_CallFunction::GetDefaultTooltipForFunction(GetFactoryFunction())));
+	Args.Add(TEXT("LatentString"), NSLOCTEXT("K2Node", "LatentFunction", "Latent. This node will complete at a later time. Latent nodes can only be placed in event graphs."));
+	
+	return FText::Format(LOCTEXT("AsyncTaskTooltip", "{FunctionTooltip}\n\n{LatentString}"), Args);
 }
 
 FText UK2Node_BaseAsyncTask::GetNodeTitle(ENodeTitleType::Type TitleType) const
@@ -143,7 +170,7 @@ void UK2Node_BaseAsyncTask::AllocateDefaultPins()
 				UEdGraphPin* Pin = CreatePin(EGPD_Output, NAME_None, Param->GetFName());
 				K2Schema->ConvertPropertyToPinType(Param, /*out*/ Pin->PinType);
 
-				Pin->PinToolTip = Param->GetToolTipText().ToString();
+				UK2Node_CallFunction::GeneratePinTooltipFromFunction(*Pin, DelegateSignatureFunction);
 			}
 		}
 	}
@@ -170,6 +197,13 @@ void UK2Node_BaseAsyncTask::AllocateDefaultPins()
 
 			if (bPinGood)
 			{
+				// Check for a display name override
+				const FString& PinDisplayName = Param->GetMetaData(FBlueprintMetadata::MD_DisplayName);
+				if (!PinDisplayName.IsEmpty())
+				{
+					Pin->PinFriendlyName = FText::FromString(PinDisplayName);
+				}
+				
 				//Flag pin as read only for const reference property
 				Pin->bDefaultValueIsIgnored = Param->HasAllPropertyFlags(CPF_ConstParm | CPF_ReferenceParm) && (!Function->HasMetaData(FBlueprintMetadata::MD_AutoCreateRefTerm) || Pin->PinType.IsContainer());
 
@@ -276,11 +310,11 @@ bool UK2Node_BaseAsyncTask::FBaseAsyncTaskHelper::HandleDelegateImplementation(
 		return false;
 	}
 
-	UK2Node_CustomEvent* CurrentCENode = CompilerContext.SpawnIntermediateEventNode<UK2Node_CustomEvent>(CurrentNode, PinForCurrentDelegateProperty, SourceGraph);
+	UK2Node_CustomEvent* CurrentCENode = CompilerContext.SpawnIntermediateNode<UK2Node_CustomEvent>(CurrentNode, SourceGraph);
 	{
-	UK2Node_AddDelegate* AddDelegateNode = CompilerContext.SpawnIntermediateNode<UK2Node_AddDelegate>(CurrentNode, SourceGraph);
-	AddDelegateNode->SetFromProperty(CurrentProperty, false, CurrentProperty->GetOwnerClass());
-	AddDelegateNode->AllocateDefaultPins();
+		UK2Node_AddDelegate* AddDelegateNode = CompilerContext.SpawnIntermediateNode<UK2Node_AddDelegate>(CurrentNode, SourceGraph);
+		AddDelegateNode->SetFromProperty(CurrentProperty, false, CurrentProperty->GetOwnerClass());
+		AddDelegateNode->AllocateDefaultPins();
 		bIsErrorFree &= Schema->TryCreateConnection(AddDelegateNode->FindPinChecked(UEdGraphSchema_K2::PN_Self), ProxyObjectPin);
 		bIsErrorFree &= Schema->TryCreateConnection(InOutLastThenPin, AddDelegateNode->FindPinChecked(UEdGraphSchema_K2::PN_Execute));
 		InOutLastThenPin = AddDelegateNode->FindPinChecked(UEdGraphSchema_K2::PN_Then);
@@ -318,8 +352,38 @@ bool UK2Node_BaseAsyncTask::FBaseAsyncTaskHelper::HandleDelegateImplementation(
 	return bIsErrorFree;
 }
 
+bool UK2Node_BaseAsyncTask::ExpandDefaultToSelfPin(FKismetCompilerContext& CompilerContext, UEdGraph* SourceGraph, UK2Node_CallFunction* IntermediateProxyNode)
+{
+	if(SourceGraph && IntermediateProxyNode)
+	{
+		// Connect a self reference pin if there is a TScriptInterface default to self
+		if (const UFunction* TargetFunc = IntermediateProxyNode->GetTargetFunction())
+		{
+			const FString& MetaData = TargetFunc->GetMetaData(FBlueprintMetadata::MD_DefaultToSelf);
+			if (!MetaData.IsEmpty())
+			{
+				// Find the default to self value pin
+				if (UEdGraphPin* DefaultToSelfPin = IntermediateProxyNode->FindPinChecked(MetaData, EGPD_Input))
+				{
+					// If it has no links then spawn a new self node here
+					if (DefaultToSelfPin->PinType.PinCategory == UEdGraphSchema_K2::PC_Interface && DefaultToSelfPin->LinkedTo.Num() == 0)
+					{
+						const UEdGraphSchema_K2* Schema = CompilerContext.GetSchema();
 
-void UK2Node_BaseAsyncTask::ExpandNode(class FKismetCompilerContext& CompilerContext, UEdGraph* SourceGraph)
+						UK2Node_Self* SelfNode = CompilerContext.SpawnIntermediateNode<UK2Node_Self>(this, SourceGraph);
+						SelfNode->AllocateDefaultPins();
+						UEdGraphPin* SelfPin = SelfNode->FindPinChecked(UEdGraphSchema_K2::PSC_Self);
+						// Make a connection from this intermediate self pin to here
+						return Schema->TryCreateConnection(DefaultToSelfPin, SelfPin);
+					}
+				}
+			}
+		}	
+	}
+	return true;
+}
+
+void UK2Node_BaseAsyncTask::ExpandNode(FKismetCompilerContext& CompilerContext, UEdGraph* SourceGraph)
 {
     Super::ExpandNode(CompilerContext, SourceGraph);
 
@@ -359,6 +423,8 @@ void UK2Node_BaseAsyncTask::ExpandNode(class FKismetCompilerContext& CompilerCon
 	check(ProxyObjectPin);
 	UEdGraphPin* OutputAsyncTaskProxy = FindPin(FBaseAsyncTaskHelper::GetAsyncTaskProxyName());
 	bIsErrorFree &= !OutputAsyncTaskProxy || CompilerContext.MovePinLinksToIntermediate(*OutputAsyncTaskProxy, *ProxyObjectPin).CanSafeConnect();
+
+	bIsErrorFree &= ExpandDefaultToSelfPin(CompilerContext, SourceGraph, CallCreateProxyObjectNode);		
 
 	// GATHER OUTPUT PARAMETERS AND PAIR THEM WITH LOCAL VARIABLES
 	TArray<FBaseAsyncTaskHelper::FOutputPinAndLocalVariable> VariableOutputs;
@@ -471,13 +537,13 @@ bool UK2Node_BaseAsyncTask::HasExternalDependencies(TArray<class UStruct*>* Opti
 {
 	const UBlueprint* SourceBlueprint = GetBlueprint();
 
-	const bool bProxyFactoryResult = (ProxyFactoryClass != NULL) && (ProxyFactoryClass->ClassGeneratedBy != SourceBlueprint);
+	const bool bProxyFactoryResult = (ProxyFactoryClass != NULL) && (ProxyFactoryClass->ClassGeneratedBy.Get() != SourceBlueprint);
 	if (bProxyFactoryResult && OptionalOutput)
 	{
 		OptionalOutput->AddUnique(ProxyFactoryClass);
 	}
 
-	const bool bProxyResult = (ProxyClass != NULL) && (ProxyClass->ClassGeneratedBy != SourceBlueprint);
+	const bool bProxyResult = (ProxyClass != NULL) && (ProxyClass->ClassGeneratedBy.Get() != SourceBlueprint);
 	if (bProxyResult && OptionalOutput)
 	{
 		OptionalOutput->AddUnique(ProxyClass);
@@ -490,6 +556,11 @@ bool UK2Node_BaseAsyncTask::HasExternalDependencies(TArray<class UStruct*>* Opti
 FName UK2Node_BaseAsyncTask::GetCornerIcon() const
 {
 	return TEXT("Graph.Latent.LatentIcon");
+}
+
+FText UK2Node_BaseAsyncTask::GetToolTipHeading() const
+{
+	return LOCTEXT("LatentFunc", "Latent");
 }
 
 FText UK2Node_BaseAsyncTask::GetMenuCategory() const
@@ -602,8 +673,8 @@ UK2Node::ERedirectType UK2Node_BaseAsyncTask::DoPinsMatchForReconstruction(const
 		if (!bAsyncTaskPinRedirectMapInitialized)
 		{
 			bAsyncTaskPinRedirectMapInitialized = true;
-			FConfigSection* PackageRedirects = GConfig->GetSectionPrivate(TEXT("/Script/Engine.Engine"), false, true, GEngineIni);
-			for (FConfigSection::TIterator It(*PackageRedirects); It; ++It)
+			const FConfigSection* PackageRedirects = GConfig->GetSection(TEXT("/Script/Engine.Engine"), false, GEngineIni);
+			for (FConfigSection::TConstIterator It(*PackageRedirects); It; ++It)
 			{
 				if (It.Key() == TEXT("K2AsyncTaskPinRedirects"))
 				{
@@ -615,7 +686,7 @@ UK2Node::ERedirectType UK2Node_BaseAsyncTask::DoPinsMatchForReconstruction(const
 					FParse::Value(*It.Value().GetValue(), TEXT("OldPinName="), OldPinString);
 					FParse::Value(*It.Value().GetValue(), TEXT("NewPinName="), NewPinString);
 
-					UClass* RedirectProxyClass = FindObject<UClass>(ANY_PACKAGE, *ProxyClassString);
+					UClass* RedirectProxyClass = UClass::TryFindTypeSlow<UClass>(ProxyClassString);
 					if (RedirectProxyClass)
 					{
 						FAsyncTaskPinRedirectMapInfo& PinRedirectInfo = AsyncTaskPinRedirectMap.FindOrAdd(*OldPinString);
@@ -689,6 +760,37 @@ void UK2Node_BaseAsyncTask::GetPinHoverText(const UEdGraphPin& Pin, FString& Hov
 	}
 
 	return UK2Node::GetPinHoverText(Pin, HoverTextOut);
+}
+
+FString UK2Node_BaseAsyncTask::GetPinMetaData(FName InPinName, FName InKey)
+{
+	FString MetaData = Super::GetPinMetaData(InPinName, InKey);
+
+	// If there's no metadata directly on the pin then check for metadata on the function
+	if (MetaData.IsEmpty())
+	{
+		if (UFunction* Function = GetFactoryFunction())
+		{
+			// Find the corresponding property for the pin and search that first
+			if (FProperty* Property = Function->FindPropertyByName(InPinName))
+			{
+				MetaData = Property->GetMetaData(InKey);
+			}
+
+			// Also look for metadata like DefaultToSelf on the function itself
+			if (MetaData.IsEmpty())
+			{
+				MetaData = Function->GetMetaData(InKey);
+				if (MetaData != InPinName.ToString())
+				{
+					// Only return if the value matches the pin name as we don't want general function metadata
+					MetaData.Empty();
+				}
+			}
+		}
+	}
+
+	return MetaData;
 }
 
 #undef LOCTEXT_NAMESPACE

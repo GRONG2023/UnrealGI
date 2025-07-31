@@ -2,9 +2,14 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "EditorStyleSet.h"
 #include "Framework/Commands/Commands.h"
+#include "Internationalization/Internationalization.h"
+#include "Styling/AppStyle.h"
+#include "Templates/SharedPointer.h"
+#include "UObject/NameTypes.h"
+#include "UObject/UnrealNames.h"
+
+class FUICommandInfo;
 
 /*-----------------------------------------------------------------------------
    FCascadeCommands
@@ -15,7 +20,7 @@ class FCascadeCommands : public TCommands<FCascadeCommands>
 public:
 	/** Constructor */
 	FCascadeCommands() 
-		: TCommands<FCascadeCommands>("Cascade", NSLOCTEXT("Contexts", "Cascade", "Cascade"), NAME_None, FEditorStyle::GetStyleSetName())
+		: TCommands<FCascadeCommands>("Cascade", NSLOCTEXT("Contexts", "Cascade", "Cascade"), NAME_None, FAppStyle::GetAppStyleSetName())
 	{
 	}
 	
@@ -60,6 +65,7 @@ public:
 	TSharedPtr<FUICommandInfo> DetailMode_Low;
 	TSharedPtr<FUICommandInfo> DetailMode_Medium;
 	TSharedPtr<FUICommandInfo> DetailMode_High;
+	TSharedPtr<FUICommandInfo> DetailMode_Epic;
 	TSharedPtr<FUICommandInfo> Significance_Critical;
 	TSharedPtr<FUICommandInfo> Significance_High;
 	TSharedPtr<FUICommandInfo> Significance_Medium;

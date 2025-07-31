@@ -6,6 +6,8 @@ public class ContentBrowserData : ModuleRules
 {
 	public ContentBrowserData(ReadOnlyTargetRules Target) : base(Target)
 	{
+		UnsafeTypeCastWarningLevel = WarningLevel.Error;
+
 		PublicDependencyModuleNames.AddRange(
 			new string[] {
 				"Core",
@@ -13,6 +15,7 @@ public class ContentBrowserData : ModuleRules
 				"Engine",
 				"EditorSubsystem",
 				"UnrealEd",
+				"Projects",
 			}
 		);
 
@@ -26,9 +29,6 @@ public class ContentBrowserData : ModuleRules
 			new string[] {
 				"Slate",
 				"SlateCore",
-				"InputCore",
-				"EditorStyle",
-				"Projects",
 			}
 		);
 	}

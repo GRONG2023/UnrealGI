@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include "Engine/Attenuation.h"
 #include "ComponentVisualizer.h"
 #include "ShowFlags.h"
 #include "SceneView.h"
@@ -71,8 +72,8 @@ public:
 
 						if (ShapeDetails.Falloff > 0.f || ShapeDetails.Extents.Z > 0.f)
 						{
-							float ConeRadius = ShapeDetails.Extents.X + ShapeDetails.Falloff + ShapeDetails.ConeOffset;
-							float ConeAngle = ShapeDetails.Extents.Y + ShapeDetails.Extents.Z;
+							double ConeRadius = ShapeDetails.Extents.X + ShapeDetails.Falloff + ShapeDetails.ConeOffset;
+							double ConeAngle = ShapeDetails.Extents.Y + ShapeDetails.Extents.Z;
 							DrawWireSphereCappedCone(PDI, Origin, ConeRadius, ConeAngle, 16, 4, 10, OuterRadiusColor, SDPG_World);
 
 							ConeRadius = ShapeDetails.Extents.X + ShapeDetails.ConeOffset;
@@ -81,9 +82,22 @@ public:
 						}
 						else
 						{
-							const float ConeRadius = ShapeDetails.Extents.X + ShapeDetails.ConeOffset;
-							const float ConeAngle = ShapeDetails.Extents.Y;
+							const double ConeRadius = ShapeDetails.Extents.X + ShapeDetails.ConeOffset;
+							const double ConeAngle = ShapeDetails.Extents.Y;
 							DrawWireSphereCappedCone(PDI, Origin, ConeRadius, ConeAngle, 16, 4, 10, OuterRadiusColor, SDPG_World );
+						}
+
+						if (!FMath::IsNearlyZero(ShapeDetails.ConeSphereRadius, KINDA_SMALL_NUMBER))
+						{
+							if (ShapeDetails.ConeSphereFalloff > 0.f)
+							{
+								DrawWireSphereAutoSides(PDI, Origin, OuterRadiusColor, ShapeDetails.ConeSphereRadius + ShapeDetails.ConeSphereFalloff, SDPG_World);
+								DrawWireSphereAutoSides(PDI, Origin, InnerRadiusColor, ShapeDetails.ConeSphereRadius, SDPG_World);
+							}
+							else
+							{
+								DrawWireSphereAutoSides(PDI, Origin, OuterRadiusColor, ShapeDetails.ConeSphereRadius, SDPG_World);
+							}
 						}
 					}
 					break;

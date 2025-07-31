@@ -3,28 +3,21 @@
 #include "AudioEditorModule.h"
 
 #include "AssetToolsModule.h"
-#include "AssetTypeActions/AssetTypeActions_AudioBus.h"
-#include "AssetTypeActions/AssetTypeActions_DialogueVoice.h"
 #include "AssetTypeActions/AssetTypeActions_DialogueWave.h"
-#include "AssetTypeActions/AssetTypeActions_ReverbEffect.h"
-#include "AssetTypeActions/AssetTypeActions_SoundAttenuation.h"
-#include "AssetTypeActions/AssetTypeActions_SoundBase.h"
 #include "AssetTypeActions/AssetTypeActions_SoundClass.h"
-#include "AssetTypeActions/AssetTypeActions_SoundConcurrency.h"
-#include "AssetTypeActions/AssetTypeActions_SoundCue.h"
 #include "AssetTypeActions/AssetTypeActions_SoundEffectPreset.h"
-#include "AssetTypeActions/AssetTypeActions_SoundMix.h"
 #include "AssetTypeActions/AssetTypeActions_SoundWave.h"
-#include "AssetTypeActions/AssetTypeActions_SoundSourceBus.h"
 #include "AssetTypeActions/AssetTypeActions_SoundSubmix.h"
 #include "ClassTemplateEditorSubsystem.h"
 #include "Components/SynthComponent.h"
 #include "EdGraphUtilities.h"
 #include "Factories/ReimportSoundFactory.h"
 #include "Factories/SoundFactory.h"
+#include "HAL/LowLevelMemTracker.h"
 #include "Modules/ModuleManager.h"
 #include "PropertyEditorModule.h"
 #include "Sound/AudioSettings.h"
+#include "Sound/SoundClass.h"
 #include "Sound/SoundCue.h"
 #include "Sound/SoundEffectPreset.h"
 #include "Sound/SoundNodeDialoguePlayer.h"
@@ -68,18 +61,25 @@ static const FVector2D Icon64 = FVector2D(64.0f, 64.0f);
 // Simpler version of SET_AUDIO_ICON, assumes same name of icon png and class name
 #define SET_AUDIO_ICON_SIMPLE(CLASS_NAME) SET_AUDIO_ICON(CLASS_NAME, CLASS_NAME)
 
+#define SET_AUDIO_ICON_SVG(CLASS_NAME, ICON_NAME) \
+		AudioStyleSet->Set( *FString::Printf(TEXT("ClassIcon.%s"), TEXT(#CLASS_NAME)), new FSlateVectorImageBrush(FPaths::EngineContentDir() / FString::Printf(TEXT("Editor/Slate/Starship/AssetIcons/%s_16.svg"), TEXT(#ICON_NAME)), Icon16)); \
+		AudioStyleSet->Set( *FString::Printf(TEXT("ClassThumbnail.%s"), TEXT(#CLASS_NAME)), new FSlateVectorImageBrush(FPaths::EngineContentDir() / FString::Printf(TEXT("Editor/Slate/Starship/AssetIcons/%s_64.svg"), TEXT(#ICON_NAME)), Icon64));
+
+#define SET_AUDIO_ICON_SVG_SIMPLE(CLASS_NAME) SET_AUDIO_ICON_SVG(CLASS_NAME, CLASS_NAME)
 
 class FAudioEditorModule : public IAudioEditorModule
 {
 public:
 	FAudioEditorModule()
 	{
+		LLM_SCOPE(ELLMTag::AudioMisc);
 		// Create style set for audio asset icons
 		AudioStyleSet = MakeShared<FSlateStyleSet>("AudioStyleSet");
 	}
 
 	virtual void StartupModule() override
 	{
+		LLM_SCOPE(ELLMTag::AudioMisc);
 		SoundClassExtensibility.Init();
 		SoundCueExtensibility.Init();
 		SoundSubmixExtensibility.Init();
@@ -125,7 +125,7 @@ public:
 
 		SetupIcons();
 #if WITH_SNDFILE_IO
-		if (!Audio::InitSoundFileIOManager())
+		if (!Audio::SoundFileUtils::InitSoundFileIOManager())
 		{
 			UE_LOG(LogAudioEditor, Display, TEXT("LibSoundFile failed to load. Importing audio will not work correctly."));
 		}
@@ -134,8 +134,9 @@ public:
 
 	virtual void ShutdownModule() override
 	{
+		LLM_SCOPE(ELLMTag::AudioMisc);
 #if WITH_SNDFILE_IO
-		Audio::ShutdownSoundFileIOManager();
+		Audio::SoundFileUtils::ShutdownSoundFileIOManager();
 #endif // WITH_SNDFILE_IO
 
 		SoundClassExtensibility.Reset();
@@ -172,71 +173,55 @@ public:
 
 	virtual void RegisterAssetActions() override
 	{
+		LLM_SCOPE(ELLMTag::AudioMisc);
 		// Register the audio editor asset type actions
 		IAssetTools& AssetTools = FModuleManager::LoadModuleChecked<FAssetToolsModule>("AssetTools").Get();
 
-		AssetTools.RegisterAssetTypeActions(MakeShared<FAssetTypeActions_DialogueVoice>());
 		AssetTools.RegisterAssetTypeActions(MakeShared<FAssetTypeActions_DialogueWave>());
-		AssetTools.RegisterAssetTypeActions(MakeShared<FAssetTypeActions_SoundAttenuation>());
-		AssetTools.RegisterAssetTypeActions(MakeShared<FAssetTypeActions_SoundConcurrency>());
-		AssetTools.RegisterAssetTypeActions(MakeShared<FAssetTypeActions_SoundBase>());
 		AssetTools.RegisterAssetTypeActions(MakeShared<FAssetTypeActions_SoundClass>());
-		AssetTools.RegisterAssetTypeActions(MakeShared<FAssetTypeActions_SoundCue>());
-		AssetTools.RegisterAssetTypeActions(MakeShared<FAssetTypeActions_SoundMix>());
 		AssetTools.RegisterAssetTypeActions(MakeShared<FAssetTypeActions_SoundWave>());
-		AssetTools.RegisterAssetTypeActions(MakeShared<FAssetTypeActions_ReverbEffect>());
 	}
 
 	virtual void RegisterAudioMixerAssetActions() override
 	{
-		// Only register asset actions for when audio mixer data is enabled
-		if (GetDefault<UAudioSettings>()->IsAudioMixerEnabled())
-		{
-			IAssetTools& AssetTools = FModuleManager::LoadModuleChecked<FAssetToolsModule>("AssetTools").Get();
-			AssetTools.RegisterAssetTypeActions(MakeShared<FAssetTypeActions_SoundSubmix>());
-			AssetTools.RegisterAssetTypeActions(MakeShared<FAssetTypeActions_SoundfieldSubmix>());
-			AssetTools.RegisterAssetTypeActions(MakeShared<FAssetTypeActions_EndpointSubmix>());
-			AssetTools.RegisterAssetTypeActions(MakeShared<FAssetTypeActions_SoundfieldEndpointSubmix>());
-			AssetTools.RegisterAssetTypeActions(MakeShared<FAssetTypeActions_SoundfieldEncodingSettings>());
-			AssetTools.RegisterAssetTypeActions(MakeShared<FAssetTypeActions_SoundfieldEffectSettings>());
-			AssetTools.RegisterAssetTypeActions(MakeShared<FAssetTypeActions_SoundfieldEffect>());
-			AssetTools.RegisterAssetTypeActions(MakeShared<FAssetTypeActions_AudioEndpointSettings>());
-			AssetTools.RegisterAssetTypeActions(MakeShared<FAssetTypeActions_SoundfieldEndpointSettings>());
-			AssetTools.RegisterAssetTypeActions(MakeShared<FAssetTypeActions_SoundEffectSubmixPreset>());
-			AssetTools.RegisterAssetTypeActions(MakeShared<FAssetTypeActions_SoundEffectSourcePreset>());
-			AssetTools.RegisterAssetTypeActions(MakeShared<FAssetTypeActions_SoundEffectSourcePresetChain>());
-			AssetTools.RegisterAssetTypeActions(MakeShared<FAssetTypeActions_SoundSourceBus>());
-			AssetTools.RegisterAssetTypeActions(MakeShared<FAssetTypeActions_AudioBus>());
-		}
+		IAssetTools& AssetTools = FModuleManager::LoadModuleChecked<FAssetToolsModule>("AssetTools").Get();
+		AssetTools.RegisterAssetTypeActions(MakeShared<FAssetTypeActions_SoundSubmix>());
+		AssetTools.RegisterAssetTypeActions(MakeShared<FAssetTypeActions_SoundfieldSubmix>());
+		AssetTools.RegisterAssetTypeActions(MakeShared<FAssetTypeActions_EndpointSubmix>());
+		AssetTools.RegisterAssetTypeActions(MakeShared<FAssetTypeActions_SoundfieldEndpointSubmix>());
+		AssetTools.RegisterAssetTypeActions(MakeShared<FAssetTypeActions_SoundfieldEncodingSettings>());
+		AssetTools.RegisterAssetTypeActions(MakeShared<FAssetTypeActions_SoundfieldEffectSettings>());
+		AssetTools.RegisterAssetTypeActions(MakeShared<FAssetTypeActions_SoundfieldEffect>());
+		AssetTools.RegisterAssetTypeActions(MakeShared<FAssetTypeActions_AudioEndpointSettings>());
+		AssetTools.RegisterAssetTypeActions(MakeShared<FAssetTypeActions_SoundfieldEndpointSettings>());
+		AssetTools.RegisterAssetTypeActions(MakeShared<FAssetTypeActions_SoundEffectSubmixPreset>());
+		AssetTools.RegisterAssetTypeActions(MakeShared<FAssetTypeActions_SoundEffectSourcePreset>());
+		AssetTools.RegisterAssetTypeActions(MakeShared<FAssetTypeActions_SoundEffectSourcePresetChain>());
 	}
 
 	virtual void RegisterEffectPresetAssetActions() override
 	{
-		// Only register asset actions for the case where audio mixer data is enabled
-		if (GetDefault<UAudioSettings>()->IsAudioMixerEnabled())
+		// Register the audio editor asset type actions
+		IAssetTools& AssetTools = FModuleManager::LoadModuleChecked<FAssetToolsModule>("AssetTools").Get();
+
+		// Look for any sound effect presets to register
+		for (TObjectIterator<UClass> It; It; ++It)
 		{
-			// Register the audio editor asset type actions
-			IAssetTools& AssetTools = FModuleManager::LoadModuleChecked<FAssetToolsModule>("AssetTools").Get();
-
-			// Look for any sound effect presets to register
-			for (TObjectIterator<UClass> It; It; ++It)
+			UClass* ChildClass = *It;
+			if (ChildClass->HasAnyClassFlags(CLASS_Abstract))
 			{
-				UClass* ChildClass = *It;
-				if (ChildClass->HasAnyClassFlags(CLASS_Abstract))
-				{
-					continue;
-				}
+				continue;
+			}
 
-				// Look for submix or source preset classes
-				UClass* ParentClass = ChildClass->GetSuperClass();
-				if (ParentClass->IsChildOf(USoundEffectSourcePreset::StaticClass()) || ParentClass->IsChildOf(USoundEffectSubmixPreset::StaticClass()))
+			// Look for submix or source preset classes
+			UClass* ParentClass = ChildClass->GetSuperClass();
+			if (ParentClass && (ParentClass->IsChildOf(USoundEffectSourcePreset::StaticClass()) || ParentClass->IsChildOf(USoundEffectSubmixPreset::StaticClass())))
+			{
+				USoundEffectPreset* EffectPreset = ChildClass->GetDefaultObject<USoundEffectPreset>();
+				if (!RegisteredActions.Contains(EffectPreset) && EffectPreset->HasAssetActions())
 				{
-					USoundEffectPreset* EffectPreset = ChildClass->GetDefaultObject<USoundEffectPreset>();
-					if (!RegisteredActions.Contains(EffectPreset) && EffectPreset->HasAssetActions())
-					{
-						RegisteredActions.Add(EffectPreset);
-						AssetTools.RegisterAssetTypeActions(MakeShared<FAssetTypeActions_SoundEffectPreset>(EffectPreset));
-					}
+					RegisteredActions.Add(EffectPreset);
+					AssetTools.RegisterAssetTypeActions(MakeShared<FAssetTypeActions_SoundEffectPreset>(EffectPreset));
 				}
 			}
 		}
@@ -244,6 +229,7 @@ public:
 
 	virtual TSharedRef<FAssetEditorToolkit> CreateSoundClassEditor( const EToolkitMode::Type Mode, const TSharedPtr< IToolkitHost >& InitToolkitHost, USoundClass* InSoundClass ) override
 	{
+		LLM_SCOPE(ELLMTag::AudioMisc);
 		TSharedRef<FSoundClassEditor> NewSoundClassEditor(new FSoundClassEditor());
 		NewSoundClassEditor->InitSoundClassEditor(Mode, InitToolkitHost, InSoundClass);
 		return NewSoundClassEditor;
@@ -251,6 +237,7 @@ public:
 
 	virtual TSharedRef<FAssetEditorToolkit> CreateSoundSubmixEditor(const EToolkitMode::Type Mode, const TSharedPtr< IToolkitHost >& InitToolkitHost, USoundSubmixBase* InSoundSubmix) override
 	{
+		LLM_SCOPE(ELLMTag::AudioMisc);
 		TSharedPtr<FSoundSubmixEditor> NewSubmixEditor = MakeShared<FSoundSubmixEditor>();
 		NewSubmixEditor->Init(Mode, InitToolkitHost, InSoundSubmix);
 		return StaticCastSharedPtr<FAssetEditorToolkit>(NewSubmixEditor).ToSharedRef();
@@ -278,6 +265,7 @@ public:
 
 	virtual TSharedRef<ISoundCueEditor> CreateSoundCueEditor(const EToolkitMode::Type Mode, const TSharedPtr< IToolkitHost >& InitToolkitHost, USoundCue* SoundCue) override
 	{
+		LLM_SCOPE(ELLMTag::AudioMisc);
 		TSharedRef<FSoundCueEditor> NewSoundCueEditor(new FSoundCueEditor());
 		NewSoundCueEditor->InitSoundCueEditor(Mode, InitToolkitHost, SoundCue);
 		return NewSoundCueEditor;
@@ -291,35 +279,6 @@ public:
 	virtual TSharedPtr<FExtensibilityManager> GetSoundCueToolBarExtensibilityManager() override
 	{
 		return SoundCueExtensibility.MenuExtensibilityManager;
-	}
-
-	virtual void RegisterSoundEffectPresetWidget(TSubclassOf<USoundEffectPreset> PresetClass, UWidgetBlueprint* WidgetBlueprint) override
-	{
-		UnregisterSoundEffectPresetWidget(PresetClass);
-
-		if (PresetClass)
-		{
-			WidgetBlueprint->AddToRoot();
-			EffectPresetWidgets.Add(PresetClass, WidgetBlueprint);
-		}
-	}
-
-	/** Returns custom widget blueprint for a given SoundEffectPreset class (or null if unset). */
-	virtual UWidgetBlueprint* GetSoundEffectPresetWidget(TSubclassOf<USoundEffectPreset> PresetClass) override
-	{
-		return EffectPresetWidgets.FindRef(PresetClass);
-	}
-
-	virtual void UnregisterSoundEffectPresetWidget(TSubclassOf<USoundEffectPreset> PresetClass) override
-	{
-		if (PresetClass)
-		{
-			if (UWidgetBlueprint* WidgetBlueprint = EffectPresetWidgets.FindRef(PresetClass))
-			{
-				WidgetBlueprint->RemoveFromRoot();
-				EffectPresetWidgets.Remove(PresetClass);
-			}
-		}
 	}
 
 	virtual void ReplaceSoundNodesInGraph(USoundCue* SoundCue, UDialogueWave* DialogueWave, TArray<USoundNode*>& NodesToReplace, const FDialogueContextMapping& ContextMapping) override
@@ -359,6 +318,7 @@ public:
 
 	USoundWave* ImportSoundWave(UPackage* const SoundWavePackage, const FString& InSoundWaveAssetName, const FString& InWavFilename) override
 	{
+		LLM_SCOPE(ELLMTag::AudioMisc);
 		USoundFactory* SoundWaveFactory = NewObject<USoundFactory>();
 
 		// Setup sane defaults for importing localized sound waves
@@ -373,12 +333,12 @@ private:
 	void SetupIcons()
 	{
 		SET_AUDIO_ICON_SIMPLE(SoundAttenuation);
-		SET_AUDIO_ICON_SIMPLE(AmbientSound);
+		SET_AUDIO_ICON_SVG_SIMPLE(AmbientSound);
 		SET_AUDIO_ICON_SIMPLE(SoundClass);
 		SET_AUDIO_ICON_SIMPLE(SoundConcurrency);
 		SET_AUDIO_ICON_SIMPLE(SoundCue);
 		SET_AUDIO_ICON_SIMPLE(SoundMix);
-		SET_AUDIO_ICON_SIMPLE(AudioVolume);
+		SET_AUDIO_ICON_SVG_SIMPLE(AudioVolume);
 		SET_AUDIO_ICON_SIMPLE(SoundSourceBus);
 		SET_AUDIO_ICON_SIMPLE(SoundSubmix);
 		SET_AUDIO_ICON_SIMPLE(ReverbEffect);

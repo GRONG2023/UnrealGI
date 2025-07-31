@@ -2,12 +2,13 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
+#include "Containers/Array.h"
+#include "Delegates/Delegate.h"
 #include "Misc/Attribute.h"
+#include "Templates/SharedPointer.h"
 #include "Types/SlateEnums.h"
-#include "Delegates/DelegateCombinations.h"
 
-class SWidget;
+class FText;
 class SSearchBox;
 
 /** Implementation for a sources search, used by the path and collections views */
@@ -31,7 +32,7 @@ public:
 	void SetHintText(const TAttribute<FText>& InHintText);
 
 	/** Get the underlying search widget */
-	TSharedRef<SWidget> GetWidget() const;
+	TSharedRef<SSearchBox> GetWidget() const;
 
 private:
 	/** Handler for when search term changes */

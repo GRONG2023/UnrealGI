@@ -1,22 +1,48 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "K2Node_Event.h"
-#include "UObject/UObjectHash.h"
-#include "UObject/Interface.h"
-#include "UObject/BlueprintsObjectVersion.h"
-#include "GameFramework/Actor.h"
-#include "GraphEditorSettings.h"
+
+#include "Containers/EnumAsByte.h"
+#include "Containers/Set.h"
+#include "DiffResults.h"
+#include "EdGraph/EdGraph.h"
+#include "EdGraph/EdGraphPin.h"
+#include "EdGraph/EdGraphSchema.h"
 #include "EdGraphSchema_K2.h"
 #include "EdGraphSchema_K2_Actions.h"
+#include "Engine/Blueprint.h"
+#include "EngineLogs.h"
+#include "EventEntryHandler.h"
+#include "FindInBlueprints.h"
+#include "GameFramework/Actor.h"
+#include "GraphEditorSettings.h"
+#include "HAL/PlatformCrt.h"
+#include "Internationalization/Internationalization.h"
 #include "K2Node_CallFunction.h"
 #include "K2Node_CreateDelegate.h"
 #include "K2Node_FunctionEntry.h"
 #include "K2Node_Self.h"
 #include "Kismet2/BlueprintEditorUtils.h"
-#include "KismetCompilerMisc.h"
+#include "Kismet2/CompilerResultsLog.h"
 #include "KismetCompiler.h"
-#include "EventEntryHandler.h"
-#include "DiffResults.h"
+#include "KismetCompilerMisc.h"
+#include "Logging/LogCategory.h"
+#include "Logging/LogMacros.h"
+#include "Misc/AssertionMacros.h"
+#include "Serialization/Archive.h"
+#include "Styling/AppStyle.h"
+#include "Templates/Casts.h"
+#include "Templates/UnrealTemplate.h"
+#include "Trace/Detail/Channel.h"
+#include "UObject/BlueprintsObjectVersion.h"
+#include "UObject/Class.h"
+#include "UObject/Interface.h"
+#include "UObject/Object.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/ObjectVersion.h"
+#include "UObject/Script.h"
+#include "UObject/UnrealNames.h"
+#include "UObject/WeakObjectPtrTemplates.h"
 
 const FName UK2Node_Event::DelegateOutputName(TEXT("OutputDelegate"));
 
@@ -58,7 +84,7 @@ void UK2Node_Event::Serialize(FArchive& Ar)
 	// Fix up legacy nodes that may not yet have a delegate pin
 	if(Ar.IsLoading())
 	{
-		if(Ar.UE4Ver() < VER_UE4_K2NODE_EVENT_MEMBER_REFERENCE)
+		if(Ar.UEVer() < VER_UE4_K2NODE_EVENT_MEMBER_REFERENCE)
 		{
 			EventReference.SetExternalMember(EventSignatureName_DEPRECATED, EventSignatureClass_DEPRECATED);
 		}
@@ -165,7 +191,16 @@ FText UK2Node_Event::GetTooltipText() const
 				);
 				// FText::Format() is slow, so we cache this to save on performance
 				CachedTooltip.SetCachedText(FText::Format(LOCTEXT("Event_SubtitledTooltip", "{FunctionTooltip}\n\n{ClientString}"), Args), this);
-			}			
+			}
+			else if (Function->HasMetaData(FBlueprintMetadata::MD_Latent))
+			{
+				Args.Add(
+					TEXT("LatentString"),
+					NSLOCTEXT("K2Node", "LatentFunction", "Latent. This node will complete at a later time. Latent nodes can only be placed in event graphs.")
+				);
+				// FText::Format() is slow, so we cache this to save on performance
+				CachedTooltip.SetCachedText(FText::Format(LOCTEXT("CallFunction_SubtitledTooltip", "{DefaultTooltip}\n\n{LatentString}"), Args), this);
+			}
 		}		
 	}
 
@@ -301,7 +336,7 @@ FName UK2Node_Event::GetFunctionName() const
 	return bOverrideFunction ? EventReference.GetMemberName() : CustomFunctionName;
 }
 
-UFunction* UK2Node_Event::FindEventSignatureFunction()
+UFunction* UK2Node_Event::FindEventSignatureFunction() const
 {
 	return EventReference.ResolveMember<UFunction>(GetBlueprintClassFromNode());
 }
@@ -720,6 +755,10 @@ FName UK2Node_Event::GetCornerIcon() const
 			{
 				return TEXT("Graph.Replication.AuthorityOnly");
 			}
+			else if (Function->HasMetaData(FBlueprintMetadata::MD_Latent))
+			{
+				return TEXT("Graph.Latent.LatentIcon");
+			}
 		}
 	}
 
@@ -752,6 +791,10 @@ FText UK2Node_Event::GetToolTipHeading() const
 			else if(Function->HasAllFunctionFlags(FUNC_BlueprintAuthorityOnly))
 			{
 				EventHeading = LOCTEXT("ServerOnlyEvent", "Server Only");
+			}
+			else if (Function->HasMetaData(FBlueprintMetadata::MD_Latent))
+			{
+				EventHeading = LOCTEXT("LatentEvent", "Latent");
 			}
 		}
 	}
@@ -852,20 +895,50 @@ UObject* UK2Node_Event::GetJumpTargetForDoubleClick() const
 
 FSlateIcon UK2Node_Event::GetIconAndTint(FLinearColor& OutColor) const
 {
-	static FSlateIcon Icon("EditorStyle", "GraphEditor.Event_16x");
+	static FSlateIcon Icon(FAppStyle::GetAppStyleSetName(), "GraphEditor.Event_16x");
 	return Icon;
 }
 
-FString UK2Node_Event::GetFindReferenceSearchString() const
+FString UK2Node_Event::GetFindReferenceSearchString_Impl(EGetFindReferenceSearchStringFlags InFlags) const
 {
-	FString FunctionName = EventReference.GetMemberName().ToString(); // If we fail to find the function, still want to search for its expected name.
-
-	if (UFunction* Function = EventReference.ResolveMember<UFunction>(GetBlueprintClassFromNode()))
+	// If searching by class member, try to construct search term from the UFunction.
+	// This may fail if the function was not found or for whatever reason, its owning 
+	// class is invalid. If it fails, proceed to search by name as fallback behavior.
+	if (EnumHasAnyFlags(InFlags, EGetFindReferenceSearchStringFlags::UseSearchSyntax) && !EnumHasAnyFlags(InFlags, EGetFindReferenceSearchStringFlags::Legacy))
 	{
-		FunctionName = UEdGraphSchema_K2::GetFriendlySignatureName(Function).ToString();
+		// Resolve the function
+		if (const UFunction* Function = FFunctionFromNodeHelper::FunctionFromNode(this))
+		{
+			FString SearchTerm;
+			if (FindInBlueprintsHelpers::ConstructSearchTermFromFunction(Function, SearchTerm))
+			{
+				return SearchTerm;
+			}
+		}
 	}
 
-	return FunctionName;
+	// Searching by just name. When overriding a function, try to find the function that it overrides to return its name.
+	if (bOverrideFunction || (CustomFunctionName == NAME_None))
+	{
+		// Attempt to find the function
+		if (const UFunction* Function = FFunctionFromNodeHelper::FunctionFromNode(this))
+		{
+			// Search by native name
+			const FString FunctionNativeName = Function->GetName();
+			return FString::Printf(TEXT("\"%s\""), *FunctionNativeName);
+		}
+		else
+		{
+			// If we fail to find the function, still want to search for its expected name, in quotes
+			return FString::Printf(TEXT("\"%s\""), *EventReference.GetMemberName().ToString());
+		}
+	}
+	else
+	{
+		// The function was not an override; its name is defined by this node.
+		// Return that name in quotes (treating special characters as part of name)
+		return FString::Printf(TEXT("\"%s\""), *CustomFunctionName.ToString());
+	}
 }
 
 void UK2Node_Event::FindDiffs(UEdGraphNode* OtherNode, struct FDiffResults& Results)
@@ -882,7 +955,7 @@ void UK2Node_Event::FindDiffs(UEdGraphNode* OtherNode, struct FDiffResults& Resu
 			Diff.Node1 = this;
 			Diff.Node2 = OtherNode;
 			Diff.DisplayString = LOCTEXT("DIF_EventFlags", "Event flags have changed");
-			Diff.DisplayColor = FLinearColor(0.25f, 0.71f, 0.85f);
+			Diff.Category = EDiffType::MODIFICATION;
 
 			Results.Add(Diff);
 		}
@@ -901,7 +974,7 @@ bool UK2Node_Event::HasExternalDependencies(TArray<class UStruct*>* OptionalOutp
 
 	UFunction* Function = EventReference.ResolveMember<UFunction>(GetBlueprintClassFromNode());
 	const UClass* SourceClass = Function ? Function->GetOwnerClass() : nullptr;
-	const bool bResult = (SourceClass != nullptr) && (SourceClass->ClassGeneratedBy != SourceBlueprint);
+	const bool bResult = (SourceClass != nullptr) && (SourceClass->ClassGeneratedBy.Get() != SourceBlueprint);
 	if (bResult && OptionalOutput)
 	{
 		OptionalOutput->AddUnique(Function);
@@ -909,6 +982,25 @@ bool UK2Node_Event::HasExternalDependencies(TArray<class UStruct*>* OptionalOutp
 
 	const bool bSuperResult = Super::HasExternalDependencies(OptionalOutput);
 	return bSuperResult || bResult;
+}
+
+void UK2Node_Event::AddSearchMetaDataInfo(TArray<FSearchTagDataPair>& OutTaggedMetaData) const
+{
+	Super::AddSearchMetaDataInfo(OutTaggedMetaData);
+
+	if (const UFunction* Function = FFunctionFromNodeHelper::FunctionFromNode(this))
+	{
+		// Index the native name of the function, this will be used in search queries rather than node title
+		const FString FunctionNativeName = Function->GetName();
+		OutTaggedMetaData.Add(FSearchTagDataPair(FFindInBlueprintSearchTags::FiB_NativeName, FText::FromString(FunctionNativeName)));
+
+		// Index the (ancestor) class or interface from which the function originates, can be self
+		if (const UClass* FuncOriginClass = FindInBlueprintsHelpers::GetFunctionOriginClass(Function))
+		{
+			const FString FuncOriginClassName = FuncOriginClass->GetPathName();
+			OutTaggedMetaData.Add(FSearchTagDataPair(FFindInBlueprintSearchTags::FiB_FuncOriginClass, FText::FromString(FuncOriginClassName)));
+		}
+	}
 }
 
 TSharedPtr<FEdGraphSchemaAction> UK2Node_Event::GetEventNodeAction(const FText& ActionCategory)

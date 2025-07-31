@@ -1,21 +1,43 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "K2Node_InputAction.h"
-#include "InputCoreTypes.h"
-#include "GameFramework/InputSettings.h"
-#include "GraphEditorSettings.h"
-#include "EdGraphSchema_K2.h"
-#include "EdGraphSchema_K2_Actions.h"
-#include "K2Node_AssignmentStatement.h"
-#include "K2Node_TemporaryVariable.h"
-#include "Kismet2/BlueprintEditorUtils.h"
-#include "Editor.h"
-#include "K2Node_InputActionEvent.h"
-#include "KismetCompiler.h"
-#include "BlueprintNodeSpawner.h"
-#include "EditorCategoryUtils.h"
+
 #include "BlueprintActionDatabase.h"
 #include "BlueprintActionDatabaseRegistrar.h"
+#include "BlueprintNodeSpawner.h"
+#include "Containers/Array.h"
+#include "Containers/EnumAsByte.h"
+#include "Containers/UnrealString.h"
+#include "Delegates/Delegate.h"
+#include "EdGraph/EdGraph.h"
+#include "EdGraph/EdGraphPin.h"
+#include "EdGraph/EdGraphSchema.h"
+#include "EdGraphSchema_K2.h"
+#include "EdGraphSchema_K2_Actions.h"
+#include "Editor.h"
+#include "EditorCategoryUtils.h"
+#include "Engine/Blueprint.h"
+#include "Engine/EngineBaseTypes.h"
+#include "Engine/MemberReference.h"
+#include "GameFramework/InputSettings.h"
+#include "GraphEditorSettings.h"
+#include "HAL/PlatformCrt.h"
+#include "InputCoreTypes.h"
+#include "Internationalization/Internationalization.h"
+#include "K2Node_AssignmentStatement.h"
+#include "K2Node_InputActionEvent.h"
+#include "K2Node_TemporaryVariable.h"
+#include "Kismet2/BlueprintEditorUtils.h"
+#include "Kismet2/CompilerResultsLog.h"
+#include "KismetCompiler.h"
+#include "Misc/AssertionMacros.h"
+#include "Styling/AppStyle.h"
+#include "Templates/Casts.h"
+#include "UObject/Class.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/ObjectVersion.h"
+#include "UObject/WeakObjectPtr.h"
+#include "UObject/WeakObjectPtrTemplates.h"
 
 #define LOCTEXT_NAMESPACE "K2Node_InputAction"
 
@@ -30,7 +52,7 @@ void UK2Node_InputAction::PostLoad()
 {
 	Super::PostLoad();
 
-	if (GetLinkerUE4Version() < VER_UE4_BLUEPRINT_INPUT_BINDING_OVERRIDES)
+	if (GetLinkerUEVersion() < VER_UE4_BLUEPRINT_INPUT_BINDING_OVERRIDES)
 	{
 		// Don't change existing behaviors
 		bOverrideParentBinding = false;
@@ -82,7 +104,7 @@ FText UK2Node_InputAction::GetTooltipText() const
 
 FSlateIcon UK2Node_InputAction::GetIconAndTint(FLinearColor& OutColor) const
 {
-	static FSlateIcon Icon("EditorStyle", "GraphEditor.Event_16x");
+	static FSlateIcon Icon(FAppStyle::GetAppStyleSetName(), "GraphEditor.Event_16x");
 	return Icon;
 }
 
@@ -166,7 +188,7 @@ void UK2Node_InputAction::ExpandNode(FKismetCompilerContext& CompilerContext, UE
 		{			
 			UEdGraphPin *EachPin = (*PinIt).Pin;
 			// Create the input touch event
-			UK2Node_InputActionEvent* InputActionEvent = CompilerContext.SpawnIntermediateEventNode<UK2Node_InputActionEvent>(this, EachPin, SourceGraph);
+			UK2Node_InputActionEvent* InputActionEvent = CompilerContext.SpawnIntermediateNode<UK2Node_InputActionEvent>(this, SourceGraph);
 			InputActionEvent->CustomFunctionName = FName( *FString::Printf(TEXT("InpActEvt_%s_%s"), *InputActionName.ToString(), *InputActionEvent->GetName()));
 			InputActionEvent->InputActionName = InputActionName;
 			InputActionEvent->bConsumeInput = bConsumeInput;
@@ -199,7 +221,7 @@ void UK2Node_InputAction::ExpandNode(FKismetCompilerContext& CompilerContext, UE
 	
 		if (InputActionPin->LinkedTo.Num() > 0)
 		{
-			UK2Node_InputActionEvent* InputActionEvent = CompilerContext.SpawnIntermediateEventNode<UK2Node_InputActionEvent>(this, InputActionPin, SourceGraph);
+			UK2Node_InputActionEvent* InputActionEvent = CompilerContext.SpawnIntermediateNode<UK2Node_InputActionEvent>(this, SourceGraph);
 			InputActionEvent->CustomFunctionName = FName( *FString::Printf(TEXT("InpActEvt_%s_%s"), *InputActionName.ToString(), *InputActionEvent->GetName()));
 			InputActionEvent->InputActionName = InputActionName;
 			InputActionEvent->bConsumeInput = bConsumeInput;

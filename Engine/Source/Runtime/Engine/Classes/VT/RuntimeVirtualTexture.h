@@ -4,17 +4,18 @@
 
 #include "CoreMinimal.h"
 #include "Engine/TextureDefines.h"
-#include "UObject/ObjectMacros.h"
 #include "VirtualTexturing.h"
 #include "VT/RuntimeVirtualTextureEnum.h"
 #include "RuntimeVirtualTexture.generated.h"
 
+namespace UE { namespace Shader	{ enum class EValueType : uint8; } }
+
 /** Runtime virtual texture UObject */
-UCLASS(ClassGroup = Rendering, BlueprintType)
-class ENGINE_API URuntimeVirtualTexture : public UObject
+UCLASS(ClassGroup = Rendering, BlueprintType, MinimalAPI)
+class URuntimeVirtualTexture : public UObject
 {
 	GENERATED_UCLASS_BODY()
-	~URuntimeVirtualTexture();
+	ENGINE_API ~URuntimeVirtualTexture();
 
 protected:
 	/** 
@@ -37,8 +38,14 @@ protected:
 	ERuntimeVirtualTextureMaterialType MaterialType = ERuntimeVirtualTextureMaterialType::BaseColor_Normal_Specular;
 
 	/** Enable storing the virtual texture in GPU supported compression formats. Using uncompressed is only recommended for debugging and quality comparisons. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = Layout, meta = (DisplayName = "Enable BC texture compression"))
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = Layout, meta = (DisplayName = "Enable texture compression"))
 	bool bCompressTextures = true;
+
+	/**
+	* Use low quality textures (RGB565/RGB555A1) to replace runtime compression
+	*/
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = Performance, meta = (DisplayName = "Use Low Quality Compression", editcondition = "MaterialType == ERuntimeVirtualTextureMaterialType::BaseColor_Normal_Roughness && bCompressTextures == true"))
+	bool bUseLowQualityCompression = false;
 
 	/** Enable clear before rendering a page of the virtual texture. Disabling this can be an optimization if you know that the texture will always be fully covered by rendering.  */
 	UPROPERTY(EditAnywhere, AdvancedDisplay, Category = Layout, meta = (DisplayName = "Enable clear before render"))
@@ -61,20 +68,20 @@ protected:
 	bool bContinuousUpdate = false;
 
 	/** Number of low mips to cut from the virtual texture. This can reduce peak virtual texture update cost but will also increase the probability of mip shimmering. */
-	UPROPERTY(EditAnywhere, AdvancedDisplay, Category = Layout, meta = (UIMin = "0", UIMax = "6", DisplayName = "Number of low mips to remove from the virtual texture"))
+	UPROPERTY(EditAnywhere, AdvancedDisplay, Category = Layout, meta = (UIMin = "0", UIMax = "5", DisplayName = "Number of low mips to remove from the virtual texture"))
 	int32 RemoveLowMips = 0;
 
 	/** Texture group this texture belongs to */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = LevelOfDetail, meta = (DisplayName = "Texture Group"), AssetRegistrySearchable)
-	TEnumAsByte<enum TextureGroup> LODGroup;
-
+	TEnumAsByte<enum TextureGroup> LODGroup = TEXTUREGROUP_World;
+	
 	/** Deprecated size of virtual texture. */
 	UPROPERTY()
 	int32 Size_DEPRECATED = -1;
 
 	/** Deprecated texture object containing streamed low mips. */
 	UPROPERTY()
-	class URuntimeVirtualTextureStreamingProxy* StreamingTexture_DEPRECATED = nullptr;
+	TObjectPtr<class URuntimeVirtualTextureStreamingProxy> StreamingTexture_DEPRECATED = nullptr;
 
 public:
 	/** Get the material set that this virtual texture stores. */
@@ -84,7 +91,7 @@ public:
 	UFUNCTION(BlueprintGetter)
 	int32 GetTileCount() const { return GetClampedTileCount(TileCount, bAdaptive); }
 	static int32 GetClampedTileCount(int32 InTileCount, bool InAdaptive) { return 1 << FMath::Clamp(InTileCount, 0, GetMaxTileCountLog2(InAdaptive)); }
-	static int32 GetMaxTileCountLog2(bool InAdaptive);
+	static ENGINE_API int32 GetMaxTileCountLog2(bool InAdaptive);
 	/** Public getter for virtual texture tile size */
 	UFUNCTION(BlueprintGetter)
 	int32 GetTileSize() const { return GetClampedTileSize(TileSize); }
@@ -98,7 +105,7 @@ public:
 	int32 GetSize() const { return GetTileCount() * GetTileSize(); }
 	/** Public getter for virtual texture page table size. This is only different from GetTileCount() when using an adaptive page table.  */
 	UFUNCTION(BlueprintPure, Category = Size)
-	int32 GetPageTableSize() const;
+	ENGINE_API int32 GetPageTableSize() const;
 
 	/** Get if this virtual texture uses compressed texture formats. */
 	bool GetCompressTextures() const { return bCompressTextures; }
@@ -114,7 +121,8 @@ public:
 	bool GetContinuousUpdate() const { return bContinuousUpdate; }
 	/** Public getter for virtual texture removed low mips */
 	int32 GetRemoveLowMips() const { return FMath::Clamp(RemoveLowMips, 0, 5); }
-
+	/** Public getter for virtual texture using low quality compression flag. */
+	bool GetLQCompression() const { return bUseLowQualityCompression; }
 	/** Public getter for texture LOD Group */
 	TEnumAsByte<enum TextureGroup> GetLODGroup() const { return LODGroup; }
 
@@ -126,44 +134,48 @@ public:
 	};
 
 	/** Get virtual texture description based on the properties of this object and the passed in volume transform. */
-	void GetProducerDescription(FVTProducerDescription& OutDesc, FInitSettings const& InitSettings, FTransform const& VolumeToWorld) const;
+	ENGINE_API void GetProducerDescription(FVTProducerDescription& OutDesc, FInitSettings const& InitSettings, FTransform const& VolumeToWorld) const;
 
 	/** Returns number of texture layers in the virtual texture */
-	int32 GetLayerCount() const;
+	ENGINE_API int32 GetLayerCount() const;
 	/** Returns number of texture layers in the virtual texture of a given material type */
-	static int32 GetLayerCount(ERuntimeVirtualTextureMaterialType InMaterialType);
+	static ENGINE_API int32 GetLayerCount(ERuntimeVirtualTextureMaterialType InMaterialType);
 	/** Returns the texture format for the virtual texture layer */
-	EPixelFormat GetLayerFormat(int32 LayerIndex) const;
+	ENGINE_API EPixelFormat GetLayerFormat(int32 LayerIndex) const;
 	/** Return true if the virtual texture layer should be sampled as sRGB */
-	bool IsLayerSRGB(int32 LayerIndex) const;
+	ENGINE_API bool IsLayerSRGB(int32 LayerIndex) const;
 	/** Return true if the virtual texture layer should be sampled as YCoCg */
-	bool IsLayerYCoCg(int32 LayerIndex) const;
+	ENGINE_API bool IsLayerYCoCg(int32 LayerIndex) const;
 
 	/** (Re)Initialize this object. Call this whenever we modify the producer or transform. */
-	void Initialize(IVirtualTexture* InProducer, FVTProducerDescription const& InProducerDesc, FTransform const& InVolumeToWorld, FBox const& InWorldBounds);
+	ENGINE_API void Initialize(IVirtualTexture* InProducer, FVTProducerDescription const& InProducerDesc, FTransform const& InVolumeToWorld, FBox const& InWorldBounds);
 
 	/** Release the resources for this object This will need to be called if our producer becomes stale and we aren't doing a full reinit with a new producer. */
-	void Release();
+	ENGINE_API void Release();
 
 	/** Getter for the associated virtual texture producer. Call on render thread only. */
-	FVirtualTextureProducerHandle GetProducerHandle() const;
+	ENGINE_API FVirtualTextureProducerHandle GetProducerHandle() const;
 	/** Getter for the associated virtual texture allocation. Call on render thread only. */
-	IAllocatedVirtualTexture* GetAllocatedVirtualTexture() const;
+	ENGINE_API IAllocatedVirtualTexture* GetAllocatedVirtualTexture() const;
 
 	/** Getter for the shader uniform parameters. */
-	FVector4 GetUniformParameter(int32 Index) const;
+	ENGINE_API FVector4 GetUniformParameter(int32 Index) const;
+	/** Getter for the shader uniform parameter type. */
+	static ENGINE_API UE::Shader::EValueType GetUniformParameterType(int32 Index);
 
 protected:
 	/** Initialize the render resources. This kicks off render thread work. */
-	void InitResource(IVirtualTexture* InProducer, FVTProducerDescription const& InProducerDesc);
+	ENGINE_API void InitResource(IVirtualTexture* InProducer, FVTProducerDescription const& InProducerDesc);
 	/** Initialize the render resources with a null producer. This kicks off render thread work. */
-	void InitNullResource();
+	ENGINE_API void InitNullResource();
 
 	//~ Begin UObject Interface.
-	virtual void GetAssetRegistryTags(TArray<FAssetRegistryTag>& OutTags) const override;
-	virtual void PostLoad() override;
+	ENGINE_API virtual void GetAssetRegistryTags(FAssetRegistryTagsContext Context) const override;
+	UE_DEPRECATED(5.4, "Implement the version that takes FAssetRegistryTagsContext instead.")
+	ENGINE_API virtual void GetAssetRegistryTags(TArray<FAssetRegistryTag>& OutTags) const override;
+	ENGINE_API virtual void PostLoad() override;
 #if WITH_EDITOR
-	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
+	ENGINE_API virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
 #endif
 	//~ End UObject Interface.
 
@@ -181,11 +193,15 @@ class UVirtualTexture2D;
 
 namespace RuntimeVirtualTexture
 {
-	/** Helper function to wrap a runtime virtual texture producer with a streaming producer. */
+	/** Helper function to create a streaming virtual texture producer. */
 	ENGINE_API IVirtualTexture* CreateStreamingTextureProducer(
-		IVirtualTexture* InProducer,
-		FVTProducerDescription const& InProducerDesc,
 		UVirtualTexture2D* InStreamingTexture,
-		int32 InMaxLevel,
-		int32& OutTransitionLevel);
+		FVTProducerDescription const& InOwnerProducerDesc,
+		FVTProducerDescription& OutStreamingProducerDesc);
+
+	/** Helper function to bind a runtime virtual texture producer to a streaming producer. Returns the new combined producer. */
+	ENGINE_API IVirtualTexture* BindStreamingTextureProducer(
+		IVirtualTexture* InProducer,
+		IVirtualTexture* InStreamingProducer,
+		int32 InTransitionLevel);
 }

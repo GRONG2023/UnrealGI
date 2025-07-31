@@ -11,10 +11,9 @@
 #include "Stats/Stats.h"
 #include "Engine/EngineTypes.h"
 #include "Misc/CoreMisc.h"
+#include "Misc/App.h"
 #include "EngineDefines.h"
-#include "RenderResource.h"
-#include "LocalVertexFactory.h"
-#include "DynamicMeshBuilder.h"
+#include "PhysicsInterfaceDeclaresCore.h"
 #include "PhysicsPublicCore.h"
 //#include "StaticMeshResources.h"
 
@@ -28,6 +27,8 @@ struct FConstraintInstance;
 struct FBodyInstance;
 struct FStaticMeshVertexBuffers;
 class FPhysScene_PhysX;
+class FLocalVertexFactory;
+class FDynamicMeshIndexBuffer32;
 
 /** Delegate for applying custom physics forces upon the body. Can be passed to "AddCustomPhysics" so 
 * custom forces and torques can be calculated individually for every physics substep.
@@ -53,73 +54,11 @@ DECLARE_CYCLE_STAT_EXTERN(TEXT("FetchAndStart Time (all)"), STAT_TotalPhysicsTim
 DECLARE_DWORD_COUNTER_STAT_EXTERN(TEXT("Cloth Actor Count"), STAT_NumCloths, STATGROUP_Physics, ENGINE_API);
 DECLARE_DWORD_COUNTER_STAT_EXTERN(TEXT("Simulated Cloth Verts"), STAT_NumClothVerts, STATGROUP_Physics, ENGINE_API);
 
-#define WITH_PHYSX_VEHICLES WITH_PHYSX && PHYSICS_INTERFACE_PHYSX
-
 /** Pointer to PhysX Command Handler */
 extern ENGINE_API class FPhysCommandHandler* GPhysCommandHandler;
 
-#if PHYSICS_INTERFACE_PHYSX
-
-namespace physx
-{
-	class PxScene;
-	class PxConvexMesh;
-	class PxTriangleMesh;
-	class PxCooking;
-	class PxPhysics;
-	class PxVec3;
-	class PxJoint;
-	class PxMat44;
-	class PxCpuDispatcher;
-	class PxSimulationEventCallback;
-	struct PxActiveTransform;
-	class PxActor;
-	class PxRigidActor;
-}
-
-#if WITH_APEX
-namespace nvidia
-{
-	namespace apex
-	{
-		class DestructibleAsset;
-		class Scene;
-		struct DamageEventReportData;
-		class ApexSDK;
-		class ModuleDestructible;
-		class DestructibleActor;
-		class ModuleClothing;
-		class Module;
-		class ClothingActor;
-		class ClothingAsset;
-		class ApexInterface;
-	}
-}
-#endif // WITH_APEX
-
-struct FConstraintInstance;
-struct FContactModifyCallback;
-struct FCCDContactModifyCallback;
-struct FPhysXMbpBroadphaseCallback;
-class UPhysicsAsset;
-
-using namespace physx;
-#if WITH_APEX
-using namespace nvidia;
-#endif	//WITH_APEX
-
-/** Pointer to PhysX cooking object */
-extern ENGINE_API PxCooking*			GPhysXCooking;
-
-namespace NvParameterized
-{
-	class Interface;
-}
-
-#endif // WITH_PHYSX
-
 /** Information about a specific object involved in a rigid body collision */
-struct ENGINE_API FRigidBodyCollisionInfo
+struct FRigidBodyCollisionInfo
 {
 	/** Actor involved in the collision */
 	TWeakObjectPtr<AActor>					Actor;
@@ -133,19 +72,22 @@ struct ENGINE_API FRigidBodyCollisionInfo
 	/** Name of bone if a PhysicsAsset */
 	FName									BoneName;
 
+	/** Amount by which the linear velocity at the center of mass of this body has changed in the frame of this contact */
+	FVector									DeltaVelocity;
+
 	FRigidBodyCollisionInfo() :
 		BodyIndex(INDEX_NONE),
 		BoneName(NAME_None)
 	{}
 
 	/** Utility to set up the body collision info from an FBodyInstance */
-	void SetFrom(const FBodyInstance* BodyInst);
+	ENGINE_API void SetFrom(const FBodyInstance* BodyInst, const FVector& InDeltaVelocity = FVector::ZeroVector);
 	/** Get body instance */
-	FBodyInstance* GetBodyInstance() const;
+	ENGINE_API FBodyInstance* GetBodyInstance() const;
 };
 
 /** One entry in the array of collision notifications pending execution at the end of the physics engine run. */
-struct ENGINE_API FCollisionNotifyInfo
+struct FCollisionNotifyInfo
 {
 	/** If this notification should be called for the Actor in Info0. */
 	bool							bCallEvent0;
@@ -162,13 +104,16 @@ struct ENGINE_API FCollisionNotifyInfo
 	/** Information about the collision itself */
 	FCollisionImpactData			RigidCollisionData;
 
+	Chaos::FReal					SolverTime;
+
 	FCollisionNotifyInfo() :
 		bCallEvent0(false),
-		bCallEvent1(false)
+		bCallEvent1(false),
+		SolverTime((Chaos::FReal)0.0)
 	{}
 
-	/** Check that is is valid to call a notification for this entry. Looks at the IsPendingKill() flags on both Actors. */
-	bool IsValidForNotify() const;
+	/** Check that is is valid to call a notification for this entry. Looks at the IsValid() flags on both Actors. */
+	ENGINE_API bool IsValidForNotify() const;
 };
 
 namespace PhysCommand
@@ -197,40 +142,14 @@ public:
 	void ENGINE_API Flush();
 	bool ENGINE_API HasPendingCommands();
 
-#if WITH_APEX
-	/** enqueues a command to release destructible actor once apex has finished simulating */
-	void ENGINE_API DeferredRelease(apex::ApexInterface* ApexInterface);
-#endif
-
-#if PHYSICS_INTERFACE_PHYSX
-	void ENGINE_API DeferredRelease(physx::PxScene * PScene);
-	void ENGINE_API DeferredDeleteSimEventCallback(physx::PxSimulationEventCallback* SimEventCallback);
-	void ENGINE_API DeferredDeleteContactModifyCallback(FContactModifyCallback* ContactModifyCallback);
-	void ENGINE_API DeferredDeleteCCDContactModifyCallback(FCCDContactModifyCallback* CCDContactModifyCallback);
-	void ENGINE_API DeferredDeleteMbpBroadphaseCallback(FPhysXMbpBroadphaseCallback* MbpCallback);
-	void ENGINE_API DeferredDeleteCPUDispathcer(physx::PxCpuDispatcher * CPUDispatcher);
-#endif
-	
 private:
 
 	/** Command to execute when physics simulation is done */
 	struct FPhysPendingCommand
 	{
-		union
-		{
-#if WITH_APEX
-			apex::ApexInterface * ApexInterface;
-			apex::DestructibleActor * DestructibleActor;
-#endif
-#if PHYSICS_INTERFACE_PHYSX
-			physx::PxScene* PScene;
-			physx::PxCpuDispatcher* CPUDispatcher;
-			physx::PxSimulationEventCallback* SimEventCallback;
-			FContactModifyCallback* ContactModifyCallback;
-			FCCDContactModifyCallback* CCDContactModifyCallback;
-			FPhysXMbpBroadphaseCallback* MbpCallback;
-#endif
-		} Pointer;
+		//union
+		//{
+		//} Pointer;
 
 		PhysCommand::Type CommandType;
 	};
@@ -263,16 +182,6 @@ FORCEINLINE bool PhysSingleThreadedMode()
 	}
 	return false;
 }
-
-#if PHYSICS_INTERFACE_PHYSX
-/** Struct used for passing info to the PhysX shader */
-
-struct FPhysSceneShaderInfo
-{
-	FPhysScene * PhysScene;
-};
-
-#endif
 
 // Only used for legacy serialization (ver < VER_UE4_REMOVE_PHYS_SCALED_GEOM_CACHES)
 class FKCachedConvexDataElement
@@ -325,8 +234,6 @@ public:
 	bool HasValidGeometry();
 };
 
-
-
 ENGINE_API bool	InitGamePhys();
 ENGINE_API void	TermGamePhys();
 
@@ -334,25 +241,23 @@ ENGINE_API void	TermGamePhys();
 ENGINE_API void DeferredPhysResourceCleanup();
 
 
-
-
 FTransform FindBodyTransform(AActor* Actor, FName BoneName);
 FBox	FindBodyBox(AActor* Actor, FName BoneName);
 
 /** Set of delegates to allowing hooking different parts of the physics engine */
-class ENGINE_API FPhysicsDelegates : public FPhysicsDelegatesCore
+class FPhysicsDelegates : public FPhysicsDelegatesCore
 {
 public:
 
 	DECLARE_MULTICAST_DELEGATE_OneParam(FOnPhysicsAssetChanged, const UPhysicsAsset*);
-	static FOnPhysicsAssetChanged OnPhysicsAssetChanged;
+	static ENGINE_API FOnPhysicsAssetChanged OnPhysicsAssetChanged;
 
 	DECLARE_MULTICAST_DELEGATE_OneParam(FOnPhysSceneInit, FPhysScene*);
-	static FOnPhysSceneInit OnPhysSceneInit;
+	static ENGINE_API FOnPhysSceneInit OnPhysSceneInit;
 
 	DECLARE_MULTICAST_DELEGATE_OneParam(FOnPhysSceneTerm, FPhysScene*);
-	static FOnPhysSceneTerm OnPhysSceneTerm;
+	static ENGINE_API FOnPhysSceneTerm OnPhysSceneTerm;
 
 	DECLARE_MULTICAST_DELEGATE_OneParam(FOnPhysDispatchNotifications, FPhysScene*);
-	static FOnPhysDispatchNotifications OnPhysDispatchNotifications;
+	static ENGINE_API FOnPhysDispatchNotifications OnPhysDispatchNotifications;
 };

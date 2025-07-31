@@ -1,19 +1,40 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "K2Node_Message.h"
+
+#include "Containers/Array.h"
+#include "Containers/EnumAsByte.h"
+#include "Containers/UnrealString.h"
+#include "EdGraph/EdGraphPin.h"
+#include "EdGraphSchema_K2.h"
 #include "EdGraphUtilities.h"
 #include "Engine/LevelScriptActor.h"
 #include "Engine/LevelStreaming.h"
-#include "EdGraphSchema_K2.h"
+#include "Engine/MemberReference.h"
+#include "HAL/PlatformMath.h"
+#include "Internationalization/Internationalization.h"
+#include "K2Node.h"
 #include "K2Node_AssignmentStatement.h"
 #include "K2Node_CallArrayFunction.h"
 #include "K2Node_DynamicCast.h"
 #include "K2Node_TemporaryVariable.h"
-#include "KismetCompilerMisc.h"
-#include "KismetCompiler.h"
-#include "Kismet/KismetArrayLibrary.h"
-#include "Kismet/BlueprintSetLibrary.h"
 #include "Kismet/BlueprintMapLibrary.h"
+#include "Kismet/BlueprintSetLibrary.h"
+#include "Kismet/KismetArrayLibrary.h"
+#include "Kismet2/CompilerResultsLog.h"
+#include "KismetCompiler.h"
+#include "KismetCompilerMisc.h"
+#include "Logging/LogCategory.h"
+#include "Logging/LogMacros.h"
+#include "Misc/AssertionMacros.h"
+#include "Templates/Casts.h"
+#include "Templates/SubclassOf.h"
+#include "Trace/Detail/Channel.h"
+#include "UObject/Class.h"
+#include "UObject/Object.h"
+#include "UObject/Script.h"
+#include "UObject/WeakObjectPtr.h"
+#include "UObject/WeakObjectPtrTemplates.h"
 
 #define LOCTEXT_NAMESPACE "K2Node_Message"
 
@@ -50,6 +71,15 @@ FText UK2Node_Message::GetNodeTitle(ENodeTitleType::Type TitleType) const
 		return NSLOCTEXT("K2Node", "InvalidMessageNode", "Invalid Message Node");
 	}
 	return CachedNodeTitles.GetCachedTitle(TitleType);
+}
+
+FText UK2Node_Message::GetTooltipText() const
+{
+	if (CachedTooltip.IsOutOfDate(this))
+	{
+		CachedTooltip.SetCachedText(FText::Format(LOCTEXT("MessageTooltip", "{0}\nMessage. This does nothing if the target does not implement the required interface."), Super::GetTooltipText()), this);
+	}
+	return CachedTooltip;
 }
 
 void UK2Node_Message::AllocateDefaultPins()

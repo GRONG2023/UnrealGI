@@ -37,24 +37,78 @@ FAutoConsoleVariableRef CVarNetPacketHandlerCRCDump(
 	TEXT("net.PacketHandlerCRCDump"),
 	GPacketHandlerCRCDump,
 	TEXT("Enables or disables dumping of packet CRC's for every HandlerComponent, Incoming and Outgoing, for debugging."));
+
+static int32 GPacketHandlerTimeguardLimit = 20;
+static float GPacketHandlerTimeguardThresholdMS = 0.0f;
+bool GPacketHandlerDiscardTimeguardMeasurement = false;
+
+static FAutoConsoleVariableRef CVarNetPacketHandlerTimeguardThresholdMS(
+	TEXT("net.PacketHandlerTimeguardThresholdMS"),
+	GPacketHandlerTimeguardThresholdMS,
+	TEXT("Threshold in milliseconds for the HandlerComponent timeguard, Incoming and Outgoing."),
+	ECVF_Default);
+static FAutoConsoleVariableRef CVarNetPacketHandlerTimeguardLimit(
+	TEXT("net.PacketHandlerTimeguardLimit"),
+	GPacketHandlerTimeguardLimit,
+	TEXT("Sets the maximum number of HandlerComponent timeguard logs.\n"),
+	ECVF_Default
+);
+
+// Lightweight time guard. Note: Threshold of 0 disables the timeguard
+#define NET_LIGHTWEIGHT_TIME_GUARD_BEGIN( Name, ThresholdMS ) \
+	double PREPROCESSOR_JOIN(__TimeGuard_ThresholdMS_, Name) = ThresholdMS; \
+	uint64 PREPROCESSOR_JOIN(__TimeGuard_StartCycles_, Name) = ( ThresholdMS > 0.0f && GPacketHandlerTimeguardLimit > 0 ) ? FPlatformTime::Cycles64() : 0; \
+	GPacketHandlerDiscardTimeguardMeasurement = false;
+
+#define NET_LIGHTWEIGHT_TIME_GUARD_END( Name, NameStringCode ) \
+	if ( PREPROCESSOR_JOIN(__TimeGuard_ThresholdMS_, Name) > 0.0f && GPacketHandlerTimeguardLimit > 0 && !GPacketHandlerDiscardTimeguardMeasurement ) \
+	{\
+		double PREPROCESSOR_JOIN(__TimeGuard_MSElapsed_,Name) = FPlatformTime::ToMilliseconds64( FPlatformTime::Cycles64() - PREPROCESSOR_JOIN(__TimeGuard_StartCycles_,Name) ); \
+		if ( PREPROCESSOR_JOIN(__TimeGuard_MSElapsed_,Name) > PREPROCESSOR_JOIN(__TimeGuard_ThresholdMS_, Name) ) \
+		{ \
+			FString ReportName = NameStringCode; \
+			UE_LOG(PacketHandlerLog, Warning, TEXT("PacketHandler: %s - %s took %.2fms!"), TEXT(#Name), *ReportName, PREPROCESSOR_JOIN(__TimeGuard_MSElapsed_,Name)); \
+			GPacketHandlerTimeguardLimit--; \
+		} \
+	}
+#else // UE_BUILD_SHIPPING
+  #define NET_LIGHTWEIGHT_TIME_GUARD_BEGIN( Name, ThresholdMS )
+  #define NET_LIGHTWEIGHT_TIME_GUARD_END( Name, NameStringCode )
 #endif
 
+template<typename OutType, typename InType>
+OutType IntCastLog(InType In)
+{
+	bool bFitsIn = IntFitsIn<OutType, InType>(In);
+	ensureMsgf(bFitsIn, TEXT("PacketHandler: Loss of data caused by truncated cast"));
+	UE_CLOG(!bFitsIn, PacketHandlerLog, Warning, TEXT("PacketHandler: Loss of data caused by truncated cast"));
+	return static_cast<OutType>(In);
+}
+
+/**
+ * BufferedPacket
+ */
+
+BufferedPacket::~BufferedPacket()
+{
+	delete [] Data;
+}
 
 /**
  * PacketHandler
  */
 
 PacketHandler::PacketHandler(FDDoSDetection* InDDoS/*=nullptr*/)
-	: Mode(Handler::Mode::Client)
+	: Mode(UE::Handler::Mode::Client)
 	, bConnectionlessHandler(false)
 	, DDoS(InDDoS)
 	, LowLevelSendDel()
 	, HandshakeCompleteDel()
-	, OutgoingPacket()
+	, OutgoingPacket(MAX_PACKET_SIZE * 8)
 	, IncomingPacket()
 	, HandlerComponents()
 	, MaxPacketBits(0)
-	, State(Handler::State::Uninitialized)
+	, State(UE::Handler::State::Uninitialized)
 	, BufferedPackets()
 	, QueuedPackets()
 	, QueuedRawPackets()
@@ -108,7 +162,7 @@ FPacketHandlerAddComponentDelegate& PacketHandler::GetAddComponentDelegate()
 	return AddComponentDelegate;
 }
 
-void PacketHandler::Initialize(Handler::Mode InMode, uint32 InMaxPacketBits, bool bConnectionlessOnly/*=false*/,
+void PacketHandler::Initialize(UE::Handler::Mode InMode, uint32 InMaxPacketBits, bool bConnectionlessOnly/*=false*/,
 								TSharedPtr<IAnalyticsProvider> InProvider/*=nullptr*/, FDDoSDetection* InDDoS/*=nullptr*/, FName InDriverProfile/*=NAME_None*/)
 {
 	Mode = InMode;
@@ -170,9 +224,28 @@ void PacketHandler::Initialize(Handler::Mode InMode, uint32 InMaxPacketBits, boo
 
 	if (bEnableReliability && !ReliabilityComponent.IsValid())
 	{
+		UE_LOG(PacketHandlerLog, Warning, TEXT("bEnableReliability for PacketHandlerComponents is deprecated. For fully-reliable data, use reliable RPCs or a separate connection with a reliable protocol."));
+
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 		TSharedPtr<HandlerComponent> NewComponent = MakeShareable(new ReliabilityHandlerComponent);
 		ReliabilityComponent = StaticCastSharedPtr<ReliabilityHandlerComponent>(NewComponent);
 		AddHandler(NewComponent, true);
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
+	}
+}
+
+void PacketHandler::InitializeDelegates(FPacketHandlerLowLevelSendTraits InLowLevelSendDel,
+										FPacketHandlerNotifyAddHandler InAddHandlerDel/*=FPacketHandlerNotifyAddHandler()*/)
+{
+	LowLevelSendDel = InLowLevelSendDel;
+	AddHandlerDel = InAddHandlerDel;
+}
+
+void PacketHandler::InitFaultRecovery(UE::Net::FNetConnectionFaultRecoveryBase* InFaultRecovery)
+{
+	for (TSharedPtr<HandlerComponent>& CurComponent : HandlerComponents)
+	{
+		CurComponent->InitFaultRecovery(InFaultRecovery);
 	}
 }
 
@@ -181,7 +254,7 @@ void PacketHandler::NotifyAnalyticsProvider(TSharedPtr<IAnalyticsProvider> InPro
 	Provider = InProvider;
 	Aggregator = InAggregator;
 
-	if (State != Handler::State::Uninitialized)
+	if (State != UE::Handler::State::Uninitialized)
 	{
 		for (const TSharedPtr<HandlerComponent>& CurComponent : HandlerComponents)
 		{
@@ -195,11 +268,11 @@ void PacketHandler::NotifyAnalyticsProvider(TSharedPtr<IAnalyticsProvider> InPro
 
 void PacketHandler::InitializeComponents()
 {
-	if (State == Handler::State::Uninitialized)
+	if (State == UE::Handler::State::Uninitialized)
 	{
 		if (HandlerComponents.Num() > 0)
 		{
-			SetState(Handler::State::InitializingComponents);
+			SetState(UE::Handler::State::InitializingComponents);
 		}
 		else
 		{
@@ -244,7 +317,7 @@ void PacketHandler::BeginHandshaking(FPacketHandlerHandshakeComplete InHandshake
 void PacketHandler::AddHandler(TSharedPtr<HandlerComponent>& NewHandler, bool bDeferInitialize/*=false*/)
 {
 	// This is never valid. Can end up silently changing maximum allow packet size, which could cause failure to send packets.
-	if (State != Handler::State::Uninitialized)
+	if (State != UE::Handler::State::Uninitialized)
 	{
 		LowLevelFatalError(TEXT("Handler added during runtime."));
 		return;
@@ -271,6 +344,8 @@ void PacketHandler::AddHandler(TSharedPtr<HandlerComponent>& NewHandler, bool bD
 
 	HandlerComponents.Add(NewHandler);
 	NewHandler->Handler = this;
+
+	AddHandlerDel.ExecuteIfBound(NewHandler);
 
 	if (!bDeferInitialize)
 	{
@@ -329,7 +404,7 @@ TSharedPtr<HandlerComponent> PacketHandler::AddHandler(const FString& ComponentS
 			{
 				// Every HandlerComponentFactory type has one instance, loaded as a named singleton
 				FString SingletonName = ComponentName.Mid(FactoryComponentDelim + 1) + TEXT("_Singleton");
-				UHandlerComponentFactory* Factory = FindObject<UHandlerComponentFactory>(ANY_PACKAGE, *SingletonName);
+				UHandlerComponentFactory* Factory = FindFirstObject<UHandlerComponentFactory>(*SingletonName, EFindFirstObjectOptions::NativeFirst | EFindFirstObjectOptions::EnsureIfAmbiguous);
 
 				if (Factory == nullptr)
 				{
@@ -524,7 +599,7 @@ EIncomingResult PacketHandler::Incoming_Internal(FReceivedPacketView& PacketView
 
 		FPacketAudit::CheckStage(TEXT("PostPacketHandler"), ProcessedPacketReader);
 
-		if (State == Handler::State::Uninitialized)
+		if (State == UE::Handler::State::Uninitialized)
 		{
 			UpdateInitialState();
 		}
@@ -543,7 +618,7 @@ EIncomingResult PacketHandler::Incoming_Internal(FReceivedPacketView& PacketView
 				}
 				else if (ProcessedPacketReader.GetPosBits() == 0)
 				{
-					HandlerCRCs.Add({FCrc::MemCrc32(ProcessedPacketReader.GetData(), ProcessedPacketReader.GetNumBytes()), true, false});
+					HandlerCRCs.Add({FCrc::MemCrc32(ProcessedPacketReader.GetData(), IntCastLog<int32, int64>(ProcessedPacketReader.GetNumBytes())), true, false});
 				}
 				else
 				{
@@ -564,7 +639,7 @@ EIncomingResult PacketHandler::Incoming_Internal(FReceivedPacketView& PacketView
 					{
 						FHandlerCRC& CurCRC = HandlerCRCs[HandlerCRCs.Num() - 1];
 
-						CurCRC.CRC = FCrc::MemCrc32(ProcessedPacketReader.GetData(), ProcessedPacketReader.GetNumBytes());
+						CurCRC.CRC = FCrc::MemCrc32(ProcessedPacketReader.GetData(), IntCastLog<int32, int64>(ProcessedPacketReader.GetNumBytes()));
 						CurCRC.bHasAlignedCRC = true;
 					}
 #endif
@@ -576,7 +651,11 @@ EIncomingResult PacketHandler::Incoming_Internal(FReceivedPacketView& PacketView
 				}
 				else
 				{
-					CurComponent.Incoming(ProcessedPacketReader);
+					NET_LIGHTWEIGHT_TIME_GUARD_BEGIN(Incoming, GPacketHandlerTimeguardThresholdMS);
+
+					CurComponent.Incoming(PacketRef);
+
+					NET_LIGHTWEIGHT_TIME_GUARD_END(Incoming, CurComponent.GetName().ToString());
 				}
 			}
 		}
@@ -592,7 +671,7 @@ EIncomingResult PacketHandler::Incoming_Internal(FReceivedPacketView& PacketView
 #if !UE_BUILD_SHIPPING
 				if (UNLIKELY(!!GPacketHandlerCRCDump))
 				{
-					NetConnectionCRC = FCrc::MemCrc32(IncomingPacket.GetData(), IncomingPacket.GetBytesLeft());
+					NetConnectionCRC = FCrc::MemCrc32(IncomingPacket.GetData(), IntCastLog<int32, int64>(IncomingPacket.GetBytesLeft()));
 				}
 #endif
 			}
@@ -667,13 +746,13 @@ const ProcessedPacket PacketHandler::Outgoing_Internal(uint8* Packet, int32 Coun
 	{
 		OutgoingPacket.Reset();
 
-		if (State == Handler::State::Uninitialized)
+		if (State == UE::Handler::State::Uninitialized)
 		{
 			UpdateInitialState();
 		}
 
 
-		if (State == Handler::State::Initialized)
+		if (State == UE::Handler::State::Initialized)
 		{
 			OutgoingPacket.SerializeBits(Packet, CountBits);
 
@@ -693,7 +772,11 @@ const ProcessedPacket PacketHandler::Outgoing_Internal(uint8* Packet, int32 Coun
 						}
 						else
 						{
+							NET_LIGHTWEIGHT_TIME_GUARD_BEGIN(Outgoing, GPacketHandlerTimeguardThresholdMS);
+
 							CurComponent.Outgoing(OutgoingPacket, Traits);
+
+							NET_LIGHTWEIGHT_TIME_GUARD_END(Outgoing, CurComponent.GetName().ToString());
 						}
 					}
 					else
@@ -716,7 +799,7 @@ const ProcessedPacket PacketHandler::Outgoing_Internal(uint8* Packet, int32 Coun
 					}
 					else
 					{
-						HandlerCRCs.Add({FCrc::MemCrc32(OutgoingPacket.GetData(), OutgoingPacket.GetNumBytes()), false});
+						HandlerCRCs.Add({FCrc::MemCrc32(OutgoingPacket.GetData(), IntCastLog<int32, int64>(OutgoingPacket.GetNumBytes())), false});
 					}
 				}
 #endif
@@ -732,12 +815,14 @@ const ProcessedPacket PacketHandler::Outgoing_Internal(uint8* Packet, int32 Coun
 
 			if (!bConnectionless && ReliabilityComponent.IsValid() && OutgoingPacket.GetNumBits() > 0)
 			{
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 				// Let the reliability handler know about all processed packets, so it can record them for resending if needed
-				ReliabilityComponent->QueuePacketForResending(OutgoingPacket.GetData(), OutgoingPacket.GetNumBits(), Traits);
+				ReliabilityComponent->QueuePacketForResending(OutgoingPacket.GetData(), IntCastLog<int32, int64>(OutgoingPacket.GetNumBits()), Traits);
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 			}
 		}
 		// Buffer any packets being sent from game code until processors are initialized
-		else if (State == Handler::State::InitializingComponents && CountBits > 0)
+		else if (State == UE::Handler::State::InitializingComponents && CountBits > 0)
 		{
 			if (bConnectionless)
 			{
@@ -816,7 +901,7 @@ void PacketHandler::ReplaceIncomingPacket(FBitReader& ReplacementPacket)
 	{
 		// @todo #JohnB: Make this directly adjust and write into IncomingPacket's buffer, instead of copying - very inefficient
 		TArray<uint8> TempPacketData;
-		TempPacketData.AddUninitialized(ReplacementPacket.GetBytesLeft());
+		TempPacketData.AddUninitialized(IntCastLog<int32, int64>(ReplacementPacket.GetBytesLeft()));
 		TempPacketData[TempPacketData.Num()-1] = 0;
 
 		int64 NewPacketSizeBits = ReplacementPacket.GetBitsLeft();
@@ -830,13 +915,13 @@ void PacketHandler::RealignPacket(FBitReader& Packet)
 {
 	if (Packet.GetPosBits() != 0)
 	{
-		uint32 BitsLeft = Packet.GetBitsLeft();
+		const int32 BitsLeft = IntCastLog<int32, int64>(Packet.GetBitsLeft());
 
 		if (BitsLeft > 0)
 		{
 			// @todo #JohnB: Based on above - when you optimize above, optimize this too
 			TArray<uint8> TempPacketData;
-			TempPacketData.AddUninitialized(Packet.GetBytesLeft());
+			TempPacketData.AddUninitialized(IntCastLog<int32, int64>(Packet.GetBytesLeft()));
 			TempPacketData[TempPacketData.Num()-1] = 0;
 
 			Packet.SerializeBits(TempPacketData.GetData(), BitsLeft);
@@ -850,7 +935,7 @@ void PacketHandler::SendHandlerPacket(HandlerComponent* InComponent, FBitWriter&
 	// @todo #JohnB: There is duplication between this function and others, it would be nice to reduce this.
 
 	// Prevent any cases where a send happens before the handler is ready.
-	check(State != Handler::State::Uninitialized);
+	check(State != UE::Handler::State::Uninitialized);
 
 	if (LowLevelSendDel.IsBound())
 	{
@@ -896,11 +981,12 @@ void PacketHandler::SendHandlerPacket(HandlerComponent* InComponent, FBitWriter&
 			// Add a termination bit, the same as the UNetConnection code does, if appropriate
 			Writer.WriteBit(1);
 
-
 			if (ReliabilityComponent.IsValid())
 			{
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 				// Let the reliability handler know about all processed packets, so it can record them for resending if needed
-				ReliabilityComponent->QueueHandlerPacketForResending(InComponent, Writer.GetData(), Writer.GetNumBits(), Traits);
+				ReliabilityComponent->QueueHandlerPacketForResending(InComponent, Writer.GetData(), IntCastLog<int32, int64>(Writer.GetNumBits()), Traits);
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 			}
 
 			// Now finish off with a raw send (as we don't want to go through the PacketHandler chain again)
@@ -908,7 +994,7 @@ void PacketHandler::SendHandlerPacket(HandlerComponent* InComponent, FBitWriter&
 
 			bRawSend = true;
 
-			LowLevelSendDel.ExecuteIfBound(Writer.GetData(), Writer.GetNumBits(), Traits);
+			LowLevelSendDel.ExecuteIfBound(Writer.GetData(), IntCastLog<int32, int64>(Writer.GetNumBits()), Traits);
 
 			bRawSend = bOldRawSend;
 		}
@@ -919,7 +1005,7 @@ void PacketHandler::SendHandlerPacket(HandlerComponent* InComponent, FBitWriter&
 	}
 }
 
-void PacketHandler::SetState(Handler::State InState)
+void PacketHandler::SetState(UE::Handler::State InState)
 {
 	if (InState == State)
 	{
@@ -933,7 +1019,7 @@ void PacketHandler::SetState(Handler::State InState)
 
 void PacketHandler::UpdateInitialState()
 {
-	if (State == Handler::State::Uninitialized)
+	if (State == UE::Handler::State::Uninitialized)
 	{
 		if (HandlerComponents.Num() > 0)
 		{
@@ -985,7 +1071,7 @@ void PacketHandler::HandlerInitialized()
 
 	BufferedConnectionlessPackets.Empty();
 
-	SetState(Handler::State::Initialized);
+	SetState(UE::Handler::State::Initialized);
 
 	if (bBeganHandshaking)
 	{
@@ -996,7 +1082,7 @@ void PacketHandler::HandlerInitialized()
 void PacketHandler::HandlerComponentInitialized(HandlerComponent* InComponent)
 {
 	// Check if all handlers are initialized
-	if (State != Handler::State::Initialized)
+	if (State != UE::Handler::State::Initialized)
 	{
 		bool bAllInitialized = true;
 		bool bEncounteredComponent = false;
@@ -1138,7 +1224,7 @@ int32 PacketHandler::GetTotalReservedPacketBits()
 
 HandlerComponent::HandlerComponent()
 	: Handler(nullptr)
-	, State(Handler::Component::State::UnInitialized)
+	, State(UE::Handler::Component::State::UnInitialized)
 	, MaxOutgoingBits(0)
 	, bRequiresHandshake(false)
 	, bRequiresReliability(false)
@@ -1149,7 +1235,7 @@ HandlerComponent::HandlerComponent()
 
 HandlerComponent::HandlerComponent(FName InName)
 	: Handler(nullptr)
-	, State(Handler::Component::State::UnInitialized)
+	, State(UE::Handler::Component::State::UnInitialized)
 	, MaxOutgoingBits(0)
 	, bRequiresHandshake(false)
 	, bRequiresReliability(false)
@@ -1169,7 +1255,7 @@ void HandlerComponent::SetActive(bool Active)
 	bActive = Active;
 }
 
-void HandlerComponent::SetState(Handler::Component::State InState)
+void HandlerComponent::SetState(UE::Handler::Component::State InState)
 {
 	State = InState;
 }

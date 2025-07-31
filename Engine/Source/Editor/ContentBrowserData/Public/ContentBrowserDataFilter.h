@@ -2,19 +2,31 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "Misc/EnumClassFlags.h"
-#include "Containers/SortedMap.h"
-#include "UObject/StructOnScope.h"
 #include "CollectionManagerTypes.h"
+#include "Containers/Array.h"
+#include "Containers/Map.h"
+#include "Containers/SortedMap.h"
+#include "Containers/UnrealString.h"
+#include "CoreMinimal.h"
+#include "HAL/Platform.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/EnumClassFlags.h"
+#include "Misc/OptionalFwd.h"
+#include "Templates/SharedPointer.h"
+#include "UObject/Class.h"
+#include "UObject/NameTypes.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/StructOnScope.h"
+
 #include "ContentBrowserDataFilter.generated.h"
 
-class FBlacklistNames;
-class FBlacklistPaths;
+class FNamePermissionList;
+class FPathPermissionList;
 class UContentBrowserDataSource;
+class UContentBrowserDataSubsystem;
 
 /** Flags controlling which item types should be included */
-UENUM()
+UENUM(Flags)
 enum class EContentBrowserItemTypeFilter : uint8
 {
 	IncludeNone = 0,
@@ -25,7 +37,7 @@ enum class EContentBrowserItemTypeFilter : uint8
 ENUM_CLASS_FLAGS(EContentBrowserItemTypeFilter);
 
 /** Flags controlling which item categories should be included */
-UENUM()
+UENUM(Flags)
 enum class EContentBrowserItemCategoryFilter : uint8
 {
 	IncludeNone = 0,
@@ -38,7 +50,7 @@ enum class EContentBrowserItemCategoryFilter : uint8
 ENUM_CLASS_FLAGS(EContentBrowserItemCategoryFilter);
 
 /** Flags controlling which item attributes should be included */
-UENUM()
+UENUM(Flags)
 enum class EContentBrowserItemAttributeFilter : uint8
 {
 	IncludeNone = 0,
@@ -126,6 +138,8 @@ public:
 
 	/** Remove all filters in the list */
 	void ClearFilters();
+	
+	TArray<const UScriptStruct*> GetFilterTypes() const;
 
 private:
 	/** Set the contents of this list to be a deep copy of the contents of the other list */
@@ -133,6 +147,30 @@ private:
 
 	/** Array of typed filter structs */
 	TArray<FStructOnScope> TypedFilters;
+};
+
+struct CONTENTBROWSERDATA_API FContentBrowserDataFilterCacheID
+{
+public:
+	operator bool() const
+	{
+		return IsSet();
+	};
+
+	bool IsSet() const
+	{
+		return ID != INDEX_NONE;
+	}
+
+private:
+	friend struct FContentBrowserDataFilterCacheIDOwner;
+
+	int64 ID = INDEX_NONE;
+
+	friend uint32 GetTypeHash(const FContentBrowserDataFilterCacheID& CacheID)
+	{
+		return GetTypeHash(CacheID.ID);
+	}
 };
 
 /**
@@ -163,6 +201,9 @@ public:
 
 	/** A list of extra filter structs to be interpreted by the Content Browser data sources */
 	FContentBrowserDataFilterList ExtraFilters;
+
+	/** An optional id used by the data sources to cache and reuse some data when compiling the filter(s) */
+	FContentBrowserDataFilterCacheID CacheID;
 };
 
 /**
@@ -248,7 +289,7 @@ public:
 	bool bRecursivePackagePathsToExclude = false;
 
 	/** Optional set of additional path filtering */
-	TSharedPtr<FBlacklistPaths> PathBlacklist;
+	TSharedPtr<FPathPermissionList> PathPermissionList;
 };
 
 /**
@@ -263,11 +304,11 @@ struct CONTENTBROWSERDATA_API FContentBrowserDataClassFilter
 public:
 	/** Array of class names that should be included in this query */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="ContentBrowser")
-	TArray<FName> ClassNamesToInclude;
+	TArray<FString> ClassNamesToInclude;
 
 	/** Array of class names that should be excluded from this query */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="ContentBrowser")
-	TArray<FName> ClassNamesToExclude;
+	TArray<FString> ClassNamesToExclude;
 
 	/** Whether we should include inclusive sub-classes in this query */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="ContentBrowser")
@@ -278,7 +319,7 @@ public:
 	bool bRecursiveClassNamesToExclude = false;
 
 	/** Optional set of additional class filtering */
-	TSharedPtr<FBlacklistNames> ClassBlacklist;
+	TSharedPtr<FPathPermissionList> ClassPermissionList;
 };
 
 /**
@@ -297,4 +338,80 @@ public:
 	/** Whether we should include child collections in this query */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="ContentBrowser")
 	bool bIncludeChildCollections = false;
+};
+
+
+/**
+ * Data used to tell the content browser to show the item that doesn't pass the class permission list as a unsupported asset
+ * @note This will restrict user interaction with those asset in the content browser and only affect the asset in the folders specified in the permission list
+ */
+USTRUCT()
+struct CONTENTBROWSERDATA_API FContentBrowserDataUnsupportedClassFilter
+{
+	GENERATED_BODY()
+
+public:
+	TSharedPtr<FPathPermissionList> ClassPermissionList;
+
+	TSharedPtr<FPathPermissionList> FolderPermissionList;
+};
+
+/**
+ * ID used by the data sources to cache some data between the filter compilations
+ * How use the filter compilation cache.
+ * 1) Initialize the id by using the UContentBrowserDataSubsystem once.
+ * 2) When compiling the filters pass the Cache ID Owner to the cacheID of the ContentBrowserDataFilter.
+ * 3) When the filter settings change call RemoveUnusedCachedData to clean the cache and to remove the potential invalid data.
+ */
+struct CONTENTBROWSERDATA_API FContentBrowserDataFilterCacheIDOwner
+{
+public:
+	operator FContentBrowserDataFilterCacheID() const
+	{
+		FContentBrowserDataFilterCacheID CacheID;
+		CacheID.ID = ID;
+		return CacheID;
+	}
+
+	FContentBrowserDataFilterCacheIDOwner() = default;
+
+	FContentBrowserDataFilterCacheIDOwner(FContentBrowserDataFilterCacheIDOwner&& Other)
+		: ID(Other.ID)
+		, DataSource(MoveTemp(Other.DataSource))
+	{
+		Other.ID = INDEX_NONE;
+		Other.DataSource.Reset();
+	}
+
+	FContentBrowserDataFilterCacheIDOwner& operator=(FContentBrowserDataFilterCacheIDOwner&& Other)
+	{
+		ID = Other.ID;
+		Other.ID = INDEX_NONE;
+		Other.DataSource = MoveTemp(Other.DataSource);
+		Other.DataSource.Reset();
+
+		return *this;
+	}
+
+	~FContentBrowserDataFilterCacheIDOwner()
+	{
+		ClearCachedData();
+	}
+
+	FContentBrowserDataFilterCacheIDOwner(const FContentBrowserDataFilterCacheIDOwner&) = delete;
+	FContentBrowserDataFilterCacheIDOwner& operator=(const FContentBrowserDataFilterCacheIDOwner&) = delete;
+
+	void Initialaze(UContentBrowserDataSubsystem* InContentBrowserDataSubsystem);
+
+	void RemoveUnusedCachedData(TArrayView<const FName> InVirtualPathsInUse, const FContentBrowserDataFilter& DataFilter) const;
+
+	void ClearCachedData() const;
+
+	void Reset();
+
+private:
+	friend UContentBrowserDataSubsystem;
+
+	int64 ID = INDEX_NONE;
+	TWeakObjectPtr<UContentBrowserDataSubsystem> DataSource;
 };

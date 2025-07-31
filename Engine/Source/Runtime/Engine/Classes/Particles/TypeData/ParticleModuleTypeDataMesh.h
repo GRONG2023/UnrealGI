@@ -17,7 +17,7 @@ struct FParticleEmitterInstance;
 class UStaticMesh;
 
 UENUM()
-enum EMeshScreenAlignment
+enum EMeshScreenAlignment : int
 {
 	PSMA_MeshFaceCameraWithRoll UMETA(DisplayName="Face Camera With Roll"),
 	PSMA_MeshFaceCameraWithSpin UMETA(DisplayName="Face Camera With Spin"),
@@ -26,7 +26,7 @@ enum EMeshScreenAlignment
 };
 
 UENUM()
-enum EMeshCameraFacingUpAxis
+enum EMeshCameraFacingUpAxis : int
 {
 	CameraFacing_NoneUP UMETA(DisplayName="None"),
 	CameraFacing_ZUp UMETA(DisplayName="Z Up"),
@@ -37,7 +37,7 @@ enum EMeshCameraFacingUpAxis
 };
 
 UENUM()
-enum EMeshCameraFacingOptions
+enum EMeshCameraFacingOptions : int
 {
 	XAxisFacing_NoUp UMETA(DisplayName="X Axis Facing : No Up"),
 	XAxisFacing_ZUp UMETA(DisplayName="X Axis Facing : Z Up"),
@@ -65,7 +65,7 @@ class UParticleModuleTypeDataMesh : public UParticleModuleTypeDataBase
 
 	/** The static mesh to render at the particle positions */
 	UPROPERTY(EditAnywhere, Category=Mesh)
-	UStaticMesh* Mesh;
+	TObjectPtr<UStaticMesh> Mesh;
 
 	/** Random stream for the initial rotation distribution */
 	FRandomStream RandomStream;
@@ -224,7 +224,9 @@ class UParticleModuleTypeDataMesh : public UParticleModuleTypeDataBase
 	//~ End UParticleModule Interface
 
 	//~ Begin UParticleModuleTypeDataBase Interface
-	virtual FParticleEmitterInstance*	CreateInstance(UParticleEmitter* InEmitterParent, UParticleSystemComponent* InComponent) override;
+	virtual FParticleEmitterInstance* CreateInstance(UParticleEmitter* InEmitterParent, UParticleSystemComponent* InComponent) override;
+	virtual const FVertexFactoryType* GetVertexFactoryType() const override;
+	virtual void CollectPSOPrecacheData(const UParticleEmitter* Emitter, FPSOPrecacheParams& OutParams) override;
 	virtual bool	SupportsSpecificScreenAlignmentFlags() const override {	return true;	}	
 	virtual bool	SupportsSubUV() const override { return true; }
 	virtual bool	IsAMeshEmitter() const override { return true; }

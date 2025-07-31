@@ -1,21 +1,42 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "K2Node_SpawnActorFromClass.h"
-#include "UObject/UnrealType.h"
-#include "Engine/EngineTypes.h"
-#include "GameFramework/Actor.h"
-#include "Kismet/GameplayStatics.h"
+
+#include "Containers/EnumAsByte.h"
+#include "Containers/UnrealString.h"
 #include "EdGraph/EdGraph.h"
+#include "EdGraph/EdGraphNodeUtils.h"
+#include "EdGraph/EdGraphPin.h"
 #include "EdGraphSchema_K2.h"
+#include "Engine/Blueprint.h"
+#include "Engine/EngineTypes.h"
+#include "Engine/MemberReference.h"
+#include "GameFramework/Actor.h"
+#include "HAL/PlatformCrt.h"
+#include "HAL/PlatformMath.h"
+#include "Internationalization/Internationalization.h"
+#include "K2Node.h"
 #include "K2Node_CallFunction.h"
-#include "K2Node_Select.h"
-#include "Kismet2/BlueprintEditorUtils.h"
-#include "KismetCompilerMisc.h"
-#include "KismetCompiler.h"
-#include "BlueprintNodeSpawner.h"
-#include "EditorCategoryUtils.h"
-#include "BlueprintActionDatabaseRegistrar.h"
 #include "K2Node_EnumLiteral.h"
+#include "K2Node_Select.h"
+#include "Kismet/GameplayStatics.h"
+#include "Kismet2/BlueprintEditorUtils.h"
+#include "Kismet2/CompilerResultsLog.h"
+#include "KismetCompiler.h"
+#include "KismetCompilerMisc.h"
+#include "Math/Transform.h"
+#include "Misc/AssertionMacros.h"
+#include "Styling/AppStyle.h"
+#include "Templates/Casts.h"
+#include "Templates/SubclassOf.h"
+#include "Templates/UnrealTemplate.h"
+#include "UObject/Class.h"
+#include "UObject/NameTypes.h"
+#include "UObject/Object.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/UE5MainStreamObjectVersion.h"
+
+struct FLinearColor;
 
 struct FK2Node_SpawnActorFromClassHelper
 {
@@ -23,6 +44,7 @@ struct FK2Node_SpawnActorFromClassHelper
 	static const FName SpawnEvenIfCollidingPinName;
 	static const FName NoCollisionFailPinName;
 	static const FName CollisionHandlingOverridePinName;
+	static const FName TransformScaleMethodPinName;
 	static const FName OwnerPinName;
 };
 
@@ -30,6 +52,7 @@ const FName FK2Node_SpawnActorFromClassHelper::SpawnTransformPinName(TEXT("Spawn
 const FName FK2Node_SpawnActorFromClassHelper::SpawnEvenIfCollidingPinName(TEXT("SpawnEvenIfColliding"));		// deprecated pin, name kept for backwards compat
 const FName FK2Node_SpawnActorFromClassHelper::NoCollisionFailPinName(TEXT("bNoCollisionFail"));		// deprecated pin, name kept for backwards compat
 const FName FK2Node_SpawnActorFromClassHelper::CollisionHandlingOverridePinName(TEXT("CollisionHandlingOverride"));
+const FName FK2Node_SpawnActorFromClassHelper::TransformScaleMethodPinName(TEXT("TransformScaleMethod"));
 const FName FK2Node_SpawnActorFromClassHelper::OwnerPinName(TEXT("Owner"));
 
 #define LOCTEXT_NAMESPACE "K2Node_SpawnActorFromClass"
@@ -54,10 +77,16 @@ void UK2Node_SpawnActorFromClass::AllocateDefaultPins()
 	UEdGraphPin* TransformPin = CreatePin(EGPD_Input, UEdGraphSchema_K2::PC_Struct, TransformStruct, FK2Node_SpawnActorFromClassHelper::SpawnTransformPinName);
 
 	// Collision handling method pin
-	UEnum* const MethodEnum = FindObjectChecked<UEnum>(ANY_PACKAGE, TEXT("ESpawnActorCollisionHandlingMethod"), true);
-	UEdGraphPin* const CollisionHandlingOverridePin = CreatePin(EGPD_Input, UEdGraphSchema_K2::PC_Byte, MethodEnum, FK2Node_SpawnActorFromClassHelper::CollisionHandlingOverridePinName);
-	CollisionHandlingOverridePin->DefaultValue = MethodEnum->GetNameStringByValue(static_cast<int>(ESpawnActorCollisionHandlingMethod::Undefined));
-
+	UEnum* const CollisionMethodEnum = StaticEnum<ESpawnActorCollisionHandlingMethod>();
+	UEdGraphPin* const CollisionHandlingOverridePin = CreatePin(EGPD_Input, UEdGraphSchema_K2::PC_Byte, CollisionMethodEnum, FK2Node_SpawnActorFromClassHelper::CollisionHandlingOverridePinName);
+	CollisionHandlingOverridePin->DefaultValue = CollisionMethodEnum->GetNameStringByValue(static_cast<int>(ESpawnActorCollisionHandlingMethod::Undefined));
+	
+	// Pin to set transform scaling behavior (ie whether to multiply scale with root component or to just ignore the root component default scale)
+	UEnum* const ScaleMethodEnum = StaticEnum<ESpawnActorScaleMethod>();
+	UEdGraphPin* const ScaleMethodPin = CreatePin(EGPD_Input, UEdGraphSchema_K2::PC_Byte, ScaleMethodEnum, FK2Node_SpawnActorFromClassHelper::TransformScaleMethodPinName);
+	ScaleMethodPin->DefaultValue = ScaleMethodEnum->GetNameStringByValue(static_cast<int>(ESpawnActorScaleMethod::SelectDefaultAtRuntime));
+	ScaleMethodPin->bAdvancedView = true;
+	
 	UEdGraphPin* OwnerPin = CreatePin(EGPD_Input, UEdGraphSchema_K2::PC_Object, AActor::StaticClass(), FK2Node_SpawnActorFromClassHelper::OwnerPinName);
 	OwnerPin->bAdvancedView = true;
 	if (ENodeAdvancedPins::NoPins == AdvancedPinDisplay)
@@ -82,7 +111,7 @@ void UK2Node_SpawnActorFromClass::MaybeUpdateCollisionPin(TArray<UEdGraphPin*>& 
 				UEdGraphPin* const CollisionHandlingOverridePin = GetCollisionHandlingOverridePin();
 				if (CollisionHandlingOverridePin)
 				{
-					UEnum const* const MethodEnum = FindObjectChecked<UEnum>(ANY_PACKAGE, TEXT("ESpawnActorCollisionHandlingMethod"), true);
+					UEnum const* const MethodEnum = FindObjectChecked<UEnum>(nullptr, TEXT("/Script/Engine.ESpawnActorCollisionHandlingMethod"), true);
 					CollisionHandlingOverridePin->DefaultValue =
 						bOldCollisionPinValue
 						? MethodEnum->GetNameStringByValue(static_cast<int>(ESpawnActorCollisionHandlingMethod::AlwaysSpawn))
@@ -97,7 +126,7 @@ void UK2Node_SpawnActorFromClass::MaybeUpdateCollisionPin(TArray<UEdGraphPin*>& 
 				UEdGraphPin* const CollisionHandlingOverridePin = GetCollisionHandlingOverridePin();
 				check(CollisionHandlingOverridePin);
 
-				UEnum* const MethodEnum = FindObjectChecked<UEnum>(ANY_PACKAGE, TEXT("ESpawnActorCollisionHandlingMethod"), true);
+				UEnum* const MethodEnum = FindObjectChecked<UEnum>(nullptr, TEXT("/Script/Engine.ESpawnActorCollisionHandlingMethod"), true);
 				
 				FGraphNodeCreator<UK2Node_EnumLiteral> AlwaysSpawnLiteralCreator(*GetGraph());
 				UK2Node_EnumLiteral* const AlwaysSpawnLiteralNode = AlwaysSpawnLiteralCreator.CreateNode();
@@ -207,6 +236,7 @@ bool UK2Node_SpawnActorFromClass::IsSpawnVarPin(UEdGraphPin* Pin) const
 	}
 
 	return(	Super::IsSpawnVarPin(Pin) &&
+			Pin->PinName != FK2Node_SpawnActorFromClassHelper::TransformScaleMethodPinName &&
 			Pin->PinName != FK2Node_SpawnActorFromClassHelper::CollisionHandlingOverridePinName &&
 			Pin->PinName != FK2Node_SpawnActorFromClassHelper::SpawnTransformPinName && 
 			Pin->PinName != FK2Node_SpawnActorFromClassHelper::OwnerPinName );
@@ -234,7 +264,7 @@ void UK2Node_SpawnActorFromClass::GetPinHoverText(const UEdGraphPin& Pin, FStrin
 
 FSlateIcon UK2Node_SpawnActorFromClass::GetIconAndTint(FLinearColor& OutColor) const
 {
-	static FSlateIcon Icon("EditorStyle", "GraphEditor.SpawnActor_16x");
+	static FSlateIcon Icon(FAppStyle::GetAppStyleSetName(), "GraphEditor.SpawnActor_16x");
 	return Icon;
 }
 
@@ -250,6 +280,18 @@ UEdGraphPin* UK2Node_SpawnActorFromClass::GetCollisionHandlingOverridePin() cons
 	UEdGraphPin* const Pin = FindPinChecked(FK2Node_SpawnActorFromClassHelper::CollisionHandlingOverridePinName);
 	check(Pin->Direction == EGPD_Input);
 	return Pin;
+}
+
+UEdGraphPin* UK2Node_SpawnActorFromClass::GetScaleMethodPin() const
+{
+	UEdGraphPin* const Pin = FindPinChecked(FK2Node_SpawnActorFromClassHelper::TransformScaleMethodPinName);
+	check(Pin->Direction == EGPD_Input);
+	return Pin;
+}
+
+UEdGraphPin* UK2Node_SpawnActorFromClass::TryGetScaleMethodPin() const
+{
+	return FindPin(FK2Node_SpawnActorFromClassHelper::TransformScaleMethodPinName, EGPD_Input);
 }
 
 UEdGraphPin* UK2Node_SpawnActorFromClass::GetOwnerPin() const
@@ -308,6 +350,77 @@ bool UK2Node_SpawnActorFromClass::IsCompatibleWithGraph(const UEdGraph* TargetGr
 	return Super::IsCompatibleWithGraph(TargetGraph) && (!Blueprint || (FBlueprintEditorUtils::FindUserConstructionScript(Blueprint) != TargetGraph && Blueprint->GeneratedClass->GetDefaultObject()->ImplementsGetWorld()));
 }
 
+void UK2Node_SpawnActorFromClass::PostPlacedNewNode()
+{
+	UEdGraphPin* const ScaleMethodPin = GetScaleMethodPin();
+	const UEnum* const ScaleMethodEnum = StaticEnum<ESpawnActorScaleMethod>();
+	ScaleMethodPin->DefaultValue = ScaleMethodEnum->GetNameStringByValue(static_cast<int>(ESpawnActorScaleMethod::MultiplyWithRoot));
+}
+
+void UK2Node_SpawnActorFromClass::Serialize(FArchive& Ar)
+{
+	Super::Serialize(Ar);
+	Ar.UsingCustomVersion(FUE5MainStreamObjectVersion::GUID);
+}
+
+void UK2Node_SpawnActorFromClass::PostLoad()
+{
+	FixupScaleMethodPin();
+	Super::PostLoad();
+}
+
+void UK2Node_SpawnActorFromClass::FixupScaleMethodPin()
+{
+	// if this node is being diffed, don't fix up anything. Keep the legacy pins
+	const UPackage* Package = GetPackage();
+	if (Package && Package->HasAnyPackageFlags(PKG_ForDiffing))
+	{
+		return;
+	}
+
+	// For the sake of cook determinism, leave the scale method as ESpawnActorScaleMethod::SelectDefaultAtRuntime when cooking.
+	// This shouldn't impact runtime behavior.
+	if (IsRunningCookCommandlet())
+	{
+		return;
+	}
+
+	if (GetLinkerCustomVersion(FUE5MainStreamObjectVersion::GUID) < FUE5MainStreamObjectVersion::SpawnActorFromClassTransformScaleMethod)
+	{
+        if (UEdGraphPin* const ScaleMethodPin = TryGetScaleMethodPin())
+        {
+			const UEdGraphPin* const ClassPin = FindPin(TEXT( "Class" ));
+	        const UEnum* const ScaleMethodEnum = StaticEnum<ESpawnActorScaleMethod>();
+            if (const UClass* Class = Cast<UClass>(ClassPin->DefaultObject))
+            {
+            	if (const AActor* ActorCDO = Cast<AActor>(Class->ClassDefaultObject))
+                {
+                    if (const USceneComponent* Root = ActorCDO->GetRootComponent()) // native root component
+                    {
+                        ScaleMethodPin->DefaultValue = ScaleMethodEnum->GetNameStringByValue(static_cast<int>(ESpawnActorScaleMethod::MultiplyWithRoot));
+                    }
+                    else
+                    {
+                        ScaleMethodPin->DefaultValue = ScaleMethodEnum->GetNameStringByValue(static_cast<int>(ESpawnActorScaleMethod::OverrideRootScale));
+                    }
+                }
+            }
+            else
+            {
+            	// if the class can't be determined during compile time, defer the default value to runtime
+            	ScaleMethodPin->DefaultValue = ScaleMethodEnum->GetNameStringByValue(static_cast<int>(ESpawnActorScaleMethod::SelectDefaultAtRuntime));
+            }
+        }
+        else
+        {
+	        UE_LOG(LogBlueprint, Warning, TEXT("Blueprint Node '%s' is missing '%s' pin. Proceeding as if it's default is SelectDefaultAtRuntime"),
+	        	*GetNodeTitle(ENodeTitleType::FullTitle).ToString(),
+	        	*FK2Node_SpawnActorFromClassHelper::TransformScaleMethodPinName.ToString()
+	        )
+        }
+	}
+}
+
 void UK2Node_SpawnActorFromClass::GetNodeAttributes( TArray<TKeyValuePair<FString, FString>>& OutNodeAttributes ) const
 {
 	UClass* ClassToSpawn = GetClassToSpawn();
@@ -327,6 +440,9 @@ void UK2Node_SpawnActorFromClass::ExpandNode(class FKismetCompilerContext& Compi
 {
 	Super::ExpandNode(CompilerContext, SourceGraph);
 
+	// make sure that if scale method needs to be given a default value, it gets it
+	FixupScaleMethodPin();
+
 	static const FName BeginSpawningBlueprintFuncName = GET_FUNCTION_NAME_CHECKED(UGameplayStatics, BeginDeferredActorSpawnFromClass);
 	static const FName ActorClassParamName(TEXT("ActorClass"));
 	static const FName WorldContextParamName(TEXT("WorldContextObject"));
@@ -345,6 +461,7 @@ void UK2Node_SpawnActorFromClass::ExpandNode(class FKismetCompilerContext& Compi
 	UEdGraphPin* SpawnNodeExec = SpawnNode->GetExecPin();
 	UEdGraphPin* SpawnNodeTransform = SpawnNode->GetSpawnTransformPin();
 	UEdGraphPin* SpawnNodeCollisionHandlingOverride = GetCollisionHandlingOverridePin();
+	UEdGraphPin* SpawnNodeScaleMethod = TryGetScaleMethodPin();
 	UEdGraphPin* SpawnWorldContextPin = SpawnNode->GetWorldContextPin();
 	UEdGraphPin* SpawnClassPin = SpawnNode->GetClassPin();
 	UEdGraphPin* SpawnNodeOwnerPin = SpawnNode->GetOwnerPin();
@@ -373,6 +490,7 @@ void UK2Node_SpawnActorFromClass::ExpandNode(class FKismetCompilerContext& Compi
 	UEdGraphPin* CallBeginWorldContextPin = CallBeginSpawnNode->FindPinChecked(WorldContextParamName);
 	UEdGraphPin* CallBeginActorClassPin = CallBeginSpawnNode->FindPinChecked(ActorClassParamName);
 	UEdGraphPin* CallBeginTransform = CallBeginSpawnNode->FindPinChecked(TransformParamName);
+	UEdGraphPin* CallBeginScaleMethod = CallBeginSpawnNode->FindPinChecked(FK2Node_SpawnActorFromClassHelper::TransformScaleMethodPinName);
 	UEdGraphPin* CallBeginCollisionHandlingOverride = CallBeginSpawnNode->FindPinChecked(CollisionHandlingOverrideParamName);
 
 	UEdGraphPin* CallBeginOwnerPin = CallBeginSpawnNode->FindPinChecked(FK2Node_SpawnActorFromClassHelper::OwnerPinName);
@@ -406,8 +524,20 @@ void UK2Node_SpawnActorFromClass::ExpandNode(class FKismetCompilerContext& Compi
 	// Copy the 'transform' connection from the spawn node to 'begin spawn'
 	CompilerContext.MovePinLinksToIntermediate(*SpawnNodeTransform, *CallBeginTransform);
 
-	// Copy the 'bNoCollisionFail' connection from the spawn node to 'begin spawn'
+	// Copy the 'CollisionHandlingOverride' connection from the spawn node to 'begin spawn'
 	CompilerContext.MovePinLinksToIntermediate(*SpawnNodeCollisionHandlingOverride, *CallBeginCollisionHandlingOverride);
+
+	// Copy the 'ScaleMethod' connection from the spawn node to 'begin spawn'
+	if (SpawnNodeScaleMethod)
+	{
+		CompilerContext.MovePinLinksToIntermediate(*SpawnNodeScaleMethod, *CallBeginScaleMethod);
+	}
+	else
+	{
+		// if for some reason we couldn't find scale method pin on the spawn node, defer it's value to runtime
+	    const UEnum* const ScaleMethodEnum = StaticEnum<ESpawnActorScaleMethod>();
+		CallBeginScaleMethod->DefaultValue = ScaleMethodEnum->GetNameStringByValue(static_cast<int>(ESpawnActorScaleMethod::SelectDefaultAtRuntime));
+	}
 
 	//////////////////////////////////////////////////////////////////////////
 	// create 'finish spawn' call node
@@ -419,6 +549,7 @@ void UK2Node_SpawnActorFromClass::ExpandNode(class FKismetCompilerContext& Compi
 	UEdGraphPin* CallFinishThen = CallFinishSpawnNode->GetThenPin();
 	UEdGraphPin* CallFinishActor = CallFinishSpawnNode->FindPinChecked(ActorParamName);
 	UEdGraphPin* CallFinishTransform = CallFinishSpawnNode->FindPinChecked(TransformParamName);
+	UEdGraphPin* CallFinishScaleMethod = CallFinishSpawnNode->FindPinChecked(FK2Node_SpawnActorFromClassHelper::TransformScaleMethodPinName);
 	UEdGraphPin* CallFinishResult = CallFinishSpawnNode->GetReturnValuePin();
 
 	// Move 'then' connection from spawn node to 'finish spawn'
@@ -426,6 +557,9 @@ void UK2Node_SpawnActorFromClass::ExpandNode(class FKismetCompilerContext& Compi
 
 	// Copy transform connection
 	CompilerContext.CopyPinLinksToIntermediate(*CallBeginTransform, *CallFinishTransform);
+ 
+	// Copy 'ScaleMethod' connection
+	CompilerContext.CopyPinLinksToIntermediate(*CallBeginScaleMethod, *CallFinishScaleMethod);
 
 	// Connect output actor from 'begin' to 'finish'
 	CallBeginResult->MakeLinkTo(CallFinishActor);

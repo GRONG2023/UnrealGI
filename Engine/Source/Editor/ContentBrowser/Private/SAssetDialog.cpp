@@ -1,43 +1,81 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "SAssetDialog.h"
-#include "Misc/MessageDialog.h"
-#include "Widgets/SBoxPanel.h"
-#include "Layout/WidgetPath.h"
-#include "SlateOptMacros.h"
-#include "Framework/Application/SlateApplication.h"
-#include "Widgets/Layout/SBorder.h"
-#include "Widgets/Text/STextBlock.h"
-#include "Widgets/Layout/SBox.h"
-#include "Widgets/Input/SEditableTextBox.h"
-#include "Widgets/Input/SButton.h"
-#include "Widgets/Layout/SSplitter.h"
-#include "EditorStyleSet.h"
-#include "AssetRegistryModule.h"
-#include "ContentBrowserSingleton.h"
-#include "ContentBrowserUtils.h"
 
-#include "Framework/MultiBox/MultiBoxBuilder.h"
+#include "AssetRegistry/ARFilter.h"
+#include "AssetRegistry/AssetData.h"
+#include "AssetRegistry/AssetRegistryModule.h"
+#include "AssetRegistry/IAssetRegistry.h"
+#include "AssetViewUtils.h"
+#include "Containers/ArrayView.h"
+#include "Containers/Map.h"
 #include "ContentBrowserCommands.h"
-#include "Framework/Commands/GenericCommands.h"
-#include "SPathPicker.h"
-#include "SAssetPicker.h"
-#include "AssetViewTypes.h"
-#include "ObjectTools.h"
-
-#include "SPathView.h"
-#include "SAssetView.h"
-#include "Widgets/Notifications/SNotificationList.h"
-#include "Framework/Notifications/NotificationManager.h"
-#include "Editor/EditorEngine.h"
-#include "HAL/FileManager.h"
-#include "CoreMinimal.h"
-#include "SourceCodeNavigation.h"
-#include "Editor.h"
-
-#include "IContentBrowserDataModule.h"
 #include "ContentBrowserDataSource.h"
 #include "ContentBrowserDataSubsystem.h"
+#include "ContentBrowserItem.h"
+#include "ContentBrowserItemData.h"
+#include "ContentBrowserPluginFilters.h"
+#include "ContentBrowserSingleton.h"
+#include "ContentBrowserUtils.h"
+#include "CoreGlobals.h"
+#include "Delegates/Delegate.h"
+#include "Editor.h"
+#include "Editor/EditorEngine.h"
+#include "Framework/Application/SlateApplication.h"
+#include "Framework/Commands/GenericCommands.h"
+#include "Framework/Commands/UIAction.h"
+#include "Framework/Commands/UICommandList.h"
+#include "Framework/MultiBox/MultiBoxBuilder.h"
+#include "Framework/Notifications/NotificationManager.h"
+#include "Framework/SlateDelegates.h"
+#include "Framework/Views/ITypedTableView.h"
+#include "HAL/FileManager.h"
+#include "HAL/PlatformCrt.h"
+#include "HAL/PlatformMisc.h"
+#include "HAL/PlatformProcess.h"
+#include "IContentBrowserDataModule.h"
+#include "Input/Events.h"
+#include "InputCoreTypes.h"
+#include "Layout/Children.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/Attribute.h"
+#include "Misc/MessageDialog.h"
+#include "Misc/PackageName.h"
+#include "Misc/Paths.h"
+#include "Modules/ModuleManager.h"
+#include "SAssetPicker.h"
+#include "SAssetView.h"
+#include "SPathPicker.h"
+#include "SPathView.h"
+#include "SPrimaryButton.h"
+#include "SlateOptMacros.h"
+#include "SlotBase.h"
+#include "SourcesData.h"
+#include "SWarningOrErrorBox.h"
+#include "Styling/AppStyle.h"
+#include "Templates/Tuple.h"
+#include "Templates/UnrealTemplate.h"
+#include "Textures/SlateIcon.h"
+#include "Types/SlateStructs.h"
+#include "Types/WidgetActiveTimerDelegate.h"
+#include "UObject/Class.h"
+#include "UObject/TopLevelAssetPath.h"
+#include "UObject/UObjectGlobals.h"
+#include "UObject/UnrealNames.h"
+#include "Widgets/Input/SButton.h"
+#include "Widgets/Input/SEditableTextBox.h"
+#include "Widgets/Layout/SBorder.h"
+#include "Widgets/Layout/SBox.h"
+#include "Widgets/Layout/SSplitter.h"
+#include "Widgets/Notifications/SNotificationList.h"
+#include "Widgets/SBoxPanel.h"
+#include "Widgets/SWindow.h"
+#include "Widgets/Text/STextBlock.h"
+
+class FExtender;
+class SWidget;
+struct FGeometry;
+struct FWorldContext;
 
 #define LOCTEXT_NAMESPACE "ContentBrowser"
 
@@ -76,10 +114,10 @@ void SAssetDialog::Construct(const FArguments& InArgs, const FSharedAssetDialogC
 	PathPickerConfig.OnPathSelected = FOnPathSelected::CreateSP(this, &SAssetDialog::HandlePathSelected);
 	PathPickerConfig.SetPathsDelegates.Add(&SetPathsDelegate);
 	PathPickerConfig.OnGetFolderContextMenu = FOnGetFolderContextMenu::CreateSP(this, &SAssetDialog::OnGetFolderContextMenu);	
+	PathPickerConfig.bOnPathSelectedPassesVirtualPaths = true;
 
 	FAssetPickerConfig AssetPickerConfig;
-	AssetPickerConfig.Filter.ClassNames.Append(AssetClassNames);
-	AssetPickerConfig.Filter.PackagePaths.Add(FName(*DefaultPath));
+	AssetPickerConfig.Filter.ClassPaths.Append(AssetClassNames);
 	AssetPickerConfig.bAllowDragging = false;
 	AssetPickerConfig.InitialAssetViewType = EAssetViewType::Tile;
 	AssetPickerConfig.OnAssetSelected = FOnAssetSelected::CreateSP(this, &SAssetDialog::OnAssetSelected);
@@ -95,12 +133,14 @@ void SAssetDialog::Construct(const FArguments& InArgs, const FSharedAssetDialogC
 
 	OnPathSelected = InConfig.OnPathSelected;
 
-	SetCurrentlySelectedPath(DefaultPath);
+	SetCurrentlySelectedPath(DefaultPath, EContentBrowserPathType::Internal);
 
 	// Open and save specific configuration
 	FText ConfirmButtonText;
 	bool bIncludeNameBox = false;
-	if ( DialogType == EAssetDialogType::Open )
+	switch (DialogType)
+	{
+	case EAssetDialogType::Open:
 	{
 		const FOpenAssetDialogConfig& OpenAssetConfig = static_cast<const FOpenAssetDialogConfig&>(InConfig);
 		PathPickerConfig.bAllowContextMenu = true;
@@ -108,25 +148,78 @@ void SAssetDialog::Construct(const FArguments& InArgs, const FSharedAssetDialogC
 		AssetPickerConfig.SelectionMode = OpenAssetConfig.bAllowMultipleSelection ? ESelectionMode::Multi : ESelectionMode::Single;
 		AssetPickerConfig.bFocusSearchBoxWhenOpened = true;
 		bIncludeNameBox = false;
+		break;
 	}
-	else if ( DialogType == EAssetDialogType::Save )
+
+	case EAssetDialogType::Save:
 	{
 		const FSaveAssetDialogConfig& SaveAssetConfig = static_cast<const FSaveAssetDialogConfig&>(InConfig);
 		PathPickerConfig.bAllowContextMenu = true;
+		PathPickerConfig.bAllowReadOnlyFolders = false;
 		ConfirmButtonText = LOCTEXT("AssetDialogSaveButton", "Save");
 		AssetPickerConfig.SelectionMode = ESelectionMode::Single;
 		AssetPickerConfig.bFocusSearchBoxWhenOpened = false;
+		AssetPickerConfig.bCanShowReadOnlyFolders = false;
 		bIncludeNameBox = true;
 		ExistingAssetPolicy = SaveAssetConfig.ExistingAssetPolicy;
 		SetCurrentlyEnteredAssetName(SaveAssetConfig.DefaultAssetName);
+		break;
 	}
-	else
-	{
+
+	default:
 		ensureMsgf(0, TEXT("AssetDialog type %d is not supported."), DialogType);
+		break;
 	}
 
 	PathPicker = StaticCastSharedRef<SPathPicker>(FContentBrowserSingleton::Get().CreatePathPicker(PathPickerConfig));
+
+	TArray<FString> SelectedVirtualPaths = PathPicker->GetPaths();
+	if (SelectedVirtualPaths.Num() == 0)
+	{
+		// No paths selected, choose PathView's default selection
+		const TSharedPtr<SPathView>& PathView = PathPicker->GetPathView();
+		const TArray<FName> DefaultPathsToSelect = PathView->GetDefaultPathsToSelect();
+		if (DefaultPathsToSelect.Num() > 0)
+		{
+			// Try select path
+			PathPicker->SetPaths({ DefaultPathsToSelect[0].ToString() });
+
+			// Get paths that were successfully selected
+			SelectedVirtualPaths = PathPicker->GetPaths();
+		}
+
+		if (SelectedVirtualPaths.Num() == 0)
+		{
+			// No paths selected, choose selection based on first root folder displayed in PathView
+			const TArray<FName> RootPathItemNames = PathView->GetRootPathItemNames();
+			if (RootPathItemNames.Num() > 0)
+			{
+				// Try select path
+				PathPicker->SetPaths({ FString(TEXT("/")) + RootPathItemNames[0].ToString() });
+
+				// Get paths that were successfully selected
+				SelectedVirtualPaths = PathPicker->GetPaths();
+			}
+		}
+	}
+
+	// Update AssetPickerConfig's selection to match PathPicker
+	if (SelectedVirtualPaths.Num() > 0)
+	{
+		AssetPickerConfig.Filter.PackagePaths = { FName(*SelectedVirtualPaths[0]) };
+	}
+
 	AssetPicker = StaticCastSharedRef<SAssetPicker>(FContentBrowserSingleton::Get().CreateAssetPicker(AssetPickerConfig));
+
+	// Update AssetDialog's path to match PathPicker
+	if (SelectedVirtualPaths.Num() > 0)
+	{
+		const FName DefaultVirtualPath = IContentBrowserDataModule::Get().GetSubsystem()->ConvertInternalPathToVirtual(*DefaultPath);
+		if (DefaultVirtualPath != *SelectedVirtualPaths[0])
+		{
+			SetCurrentlySelectedPath(SelectedVirtualPaths[0], EContentBrowserPathType::Virtual);
+		}
+	}
 
 	FContentBrowserCommands::Register();
 	BindCommands();
@@ -145,7 +238,7 @@ void SAssetDialog::Construct(const FArguments& InArgs, const FSharedAssetDialogC
 			.Value(0.25f)
 			[
 				SNew(SBorder)
-				.BorderImage(FEditorStyle::GetBrush("ToolPanel.GroupBorder"))
+				.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
 				[
 					PathPicker.ToSharedRef()
 				]
@@ -155,7 +248,7 @@ void SAssetDialog::Construct(const FArguments& InArgs, const FSharedAssetDialogC
 			.Value(0.75f)
 			[
 				SNew(SBorder)
-				.BorderImage(FEditorStyle::GetBrush("ToolPanel.GroupBorder"))
+				.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
 				[
 					AssetPicker.ToSharedRef()
 				]
@@ -169,20 +262,12 @@ void SAssetDialog::Construct(const FArguments& InArgs, const FSharedAssetDialogC
 		MainVerticalBox->AddSlot()
 		.AutoHeight()
 		[
-			// Constant height, whether the label is visible or not
-			SNew(SBox).HeightOverride(18)
-			[
-				SNew(SBorder)
-				.Visibility( this, &SAssetDialog::GetNameErrorLabelVisibility )
-				.BorderImage( FEditorStyle::GetBrush("AssetDialog.ErrorLabelBorder") )
-				.Content()
-				[
-					SNew(STextBlock)
-					.Text( this, &SAssetDialog::GetNameErrorLabelText )
-					.ToolTipText(this, &SAssetDialog::GetNameErrorLabelText)
-					.TextStyle( FEditorStyle::Get(), "AssetDialog.ErrorLabelFont" )
-				]
-			]
+			SNew(SWarningOrErrorBox)
+			.Padding(FMargin(8.0f, 4.0f, 4.0f, 4.0f))
+			.IconSize(FVector2D(16,16))
+			.MessageStyle(EMessageStyle::Error)
+			.Message(this, &SAssetDialog::GetNameErrorLabelText)
+			.Visibility(this, &SAssetDialog::GetNameErrorLabelVisibility)
 		];
 	}
 
@@ -190,7 +275,7 @@ void SAssetDialog::Construct(const FArguments& InArgs, const FSharedAssetDialogC
 		+ SVerticalBox::Slot()
 		.FillHeight(1)
 		.VAlign(VAlign_Center)
-		.Padding(0, 2, 0, 2)
+		.Padding(0, 4, 0, 4)
 		[
 			SNew(STextBlock).Text(LOCTEXT("PathBoxLabel", "Path:"))
 		];
@@ -199,7 +284,7 @@ void SAssetDialog::Construct(const FArguments& InArgs, const FSharedAssetDialogC
 		+ SVerticalBox::Slot()
 		.FillHeight(1)
 		.VAlign(VAlign_Center)
-		.Padding(0, 2, 0, 2)
+		.Padding(0, 4, 0, 4)
 		[
 			SAssignNew(PathText, STextBlock)
 			.Text(this, &SAssetDialog::GetPathNameText)
@@ -210,15 +295,15 @@ void SAssetDialog::Construct(const FArguments& InArgs, const FSharedAssetDialogC
 		LabelsBox->AddSlot()
 			.FillHeight(1)
 			.VAlign(VAlign_Center)
-			.Padding(0, 2, 0, 2)
+			.Padding(0, 4, 0, 4)
 			[
 				SNew(STextBlock).Text(LOCTEXT("NameBoxLabel", "Name:"))
 			];
 
 		ContentBox->AddSlot()
-			.FillHeight(1)
+			.AutoHeight() 
 			.VAlign(VAlign_Center)
-			.Padding(0, 2, 0, 2)
+			.Padding(0, 0, 0, 0)
 			[
 				SAssignNew(NameEditableText, SEditableTextBox)
 				.Text(this, &SAssetDialog::GetAssetNameText)
@@ -234,35 +319,34 @@ void SAssetDialog::Construct(const FArguments& InArgs, const FSharedAssetDialogC
 		.AutoWidth()
 		.HAlign(HAlign_Right)
 		.VAlign(VAlign_Bottom)
-		.Padding(bIncludeNameBox ? 80 : 4, 20, 4, 3)
+		.Padding(0.f, 0.f, 4.f, 0.f)
 		[
 			LabelsBox
 		]
 		+ SHorizontalBox::Slot()
 		.FillWidth(1)
 		.VAlign(VAlign_Bottom)
-		.Padding(4, 3)
+		.Padding(4.f, 0.f) 
 		[
 			ContentBox
 		]
 		+ SHorizontalBox::Slot()
 		.AutoWidth()
 		.VAlign(VAlign_Bottom)
-		.Padding(4, 3)
+		.Padding(4.f, 0.f) 
 		[
-			SNew(SButton)
+			SNew(SPrimaryButton)
 			.Text(ConfirmButtonText)
-			.ContentPadding(FMargin(8, 2, 8, 2))
 			.IsEnabled(this, &SAssetDialog::IsConfirmButtonEnabled)
 			.OnClicked(this, &SAssetDialog::OnConfirmClicked)
 		]
 		+ SHorizontalBox::Slot()
 		.AutoWidth()
 		.VAlign(VAlign_Bottom)
-		.Padding(4, 3)
+		.Padding(4.f, 0.f, 0.0f, 0.0f) 
 		[
 			SNew(SButton)
-			.ContentPadding(FMargin(8, 2, 8, 2))
+			.TextStyle(FAppStyle::Get(), "DialogButtonText")
 			.Text(LOCTEXT("AssetDialogCancelButton", "Cancel"))
 			.OnClicked(this, &SAssetDialog::OnCancelClicked)
 		];
@@ -270,7 +354,7 @@ void SAssetDialog::Construct(const FArguments& InArgs, const FSharedAssetDialogC
 	MainVerticalBox->AddSlot()
 		.AutoHeight()
 		.HAlign(HAlign_Fill)
-		.Padding(0)
+		.Padding(16.f, 4.f, 16.f, 16.f)
 		[
 			ButtonsAndNameBox
 		];
@@ -375,51 +459,82 @@ void SAssetDialog::ExecuteDelete()
 		}
 	}
 
-	const TArray<FContentBrowserItem> SelectedFiles = AssetPicker->GetAssetView()->GetSelectedFileItems();
-	const TArray<FContentBrowserItem> SelectedFolders = AssetPicker->GetAssetView()->GetSelectedFolderItems();
-
-	// Batch these by their data sources
-	TMap<UContentBrowserDataSource*, TArray<FContentBrowserItemData>> SourcesAndItems;
-	for (const FContentBrowserItem& SelectedItem : SelectedFiles)
+	if (OpenedContextMenuWidget != EOpenedContextMenuWidget::PathView)
 	{
-		FContentBrowserItem::FItemDataArrayView ItemDataArray = SelectedItem.GetInternalItems();
-		for (const FContentBrowserItemData& ItemData : ItemDataArray)
+		const TArray<FContentBrowserItem> SelectedFiles = AssetPicker->GetAssetView()->GetSelectedFileItems();
+
+		// Batch these by their data sources
+		TMap<UContentBrowserDataSource*, TArray<FContentBrowserItemData>> SourcesAndItems;
+		for (const FContentBrowserItem& SelectedItem : SelectedFiles)
 		{
-			if (UContentBrowserDataSource* ItemDataSource = ItemData.GetOwnerDataSource())
+			FContentBrowserItem::FItemDataArrayView ItemDataArray = SelectedItem.GetInternalItems();
+			for (const FContentBrowserItemData& ItemData : ItemDataArray)
 			{
-				FText DeleteErrorMsg;
-				if (ItemDataSource->CanDeleteItem(ItemData, &DeleteErrorMsg))
+				if (UContentBrowserDataSource* ItemDataSource = ItemData.GetOwnerDataSource())
 				{
-					TArray<FContentBrowserItemData>& ItemsForSource = SourcesAndItems.FindOrAdd(ItemDataSource);
-					ItemsForSource.Add(ItemData);
+					FText DeleteErrorMsg;
+					if (ItemDataSource->CanDeleteItem(ItemData, &DeleteErrorMsg))
+					{
+						TArray<FContentBrowserItemData>& ItemsForSource = SourcesAndItems.FindOrAdd(ItemDataSource);
+						ItemsForSource.Add(ItemData);
+					}
+					else
+					{
+						AssetViewUtils::ShowErrorNotifcation(DeleteErrorMsg);
+					}
 				}
-				else
+			}
+		}
+
+		// Execute the operation now
+		for (const auto& SourceAndItemsPair : SourcesAndItems)
+		{
+			SourceAndItemsPair.Key->BulkDeleteItems(SourceAndItemsPair.Value);
+		}
+	}
+
+	// List selected folders that can be deleted
+	FText FirstFolderDisplayName;
+	TArray<FString> SelectedFolderInternalPaths;
+	{
+		const TArray<FContentBrowserItem> SelectedFolderItems = (OpenedContextMenuWidget == EOpenedContextMenuWidget::PathView) ?
+			PathPicker->GetPathView()->GetSelectedFolderItems() :
+			AssetPicker->GetAssetView()->GetSelectedFolderItems();
+
+		for (const FContentBrowserItem& SelectedItem : SelectedFolderItems)
+		{
+			if (SelectedItem.CanDelete())
+			{
+				// Only internal folders supported currently
+				const FName ConvertedPath = SelectedItem.GetInternalPath();
+				if (!ConvertedPath.IsNone())
 				{
-					AssetViewUtils::ShowErrorNotifcation(DeleteErrorMsg);
+					if (SelectedFolderInternalPaths.Num() == 0)
+					{
+						FirstFolderDisplayName = SelectedItem.GetDisplayName();
+					}
+
+					SelectedFolderInternalPaths.Add(ConvertedPath.ToString());
 				}
 			}
 		}
 	}
 
-	// Execute the operation now
-	for (const auto& SourceAndItemsPair : SourcesAndItems)
-	{
-		SourceAndItemsPair.Key->BulkDeleteItems(SourceAndItemsPair.Value);
-	}
-
 	// If we had any folders selected, ask the user whether they want to delete them 
 	// as it can be slow to build the deletion dialog on an accidental click
-	if (SelectedFolders.Num() > 0)
+	if (SelectedFolderInternalPaths.Num() > 0)
 	{
 		FText Prompt;
-		if (SelectedFolders.Num() == 1)
+		if (SelectedFolderInternalPaths.Num() == 1)
 		{
-			Prompt = FText::Format(LOCTEXT("FolderDeleteConfirm_Single", "Delete folder '{0}'?"), SelectedFolders[0].GetDisplayName());
+			Prompt = FText::Format(LOCTEXT("FolderDeleteConfirm_Single", "Delete folder '{0}'?"), FirstFolderDisplayName);
 		}
 		else
 		{
-			Prompt = FText::Format(LOCTEXT("FolderDeleteConfirm_Multiple", "Delete {0} folders?"), SelectedFolders.Num());
+			Prompt = FText::Format(LOCTEXT("FolderDeleteConfirm_Multiple", "Delete {0} folders?"), SelectedFolderInternalPaths.Num());
 		}
+
+		const bool bResetSelection = OpenedContextMenuWidget == EOpenedContextMenuWidget::PathView;
 
 		// Spawn a confirmation dialog since this is potentially a highly destructive operation
 		ContentBrowserUtils::DisplayConfirmationPopup(
@@ -427,34 +542,21 @@ void SAssetDialog::ExecuteDelete()
 			LOCTEXT("FolderDeleteConfirm_Yes", "Delete"),
 			LOCTEXT("FolderDeleteConfirm_No", "Cancel"),
 			AssetPicker->GetAssetView().ToSharedRef(),
-			FOnClicked::CreateSP(this, &SAssetDialog::ExecuteDeleteFolderConfirmed)
+			FOnClicked::CreateSP(this, &SAssetDialog::ExecuteDeleteFolderConfirmed, SelectedFolderInternalPaths, bResetSelection)
 		);
 	}
 }
 
-FReply SAssetDialog::ExecuteDeleteFolderConfirmed()
+FReply SAssetDialog::ExecuteDeleteFolderConfirmed(const TArray<FString> SelectedFolderInternalPaths, const bool bResetSelection)
 {
-	TArray< FString > SelectedFolders = AssetPicker->GetAssetView()->GetSelectedFolders();
-
-	if (SelectedFolders.Num() > 0)
+	if (SelectedFolderInternalPaths.Num() > 0)
 	{
-		ContentBrowserUtils::DeleteFolders(SelectedFolders);
-	}
-	else
-	{
-		const TArray<FString>& SelectedPaths = PathPicker->GetPaths();
-
-		if (SelectedPaths.Num() > 0)
+		if (ContentBrowserUtils::DeleteFolders(SelectedFolderInternalPaths))
 		{
-			if (ContentBrowserUtils::DeleteFolders(SelectedPaths))
+			if (bResetSelection)
 			{
-				// Since the contents of the asset view have just been deleted, set the selected path to the default "/Game"
-				TArray<FString> DefaultSelectedPaths;
-				DefaultSelectedPaths.Add(TEXT("/Game"));
-				PathPicker->GetPathView()->SetSelectedPaths(DefaultSelectedPaths);
-
-				FSourcesData DefaultSourcesData(FName("/Game"));
-				AssetPicker->GetAssetView()->SetSourcesData(DefaultSourcesData);
+				// Since the contents of the asset view have just been deleted, set the default selected paths
+				SelectDefaultPaths();
 			}
 		}
 	}
@@ -462,9 +564,34 @@ FReply SAssetDialog::ExecuteDeleteFolderConfirmed()
 	return FReply::Handled();
 }
 
-void SAssetDialog::ExecuteExplore()
+void SAssetDialog::SelectDefaultPaths()
 {
-	const TArray<FContentBrowserItem> SelectedItems = AssetPicker->GetAssetView()->GetSelectedItems();
+	const TArray<FName> DefaultVirtualPathsToSelect = PathPicker->GetPathView()->GetDefaultPathsToSelect();
+
+	TArray<FString> DefaultSelectedPaths;
+	DefaultSelectedPaths.Reserve(DefaultVirtualPathsToSelect.Num());
+	for (const FName DefaultVirtualPathToSelect : DefaultVirtualPathsToSelect)
+	{
+		DefaultSelectedPaths.Add(DefaultVirtualPathToSelect.ToString());
+	}
+
+	PathPicker->GetPathView()->SetSelectedPaths(DefaultSelectedPaths);
+
+	FSourcesData DefaultSourcesData;
+	DefaultSourcesData.VirtualPaths = DefaultVirtualPathsToSelect;
+	AssetPicker->GetAssetView()->SetSourcesData(DefaultSourcesData);
+}
+
+bool SAssetDialog::ExecuteExploreInternal(bool bTest)
+{
+	bool bCanExplore = false;
+
+	TArray<FContentBrowserItem> SelectedItems = AssetPicker->GetAssetView()->GetSelectedItems();
+	if (SelectedItems.Num() == 0)
+	{
+		SelectedItems = PathPicker->GetPathView()->GetSelectedFolderItems();
+	}
+
 	for (const FContentBrowserItem& SelectedItem : SelectedItems)
 	{
 		FString ItemFilename;
@@ -473,22 +600,44 @@ void SAssetDialog::ExecuteExplore()
 			const bool bExists = SelectedItem.IsFile() ? FPaths::FileExists(ItemFilename) : FPaths::DirectoryExists(ItemFilename);
 			if (bExists)
 			{
-				FPlatformProcess::ExploreFolder(*IFileManager::Get().ConvertToAbsolutePathForExternalAppForRead(*ItemFilename));
+				bCanExplore = true;
+
+				if (!bTest)
+				{
+					FPlatformProcess::ExploreFolder(*IFileManager::Get().ConvertToAbsolutePathForExternalAppForRead(*ItemFilename));
+				}
+				else
+				{
+					break;
+				}
 			}
 		}
 	}
+
+	return bCanExplore;
+}
+
+void SAssetDialog::ExecuteExplore()
+{
+	//ExecuteExploreInternal(/*bTest*/ false);
+	ContentBrowserUtils::ExploreFolders(AssetPicker->GetAssetView()->GetSelectedItems(), AssetPicker->GetAssetView().ToSharedRef());
+}
+
+bool SAssetDialog::CanExecuteExplore()
+{
+	return ExecuteExploreInternal(/*bTest*/ true);
 }
 
 bool SAssetDialog::CanExecuteCreateNewFolder() const
 {	
 	// We can only create folders when we have a single path selected
 	UContentBrowserDataSubsystem* ContentBrowserData = IContentBrowserDataModule::Get().GetSubsystem();
-	return ContentBrowserData->CanCreateFolder(*CurrentlySelectedPath, nullptr);
+	return ContentBrowserData->CanCreateFolder(GetCurrentSelectedVirtualPath(), nullptr);
 }
 
 void SAssetDialog::ExecuteCreateNewFolder()
 {
-	PathPicker->CreateNewFolder(CurrentlySelectedPath, CurrentContextMenuCreateNewFolderDelegate);
+	PathPicker->CreateNewFolder(GetCurrentSelectedVirtualPath().ToString(), CurrentContextMenuCreateNewFolderDelegate);
 }
 
 TSharedPtr<SWidget> SAssetDialog::OnGetFolderContextMenu(const TArray<FString>& SelectedPaths, FContentBrowserMenuExtender_SelectedPaths InMenuExtender, FOnCreateNewFolder InOnCreateNewFolder)
@@ -557,20 +706,21 @@ void SAssetDialog::SetupContextMenuContent(FMenuBuilder& MenuBuilder, const TArr
 
 	MenuBuilder.BeginSection("AssetDialogOptions", LOCTEXT("AssetDialogMenuHeading", "Options"));
 
-	MenuBuilder.AddMenuEntry(FContentBrowserCommands::Get().CreateNewFolder, NAME_None, LOCTEXT("NewFolder", "New Folder"), NewFolderToolTip, FSlateIcon(FEditorStyle::GetStyleSetName(), "ContentBrowser.NewFolderIcon"));
-	MenuBuilder.AddMenuEntry(FGenericCommands::Get().Rename, NAME_None, LOCTEXT("RenameFolder", "Rename"), LOCTEXT("RenameFolderTooltip", "Rename the selected folder."), FSlateIcon(FEditorStyle::GetStyleSetName(), "ContentBrowser.AssetActions.Rename"));
+	MenuBuilder.AddMenuEntry(FContentBrowserCommands::Get().CreateNewFolder, NAME_None, LOCTEXT("NewFolder", "New Folder"), NewFolderToolTip, FSlateIcon(FAppStyle::GetAppStyleSetName(), "ContentBrowser.NewFolderIcon"));
+	MenuBuilder.AddMenuEntry(FGenericCommands::Get().Rename, NAME_None, LOCTEXT("RenameFolder", "Rename"), LOCTEXT("RenameFolderTooltip", "Rename the selected folder."), FSlateIcon(FAppStyle::GetAppStyleSetName(), "ContentBrowser.AssetActions.Rename"));
 	MenuBuilder.AddMenuEntry(FGenericCommands::Get().Delete, NAME_None, LOCTEXT("DeleteFolder", "Delete"), LOCTEXT("DeleteFolderTooltip", "Removes this folder and all assets it contains."));
 
 	MenuBuilder.EndSection();
 
-	MenuBuilder.BeginSection("AssetDialogExplore", LOCTEXT("AssetDialogExploreHeading", "Explore"));
-
-	MenuBuilder.AddMenuEntry(ContentBrowserUtils::GetExploreFolderText(), 
-							 LOCTEXT("ExploreTooltip", "Finds this folder on disk."), 
-							 FSlateIcon(FEditorStyle::GetStyleSetName(), "SystemWideCommands.FindInContentBrowser"), 
-							 FUIAction(FExecuteAction::CreateSP(this, &SAssetDialog::ExecuteExplore)));
-
-	MenuBuilder.EndSection();
+	if (CanExecuteExplore())
+	{
+		MenuBuilder.BeginSection("AssetDialogExplore", LOCTEXT("AssetDialogExploreHeading", "Explore"));
+		MenuBuilder.AddMenuEntry(ContentBrowserUtils::GetExploreFolderText(),
+			LOCTEXT("ExploreTooltip", "Finds this folder on disk."),
+			FSlateIcon(FAppStyle::GetAppStyleSetName(), "SystemWideCommands.FindInContentBrowser"),
+			FUIAction(FExecuteAction::CreateSP(this, &SAssetDialog::ExecuteExplore)));
+		MenuBuilder.EndSection();
+	}
 }
 
 EActiveTimerReturnType SAssetDialog::SetFocusPostConstruct( double InCurrentTime, float InDeltaTime )
@@ -609,7 +759,7 @@ FText SAssetDialog::GetAssetNameText() const
 
 FText SAssetDialog::GetPathNameText() const
 {
-	return FText::FromString(CurrentlySelectedPath);
+	return FText::FromName(GetCurrentSelectedVirtualPath());
 }
 
 void SAssetDialog::OnAssetNameTextCommited(const FText& InText, ETextCommit::Type InCommitType)
@@ -639,19 +789,22 @@ FText SAssetDialog::GetNameErrorLabelText() const
 
 void SAssetDialog::HandlePathSelected(const FString& NewPath)
 {
+	FName ConvertedPath;
+	const EContentBrowserPathType ConvertedPathType = IContentBrowserDataModule::Get().GetSubsystem()->TryConvertVirtualPath(NewPath, ConvertedPath);
+
 	FARFilter NewFilter;
 
-	NewFilter.ClassNames.Append(AssetClassNames);
-	NewFilter.PackagePaths.Add(FName(*NewPath));
+	NewFilter.ClassPaths.Append(AssetClassNames);
+	NewFilter.PackagePaths.Add(*NewPath);
 
-	SetCurrentlySelectedPath(NewPath);
+	SetCurrentlySelectedPath(ConvertedPath.ToString(), ConvertedPathType);
 
 	SetFilterDelegate.ExecuteIfBound(NewFilter);
 }
 
 void SAssetDialog::HandleAssetViewFolderEntered(const FString& NewPath)
 {
-	SetCurrentlySelectedPath(NewPath);
+	SetCurrentlySelectedPath(NewPath, EContentBrowserPathType::Virtual);
 
 	TArray<FString> NewPaths;
 	NewPaths.Add(NewPath);
@@ -660,42 +813,41 @@ void SAssetDialog::HandleAssetViewFolderEntered(const FString& NewPath)
 
 bool SAssetDialog::IsConfirmButtonEnabled() const
 {
-	if ( DialogType == EAssetDialogType::Open )
+	switch (DialogType)
 	{
+	case EAssetDialogType::Open:
 		return CurrentlySelectedAssets.Num() > 0;
-	}
-	else if ( DialogType == EAssetDialogType::Save )
-	{
+	case EAssetDialogType::Save:
 		return bLastInputValidityCheckSuccessful;
+	default:
+	    ensureMsgf(0, TEXT("AssetDialog type %d is not supported."), DialogType);
+	    return false;
 	}
-	else
-	{
-		ensureMsgf(0, TEXT("AssetDialog type %d is not supported."), DialogType);
-	}
-
-	return false;
 }
 
 FReply SAssetDialog::OnConfirmClicked()
 {
-	if ( DialogType == EAssetDialogType::Open )
+	switch (DialogType)
+	{
+	case EAssetDialogType::Open:
 	{
 		TArray<FAssetData> SelectedAssets = GetCurrentSelectionDelegate.Execute();
 		if (SelectedAssets.Num() > 0)
 		{
 			ChooseAssetsForOpen(SelectedAssets);
 		}
-	}
-	else if ( DialogType == EAssetDialogType::Save )
-	{
-		// @todo save asset validation (e.g. "asset already exists" check)
-		CommitObjectPathForSave();
-	}
-	else
-	{
-		ensureMsgf(0, TEXT("AssetDialog type %d is not supported."), DialogType);
+		break;
 	}
 
+	case EAssetDialogType::Save:
+		// @todo save asset validation (e.g. "asset already exists" check)
+		CommitObjectPathForSave();
+		break;
+
+	default:
+		ensureMsgf(0, TEXT("AssetDialog type %d is not supported."), DialogType);
+		break;
+	}
 	return FReply::Handled();
 }
 
@@ -712,7 +864,7 @@ void SAssetDialog::OnAssetSelected(const FAssetData& AssetData)
 	
 	if ( AssetData.IsValid() )
 	{
-		SetCurrentlySelectedPath(AssetData.PackagePath.ToString());
+		SetCurrentlySelectedPath(AssetData.PackagePath.ToString(), EContentBrowserPathType::Internal);
 		SetCurrentlyEnteredAssetName(AssetData.AssetName.ToString());
 	}
 }
@@ -722,20 +874,24 @@ void SAssetDialog::OnAssetsActivated(const TArray<FAssetData>& SelectedAssets, E
 	const bool bCorrectActivationMethod = (ActivationType == EAssetTypeActivationMethod::DoubleClicked || ActivationType == EAssetTypeActivationMethod::Opened);
 	if (SelectedAssets.Num() > 0 && bCorrectActivationMethod)
 	{
-		if ( DialogType == EAssetDialogType::Open )
+		switch (DialogType)
 		{
+		case EAssetDialogType::Open:
 			ChooseAssetsForOpen(SelectedAssets);
-		}
-		else if ( DialogType == EAssetDialogType::Save )
+			break;
+
+		case EAssetDialogType::Save:
 		{
 			const FAssetData& AssetData = SelectedAssets[0];
-			SetCurrentlySelectedPath(AssetData.PackagePath.ToString());
+			SetCurrentlySelectedPath(AssetData.PackagePath.ToString(), EContentBrowserPathType::Internal);
 			SetCurrentlyEnteredAssetName(AssetData.AssetName.ToString());
 			CommitObjectPathForSave();
+			break;
 		}
-		else
-		{
+
+		default:
 			ensureMsgf(0, TEXT("AssetDialog type %d is not supported."), DialogType);
+			break;
 		}
 	}
 }
@@ -750,9 +906,11 @@ void SAssetDialog::CloseDialog()
 	}
 }
 
-void SAssetDialog::SetCurrentlySelectedPath(const FString& NewPath)
+void SAssetDialog::SetCurrentlySelectedPath(const FString& NewPath, const EContentBrowserPathType InPathType)
 {
 	CurrentlySelectedPath = NewPath;
+	CurrentlySelectedPathType = InPathType;
+
 	UpdateInputValidity();
 
 	OnPathSelected.ExecuteIfBound(NewPath);
@@ -782,6 +940,32 @@ void SAssetDialog::UpdateInputValidity()
 			LastInputValidityErrorText = LOCTEXT("AssetDialog_NoPathSelected", "You must select a path.");
 			bLastInputValidityCheckSuccessful = false;
 		}
+		else if (CurrentlySelectedPathType == EContentBrowserPathType::Virtual)
+		{
+			FName ConvertedPath;
+			const EContentBrowserPathType ConvertedType = IContentBrowserDataModule::Get().GetSubsystem()->TryConvertVirtualPath(CurrentlySelectedPath, ConvertedPath);
+
+			bool bIsMountedInternalPath = false;
+			if (ConvertedType == EContentBrowserPathType::Internal)
+			{
+				FString CheckPath = ConvertedPath.ToString();
+				if (!CheckPath.EndsWith(TEXT("/")))
+				{
+					CheckPath += TEXT("/");
+				}
+
+				if (FPackageName::IsValidPath(CheckPath))
+				{
+					bIsMountedInternalPath = true;
+				}
+			}
+
+			if (!bIsMountedInternalPath)
+			{
+				LastInputValidityErrorText = LOCTEXT("AssetDialog_VirtualPathSelected", "The selected folder cannot be modified.");
+				bLastInputValidityCheckSuccessful = false;
+			}
+		}
 	}
 
 	if ( DialogType == EAssetDialogType::Save )
@@ -792,8 +976,8 @@ void SAssetDialog::UpdateInputValidity()
 			FText ErrorMessage;
 			const bool bAllowExistingAsset = (ExistingAssetPolicy == ESaveAssetDialogExistingAssetPolicy::AllowButWarn);
 
-			FName AssetClassName = AssetClassNames.Num() == 1 ? AssetClassNames[0] : NAME_None;
-			UClass* AssetClass = AssetClassName != NAME_None ? FindObject<UClass>(ANY_PACKAGE, *AssetClassName.ToString(), true) : nullptr;
+			FTopLevelAssetPath AssetClassName = AssetClassNames.Num() == 1 ? AssetClassNames[0] : FTopLevelAssetPath();
+			UClass* AssetClass = !AssetClassName.IsNull() ? FindObject<UClass>(AssetClassName, true) : nullptr;
 
 			if ( !ContentBrowserUtils::IsValidObjectPathForCreate(ObjectPath, AssetClass, ErrorMessage, bAllowExistingAsset) )
 			{
@@ -803,15 +987,27 @@ void SAssetDialog::UpdateInputValidity()
 			else if(bAllowExistingAsset && AssetClassNames.Num() > 1) // If for some reason we have multiple names, perform additional logic here...
 			{
 				FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
-				FAssetData ExistingAsset = AssetRegistryModule.Get().GetAssetByObjectPath(FName(*ObjectPath));
-				if (ExistingAsset.IsValid() && !AssetClassNames.Contains(ExistingAsset.AssetClass))
+				FAssetData ExistingAsset = AssetRegistryModule.Get().GetAssetByObjectPath(FSoftObjectPath(ObjectPath));
+				if (ExistingAsset.IsValid() && !AssetClassNames.Contains(ExistingAsset.AssetClassPath))
 				{
 					const FString ObjectName = FPackageName::ObjectPathToObjectName(ObjectPath);
-					LastInputValidityErrorText = FText::Format(LOCTEXT("AssetDialog_AssetAlreadyExists", "An asset of type '{0}' already exists at this location with the name '{1}'."), FText::FromName(ExistingAsset.AssetClass), FText::FromString(ObjectName));
+					LastInputValidityErrorText = FText::Format(LOCTEXT("AssetDialog_AssetAlreadyExists", "An asset of type '{0}' already exists at this location with the name '{1}'."), FText::FromString(ExistingAsset.AssetClassPath.ToString()), FText::FromString(ObjectName));
 					bLastInputValidityCheckSuccessful = false;
 				}
 			}
 		}
+	}
+}
+
+FName SAssetDialog::GetCurrentSelectedVirtualPath() const
+{
+	if (CurrentlySelectedPathType == EContentBrowserPathType::Virtual)
+	{
+		return *CurrentlySelectedPath;
+	}
+	else
+	{
+		return IContentBrowserDataModule::Get().GetSubsystem()->ConvertInternalPathToVirtual(*CurrentlySelectedPath);
 	}
 }
 
@@ -830,7 +1026,23 @@ void SAssetDialog::ChooseAssetsForOpen(const TArray<FAssetData>& SelectedAssets)
 
 FString SAssetDialog::GetObjectPathForSave() const
 {
-	return CurrentlySelectedPath / CurrentlyEnteredAssetName + TEXT(".") + CurrentlyEnteredAssetName;
+	FString Base = CurrentlySelectedPath;
+
+	if (CurrentlySelectedPathType == EContentBrowserPathType::Virtual)
+	{
+		FName ConvertedPath;
+		const EContentBrowserPathType ConvertedType = IContentBrowserDataModule::Get().GetSubsystem()->TryConvertVirtualPath(CurrentlySelectedPath, ConvertedPath);
+		if (ConvertedType == EContentBrowserPathType::Internal)
+		{
+			Base = ConvertedPath.ToString();
+		}
+		else
+		{
+			return FString();
+		}
+	}
+
+	return Base / CurrentlyEnteredAssetName + TEXT(".") + CurrentlyEnteredAssetName;
 }
 
 void SAssetDialog::CommitObjectPathForSave()
@@ -847,8 +1059,8 @@ void SAssetDialog::CommitObjectPathForSave()
 			if ( ExistingAssetPolicy == ESaveAssetDialogExistingAssetPolicy::AllowButWarn )
 			{
 				FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
-				FAssetData ExistingAsset = AssetRegistryModule.Get().GetAssetByObjectPath(FName(*ObjectPath));
-				if ( ExistingAsset.IsValid() && AssetClassNames.Contains(ExistingAsset.AssetClass) )
+				FAssetData ExistingAsset = AssetRegistryModule.Get().GetAssetByObjectPath(FSoftObjectPath(ObjectPath));
+				if ( ExistingAsset.IsValid() && AssetClassNames.Contains(ExistingAsset.AssetClassPath) )
 				{
 					EAppReturnType::Type ShouldReplace = FMessageDialog::Open( EAppMsgType::YesNo, FText::Format(LOCTEXT("ReplaceAssetMessage", "{0} already exists. Do you want to replace it?"), FText::FromString(CurrentlyEnteredAssetName)) );
 					bProceedWithSave = (ShouldReplace == EAppReturnType::Yes);

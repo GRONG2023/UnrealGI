@@ -48,10 +48,8 @@ DECLARE_CYCLE_STAT_EXTERN(TEXT("Updating Effects"), STAT_AudioUpdateEffects, STA
 DECLARE_CYCLE_STAT_EXTERN(TEXT("Source Init"), STAT_AudioSourceInitTime, STATGROUP_Audio, ENGINE_API);
 DECLARE_CYCLE_STAT_EXTERN(TEXT("Source Create"), STAT_AudioSourceCreateTime, STATGROUP_Audio, ENGINE_API);
 DECLARE_CYCLE_STAT_EXTERN(TEXT("Submit Buffers"), STAT_AudioSubmitBuffersTime, STATGROUP_Audio, ENGINE_API);
-DECLARE_CYCLE_STAT_EXTERN(TEXT("Decompress Audio"), STAT_AudioDecompressTime, STATGROUP_Audio, );
-DECLARE_CYCLE_STAT_EXTERN(TEXT("Decompress Vorbis"), STAT_VorbisDecompressTime, STATGROUP_Audio, );
+DECLARE_CYCLE_STAT_EXTERN(TEXT("Decompress Audio"), STAT_AudioDecompressTime, STATGROUP_Audio, ENGINE_API);
 DECLARE_CYCLE_STAT_EXTERN(TEXT("Prepare Audio Decompression"), STAT_AudioPrepareDecompressionTime, STATGROUP_Audio, );
-DECLARE_CYCLE_STAT_EXTERN(TEXT("Prepare Vorbis Decompression"), STAT_VorbisPrepareDecompressionTime, STATGROUP_Audio, );
 DECLARE_CYCLE_STAT_EXTERN(TEXT("Finding Nearest Location"), STAT_AudioFindNearestLocation, STATGROUP_Audio, );
 DECLARE_CYCLE_STAT_EXTERN(TEXT("Decompress Streamed"), STAT_AudioStreamedDecompressTime, STATGROUP_Audio, );
 DECLARE_CYCLE_STAT_EXTERN(TEXT("Buffer Creation"), STAT_AudioResourceCreationTime, STATGROUP_Audio, );
@@ -63,6 +61,7 @@ class USoundWave;
 class USoundClass;
 class USoundSubmix;
 class USoundSourceBus;
+class UAudioLinkSettingsAbstract;
 struct FActiveSound;
 struct FWaveInstance;
 struct FSoundSourceBusSendInfo;
@@ -73,7 +72,7 @@ struct FSoundSourceBusSendInfo;
  * These are in the sample order OpenAL expects for a 7.1 sound
  * 
  */
-enum EAudioSpeakers
+enum EAudioSpeakers : int
 {							//	4.0	5.1	6.1	7.1
 	SPEAKER_FrontLeft,		//	*	*	*	*
 	SPEAKER_FrontRight,		//	*	*	*	*
@@ -92,14 +91,7 @@ class USoundNode;
 struct FWaveInstance;
 struct FReverbSettings;
 struct FSampleLoop;
-
-namespace Audio
-{
-	/**
-	 * Typed identifier for Audio Device Id
-	 */
-	using FDeviceId = uint32;
-}
+struct FSoundWaveTimecodeInfo;
 
 enum ELoopingMode
 {
@@ -111,12 +103,12 @@ enum ELoopingMode
 	LOOP_Forever
 };
 
-struct ENGINE_API FNotifyBufferFinishedHooks
+struct FNotifyBufferFinishedHooks
 {
-	void AddNotify(USoundNode* NotifyNode, UPTRINT WaveInstanceHash);
-	UPTRINT GetHashForNode(USoundNode* NotifyNode) const;
-	void AddReferencedObjects( FReferenceCollector& Collector );
-	void DispatchNotifies(FWaveInstance* WaveInstance, const bool bStopped);
+	ENGINE_API void AddNotify(USoundNode* NotifyNode, UPTRINT WaveInstanceHash);
+	ENGINE_API UPTRINT GetHashForNode(USoundNode* NotifyNode) const;
+	ENGINE_API void AddReferencedObjects( FReferenceCollector& Collector );
+	ENGINE_API void DispatchNotifies(FWaveInstance* WaveInstance, const bool bStopped);
 
 	friend FArchive& operator<<( FArchive& Ar, FNotifyBufferFinishedHooks& WaveInstance );
 
@@ -124,11 +116,11 @@ private:
 
 	struct FNotifyBufferDetails
 	{
-		USoundNode* NotifyNode;
+		TObjectPtr<USoundNode> NotifyNode;
 		UPTRINT NotifyNodeWaveInstanceHash;
 
 		FNotifyBufferDetails()
-			: NotifyNode(NULL)
+			: NotifyNode(nullptr)
 			, NotifyNodeWaveInstanceHash(0)
 		{
 		}
@@ -151,6 +143,27 @@ ENGINE_API UClass* GetAudioPluginCustomSettingsClass(EAudioPlugin PluginType);
 /** accessor for our Spatialization enabled CVar. */
 ENGINE_API bool IsSpatializationCVarEnabled();
 
+/**
+ * Interface for listening to source buffers being rendered.
+ */
+class ISourceBufferListener
+{
+public:
+	virtual ~ISourceBufferListener() = default;
+
+	struct FOnNewBufferParams
+	{
+		const float* AudioData = nullptr;
+		int32 SourceId = INDEX_NONE;
+		int32 NumSamples = 0;
+		int32 NumChannels = 0;
+		int32 SampleRate = 0;
+	};
+	virtual void OnNewBuffer(const FOnNewBufferParams&) = 0;
+	virtual void OnSourceReleased(const int32 InSourceId) = 0;
+};
+using FSharedISourceBufferListenerPtr = TSharedPtr<ISourceBufferListener, ESPMode::ThreadSafe>;
+
 /** Bus send types */
 enum class EBusSendType : uint8
 {
@@ -163,16 +176,18 @@ enum class EBusSendType : uint8
  * Structure encapsulating all information required to play a USoundWave on a channel/source. This is required
  * as a single USoundWave object can be used in multiple active cues or multiple times in the same cue.
  */
-struct ENGINE_API FWaveInstance
+struct FWaveInstance
 {
+private:
 	/** Static helper to create good unique type hashes */
-	static uint32 TypeHashCounter;
+	static ENGINE_API uint32 PlayOrderCounter;
 
+public:
 	/** Wave data */
-	USoundWave* WaveData;
+	TObjectPtr<USoundWave> WaveData;
 
 	/** Sound class */
-	USoundClass* SoundClass;
+	TObjectPtr<USoundClass> SoundClass;
 
 	/** Sound submix object to send audio to for mixing in audio mixer.  */
 	USoundSubmixBase* SoundSubmix;
@@ -195,6 +210,14 @@ struct ENGINE_API FWaveInstance
 	/** Quantized Request data */
 	TUniquePtr<Audio::FQuartzQuantizedRequestData> QuantizedRequestData;
 
+	/** Source Buffer listener */
+	FSharedISourceBufferListenerPtr SourceBufferListener;
+	bool bShouldSourceBufferListenerZeroBuffer = false;
+
+	/** AudioLink Opt in */
+	bool bShouldUseAudioLink = true;
+	UAudioLinkSettingsAbstract* AudioLinkSettingsOverride = nullptr;
+
 private:
 
 	/** Current volume */
@@ -202,6 +225,9 @@ private:
 
 	/** Volume attenuation due to distance. */
 	float DistanceAttenuation;
+
+	/** Volume attenuation due to occlusion. */
+	float OcclusionAttenuation;
 
 	/** Current volume multiplier - used to zero the volume without stopping the source */
 	float VolumeMultiplier;
@@ -245,6 +271,9 @@ public:
 
 	/** Whether or not to enable Submix Sends in addition to the Main Submix*/
 	uint32 bEnableSubmixSends : 1;
+
+	/** Whether or not to use source data overrides */
+	uint32 bEnableSourceDataOverride : 1;
 
 	/** Set to true if the sound nodes state that the radio filter should be applied */
 	uint32 bApplyRadioFilter:1;
@@ -296,6 +325,9 @@ public:
 	/** Whether or not this wave instance is stopping. */
 	uint32 bIsStopping:1;
 
+	/** Is this or any of the submixes above it dynamic */
+	uint32 bIsDynamic:1;
+
 	/** Which spatialization method to use to spatialize 3d sounds. */
 	ESoundSpatializationAlgorithm SpatializationMethod;
 
@@ -307,6 +339,9 @@ public:
 
 	/** The occlusion plugin settings to use for the wave instance. */
 	UReverbPluginSourceSettingsBase* ReverbPluginSettings;
+
+	/** The source data override plugin settings to use for the wave instance. */
+	USourceDataOverridePluginSourceSettingsBase* SourceDataOverridePluginSettings;
 
 	/** Which output target the sound should play on. */
 	EAudioOutputTarget::Type OutputTarget;
@@ -335,8 +370,14 @@ public:
 	/** Current location */
 	FVector Location;
 
-	/** At what distance we start transforming into omnidirectional soundsource */
-	float OmniRadius;
+	/** At what distance we start transforming into non-spatialized soundsource */
+	float NonSpatializedRadiusStart;
+
+	/** At what distance we are fully non-spatialized*/
+	float NonSpatializedRadiusEnd;
+
+	/** How we are doing the non-spatialized radius feature. */
+	ENonSpatializedRadiusSpeakerMapMode NonSpatializedRadiusMode;
 
 	/** Amount of spread for 3d multi-channel asset spatialization */
 	float StereoSpread;
@@ -356,27 +397,20 @@ public:
 	/** The playback time of the wave instance. Updated from active sound. */
 	float PlaybackTime;
 
-	/** The reverb send method to use. */
-	EReverbSendMethod ReverbSendMethod;
+	/** The output reverb send level to use for tje wave instance. */
+	float ReverbSendLevel;
 
-	/** Reverb distance-based wet-level amount range. */
-	FVector2D ReverbSendLevelRange;
-
-	/** Reverb distance-based wet-level distance/radial range. */
-	FVector2D ReverbSendLevelDistanceRange;
-
-	/** Custom reverb send curve. */
-	FRuntimeFloatCurve CustomRevebSendCurve;
-
-	/** The manual send level to use if the sound is set to use manual send level. */
+	/** TODO remove */
 	float ManualReverbSendLevel;
-
+	
 	/** The submix send settings to use. */
-	TArray<FAttenuationSubmixSendSettings> SubmixSendSettings;
+	TArray<FAttenuationSubmixSendSettings> AttenuationSubmixSends;
 
-	/** Cached type hash */
-	uint32 TypeHash;
+private:
+	/** Cached play order */
+	uint32 PlayOrder;
 
+public:
 	/** Hash value for finding the wave instance based on the path through the cue to get to it */
 	UPTRINT WaveInstanceHash;
 
@@ -384,29 +418,30 @@ public:
 	uint8 UserIndex;
 
 	/** Constructor, initializing all member variables. */
-	FWaveInstance(const UPTRINT InWaveInstanceHash, FActiveSound& ActiveSound);
+	ENGINE_API FWaveInstance(const UPTRINT InWaveInstanceHash, FActiveSound& ActiveSound);
 
-	FWaveInstance(FWaveInstance&&);
-	FWaveInstance& operator=(FWaveInstance&&);
+	ENGINE_API FWaveInstance(FWaveInstance&&);
+	ENGINE_API FWaveInstance& operator=(FWaveInstance&&);
 
 	/** Stops the wave instance without notifying NotifyWaveInstanceFinishedHook. */
-	void StopWithoutNotification();
+	ENGINE_API void StopWithoutNotification();
 
 	/** Notifies the wave instance that the current playback buffer has finished. */
-	void NotifyFinished(const bool bStopped = false);
+	ENGINE_API void NotifyFinished(const bool bStopped = false);
 
 	/** Friend archive function used for serialization. */
 	friend FArchive& operator<<(FArchive& Ar, FWaveInstance* WaveInstance);
 
 	/** Function used by the GC. */
-	void AddReferencedObjects(FReferenceCollector& Collector);
+	ENGINE_API void AddReferencedObjects(FReferenceCollector& Collector);
 
 	/** Returns the actual volume the wave instance will play at */
-	bool ShouldStopDueToMaxConcurrency() const;
+	ENGINE_API bool ShouldStopDueToMaxConcurrency() const;
 
 	/** Setters for various values on wave instances. */
 	void SetVolume(const float InVolume) { Volume = InVolume; }
 	void SetDistanceAttenuation(const float InDistanceAttenuation) { DistanceAttenuation = InDistanceAttenuation; }
+	void SetOcclusionAttenuation(const float InOcclusionAttenuation) { OcclusionAttenuation = InOcclusionAttenuation; }
 	void SetPitch(const float InPitch) { Pitch = InPitch; }
 	void SetVolumeMultiplier(const float InVolumeMultiplier) { VolumeMultiplier = InVolumeMultiplier; }
 
@@ -416,39 +451,45 @@ public:
 	/** Returns whether or not the WaveInstance is actively playing sound or set to
 	  * play when silent.
 	  */
-	bool IsPlaying() const;
+	ENGINE_API bool IsPlaying() const;
 
 	/** Returns the volume multiplier on the wave instance. */
 	float GetVolumeMultiplier() const { return VolumeMultiplier; }
 
 	/** Returns the actual volume the wave instance will play at, including all gain stages. */
-	float GetActualVolume() const;
+	ENGINE_API float GetActualVolume() const;
 
 	/** Returns the volume of the sound including distance attenuation. */
-	float GetVolumeWithDistanceAttenuation() const;
+	ENGINE_API float GetVolumeWithDistanceAndOcclusionAttenuation() const;
 
-	/** Returns the distance attenuation of the source voice. */
-	float GetDistanceAttenuation() const;
+	/** Returns the combined distance and occlusion attenuation of the source voice. */
+	ENGINE_API float GetDistanceAndOcclusionAttenuation() const;
+
+	/** Returns the distance attenuation of the source voice */
+	ENGINE_API float GetDistanceAttenuation() const;
+
+	/** Returns the occlusion attenuation of the source voice */
+	ENGINE_API float GetOcclusionAttenuation() const;
 
 	/** Returns the dynamic volume of the sound */
-	float GetDynamicVolume() const;
+	ENGINE_API float GetDynamicVolume() const;
 
 	/** Returns the pitch of the wave instance */
-	float GetPitch() const;
+	ENGINE_API float GetPitch() const;
 
 	/** Returns the volume of the wave instance (ignoring application muting) */
-	float GetVolume() const;
+	ENGINE_API float GetVolume() const;
 
 	/** Returns the weighted priority of the wave instance. */
-	float GetVolumeWeightedPriority() const;
+	ENGINE_API float GetVolumeWeightedPriority() const;
 
-	bool IsSeekable() const;
+	ENGINE_API bool IsSeekable() const;
 
 	/** Checks whether wave is streaming and streaming is supported */
-	bool IsStreaming() const;
+	ENGINE_API bool IsStreaming() const;
 
 	/** Returns the name of the contained USoundWave */
-	FString GetName() const;
+	ENGINE_API FString GetName() const;
 
 	/** Sets the envelope value of the wave instance. Only set if the wave instance is actually generating real audio with a source voice. Only implemented in the audio mixer. */
 	void SetEnvelopeValue(const float InEnvelopeValue) { EnvelopValue = InEnvelopeValue; }
@@ -460,16 +501,18 @@ public:
 	void SetUseSpatialization(const bool InUseSpatialization) { bUseSpatialization = InUseSpatialization; }
 
 	/** Whether this wave will be spatialized, which controls 3D effects like panning */
-	bool GetUseSpatialization() const;
+	ENGINE_API bool GetUseSpatialization() const;
 
 	/** Whether spatialization is an external send */
 	void SetSpatializationIsExternalSend(const bool InSpatializationIsExternalSend) { bSpatializationIsExternalSend = InSpatializationIsExternalSend; }
 
 	/** Whether spatialization is an external send */
 	bool GetSpatializationIsExternalSend() const {	return bSpatializationIsExternalSend;}
-};
 
-inline uint32 GetTypeHash(FWaveInstance* A) { return A->TypeHash; }
+	uint32 GetPlayOrder() const { return PlayOrder; }
+
+	friend inline uint32 GetTypeHash(FWaveInstance* A) { return A->PlayOrder; }
+};
 
 /*-----------------------------------------------------------------------------
 	FSoundBuffer.
@@ -489,7 +532,7 @@ public:
 
 	ENGINE_API virtual ~FSoundBuffer();
 
-	virtual int32 GetSize() PURE_VIRTUAL(FSoundBuffer::GetSize,return 0;);
+	ENGINE_API virtual int32 GetSize() PURE_VIRTUAL(FSoundBuffer::GetSize,return 0;);
 
 	/**
 	 * Describe the buffer (platform can override to add to the description, but should call the base class version)
@@ -610,7 +653,7 @@ public:
 	/** Stops the sound source. */
 	ENGINE_API virtual void Stop();
 
-	ENGINE_API virtual void StopNow() { Stop(); };
+	virtual void StopNow() { Stop(); };
 
 	/** Whether or not the source is stopping. Only implemented in audio mixer. */
 	virtual bool IsStopping() { return false; }
@@ -679,8 +722,20 @@ public:
 	/** Returns the source's playback percent. */
 	ENGINE_API virtual float GetPlaybackPercent() const;
 
+	/** Returns the sample (frame) rate of the audio played by the sound source. */
+	ENGINE_API virtual float GetSourceSampleRate() const;
+
+	/** Returns the number of frames (Samples / NumChannels) played by the sound source. */
+	ENGINE_API virtual int64 GetNumFramesPlayed() const;
+
+	/** Returns the total number of frames of audio for the sound wave. */
+	ENGINE_API virtual int32 GetNumTotalFrames() const;
+
+	/** Returns the frame index on which the sound source began playback. */
+	ENGINE_API virtual int32 GetStartFrame() const;
+
 	/** Returns the source's envelope at the callback block rate. Only implemented in audio mixer. */
-	ENGINE_API virtual float GetEnvelopeValue() const { return 0.0f; };
+	virtual float GetEnvelopeValue() const { return 0.0f; };
 
 	ENGINE_API void GetChannelLocations(FVector& Left, FVector&Right) const;
 
@@ -791,7 +846,7 @@ protected:
 public:
 
 	/** Struct containing the debug state of a SoundSource */
-	struct ENGINE_API FDebugInfo
+	struct FDebugInfo
 	{
 		/** True if this sound has been soloed. */
 		bool bIsSoloed = false;
@@ -802,6 +857,9 @@ public:
 		/** Reason why this sound is mute/soloed. */
 		FString MuteSoloReason;
 
+		/** Fraction of a single CPU core used to render audio. */
+		double CPUCoreUtilization = 0;
+
 		/** Basic CS so we can pass this around safely. */
 		FCriticalSection CS;
 	};
@@ -811,9 +869,26 @@ public:
 #endif //ENABLE_AUDIO_DEBUG
 };
 
-/*-----------------------------------------------------------------------------
-	FWaveModInfo. 
------------------------------------------------------------------------------*/
+// Data representing a cue in a wave file
+struct FWaveCue
+{
+	// Unique identifying gvalue for the cue
+	uint32 CuePointID = 0;
+	// Sample offset associated with the cue point
+	uint32 Position = 0;
+	// Cue label
+	FString Label;
+	// If this is a region, it will have a duration (sample length)
+	uint32 SampleLength = 0;
+};
+
+// data representing a sample loop in a wave file
+struct FWaveSampleLoop
+{
+	uint32 LoopID = 0;
+	uint32 StartFrame = 0;
+	uint32 EndFrame = 0;
+};
 
 //
 // Structure for in-memory interpretation and modification of WAVE sound structures.
@@ -822,13 +897,20 @@ class FWaveModInfo
 {
 public:
 
+	// Format specifiers
+	static constexpr uint16 WAVE_INFO_FORMAT_PCM = 0x0001;
+	static constexpr uint16 WAVE_INFO_FORMAT_ADPCM = 0x0002;
+	static constexpr uint16 WAVE_INFO_FORMAT_IEEE_FLOAT = 0x0003;
+	static constexpr uint16 WAVE_INFO_FORMAT_DVI_ADPCM = 0x0011;
+	static constexpr uint16 WAVE_INFO_FORMAT_OODLE_WAVE = 0xFFFF;
+
 	// Pointers to variables in the in-memory WAVE file.
 	const uint32* pSamplesPerSec;
 	const uint32* pAvgBytesPerSec;
 	const uint16* pBlockAlign;
 	const uint16* pBitsPerSample;
 	const uint16* pChannels;
-	const uint16* pFormatTag;
+	uint16* pFormatTag;
 
 	const uint32* pWaveDataSize;
 	const uint32* pMasterSize;
@@ -838,6 +920,15 @@ public:
 	const uint8*  WaveDataEnd;
 
 	uint32  NewDataSize;
+
+	// List of cues parsed from the wave file
+	TArray<FWaveCue> WaveCues;
+
+	// List of sample loops parsed from the wave file
+	TArray<FWaveSampleLoop> WaveSampleLoops;
+
+	// Timecode data if it was found on import.
+	TPimplPtr<FSoundWaveTimecodeInfo, EPimplPtrMode::DeepCopy> TimecodeInfo;
 
 	// Constructor.
 	FWaveModInfo()
@@ -850,6 +941,10 @@ public:
 		return ((InDW + 1)& ~1);
 	}
 
+	/** Wave Chunk Id utils */
+	ENGINE_API static const TArray<uint32>& GetRequiredWaveChunkIds();
+	ENGINE_API static const TArray<uint32>& GetOptionalWaveChunkIds();
+
 	// Read headers and load all info pointers in WaveModInfo. 
 	// Returns 0 if invalid data encountered.
 	ENGINE_API bool ReadWaveInfo(const uint8* WaveData, int32 WaveDataSize, FString* ErrorMessage = NULL, bool InHeaderDataOnly = false, void** OutFormatHeader = NULL );
@@ -860,6 +955,15 @@ public:
 	ENGINE_API bool ReadWaveHeader(const uint8* RawWaveData, int32 Size, int32 Offset );
 
 	ENGINE_API void ReportImportFailure() const;
+
+	/** Return total number of samples */
+	ENGINE_API uint32 GetNumSamples() const;
+
+	/** Return whether file format is supported for import */
+	ENGINE_API bool IsFormatSupported() const;
+	/** Return whether file format contains uncompressed PCM data */
+	ENGINE_API bool IsFormatUncompressed() const;
+
 };
 
 /** Utility to serialize raw PCM data into a wave file. */

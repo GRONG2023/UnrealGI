@@ -18,11 +18,13 @@ class UInterpCurveEdSetup;
 class UParticleLODLevel;
 class UParticleSystemComponent;
 
+enum EDetailMode : int;
+
 //~=============================================================================
 //	Burst emissions
 //~=============================================================================
 UENUM()
-enum EParticleBurstMethod
+enum EParticleBurstMethod : int
 {
 	EPBM_Instant UMETA(DisplayName="Instant"),
 	EPBM_Interpolated UMETA(DisplayName="Interpolated"),
@@ -33,7 +35,7 @@ enum EParticleBurstMethod
 //	SubUV-related
 //~=============================================================================
 UENUM()
-enum EParticleSubUVInterpMethod
+enum EParticleSubUVInterpMethod : int
 {
 	PSUVIM_None UMETA(DisplayName="None"),
 	PSUVIM_Linear UMETA(DisplayName="Linear"),
@@ -47,7 +49,7 @@ enum EParticleSubUVInterpMethod
 //	Cascade-related
 //~=============================================================================
 UENUM()
-enum EEmitterRenderMode
+enum EEmitterRenderMode : int
 {
 	ERM_Normal UMETA(DisplayName="Normal"),
 	ERM_Point UMETA(DisplayName="Point"),
@@ -89,11 +91,6 @@ DECLARE_STATS_GROUP(TEXT("Emitters"), STATGROUP_Emitters, STATCAT_Advanced);
 DECLARE_STATS_GROUP(TEXT("Emitters"), STATGROUP_EmittersRT, STATCAT_Advanced);
 DECLARE_DWORD_COUNTER_STAT_EXTERN(TEXT("STAT_EmittersStatGroupTester"), STAT_EmittersStatGroupTester, STATGROUP_Emitters, ENGINE_API);
 DECLARE_DWORD_COUNTER_STAT_EXTERN(TEXT("STAT_EmittersRTStatGroupTester"), STAT_EmittersRTStatGroupTester, STATGROUP_EmittersRT, ENGINE_API);
-
-/* detail modes for emitters are now flags instead of a single enum
-	an emitter is shown if it is flagged for the current system scalability level
- */
-#define NUM_DETAILMODE_FLAGS 3
 
 UCLASS(hidecategories=Object, editinlinenew, abstract, MinimalAPI)
 class UParticleEmitter : public UObject
@@ -169,10 +166,6 @@ class UParticleEmitter : public UObject
 	UPROPERTY(EditAnywhere, Category=Cascade)
 	uint8 bCollapsed:1;
 
-	/** If detail mode is >= system detail mode, primitive won't be rendered. */
-	UPROPERTY()
-	TEnumAsByte<EDetailMode> DetailMode_DEPRECATED;
-
 	/**
 	 *	The color of the emitter in the curve editor and debug rendering modes.
 	 */
@@ -184,7 +177,7 @@ class UParticleEmitter : public UObject
 	//	'Private' data - not required by the editor
 	//~=============================================================================
 	UPROPERTY(instanced)
-	TArray<class UParticleLODLevel*> LODLevels;
+	TArray<TObjectPtr<class UParticleLODLevel>> LODLevels;
 
 	UPROPERTY()
 	int32 PeakActiveParticles;
@@ -203,7 +196,7 @@ class UParticleEmitter : public UObject
 	float QualityLevelSpawnRateScale;
 
 	/** Detail mode: Set flags reflecting which system detail mode you want the emitter to be ticked and rendered in */
-	UPROPERTY(EditAnywhere, Category = Particle, meta = (Bitmask, BitmaskEnum = EParticleDetailMode))
+	UPROPERTY(EditAnywhere, Category = Particle, meta = (Bitmask, BitmaskEnum = "/Script/Engine.EParticleDetailMode"))
 	uint32 DetailModeBitmask;
 
 #if WITH_EDITORONLY_DATA
@@ -260,7 +253,8 @@ class UParticleEmitter : public UObject
 		DetailModeDisplay = "";
 		DetailModeDisplay += DetailModeBitmask & (1 << EParticleDetailMode::PDM_Low) ? "Low, " : "";
 		DetailModeDisplay += DetailModeBitmask & (1 << EParticleDetailMode::PDM_Medium) ? "Medium, " : "";
-		DetailModeDisplay += DetailModeBitmask & (1 << EParticleDetailMode::PDM_High) ? "High" : "";
+		DetailModeDisplay += DetailModeBitmask & (1 << EParticleDetailMode::PDM_High) ? "High, " : "";
+		DetailModeDisplay += DetailModeBitmask & (1 << EParticleDetailMode::PDM_Epic) ? "Epic" : "";
 	}
 #endif // WITH_EDITORONLY_DATA
 	virtual void Serialize(FArchive& Ar)override;
@@ -325,27 +319,7 @@ class UParticleEmitter : public UObject
 	*	@return NULL if the requested LODLevel is not valid.
 	*			The pointer to the requested UParticleLODLevel if valid.
 	*/
-	FORCEINLINE UParticleLODLevel* GetCurrentLODLevel(FParticleEmitterInstance* Instance)
-	{
-		if (!FPlatformProperties::HasEditorOnlyData())
-		{
-			return Instance->CurrentLODLevel;
-		}
-		else
-		{
-			// for the game (where we care about perf) we don't branch
-			if (Instance->GetWorld()->IsGameWorld() )
-			{
-				return Instance->CurrentLODLevel;
-			}
-			else
-			{
-				EditorUpdateCurrentLOD( Instance );
-				return Instance->CurrentLODLevel;
-			}
-		}
-	}
-
+	ENGINE_API UParticleLODLevel* GetCurrentLODLevel(FParticleEmitterInstance* Instance);
 
 	/**
 	 * This will update the LOD of the particle in the editor.

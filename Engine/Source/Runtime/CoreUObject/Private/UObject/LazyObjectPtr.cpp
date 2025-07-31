@@ -11,12 +11,25 @@
 #include "UObject/PropertyPortFlags.h"
 #include "UObject/UObjectAnnotation.h"
 
-
 /** Annotation associating objects with their guids **/
 static FUObjectAnnotationSparseSearchable<FUniqueObjectGuid,true> GuidAnnotation;
 
 #define MAX_PIE_INSTANCES 10
 static TMap<FGuid, FGuid> PIEGuidMap[MAX_PIE_INSTANCES];
+
+static FGuid RemapGuid(const FUniqueObjectGuid& Guid, int32 PIEInstanceID)
+{
+	check(PIEInstanceID != INDEX_NONE);
+	check(PIEInstanceID < MAX_PIE_INSTANCES);
+	FGuid& FoundGuid = PIEGuidMap[PIEInstanceID].FindOrAdd(Guid.GetGuid());
+
+	if (!FoundGuid.IsValid())
+	{
+		FoundGuid = FGuid::NewGuid();
+	}
+
+	return FoundGuid;
+};
 
 /*-----------------------------------------------------------------------------
 	FUniqueObjectGuid
@@ -29,16 +42,7 @@ FUniqueObjectGuid::FUniqueObjectGuid(const class UObject* InObject)
 
 FUniqueObjectGuid FUniqueObjectGuid::FixupForPIE(int32 PlayInEditorID) const
 {
-	FUniqueObjectGuid Temp(*this);
-
-	check(PlayInEditorID != -1)
-	const FGuid *FoundGuid = PIEGuidMap[PlayInEditorID % MAX_PIE_INSTANCES].Find(Temp.GetGuid());
-
-	if (FoundGuid)
-	{
-		Temp = *FoundGuid;
-	}
-	return Temp;
+	return RemapGuid(GetGuid(), PlayInEditorID);
 }
 
 UObject* FUniqueObjectGuid::ResolveObject() const
@@ -89,8 +93,6 @@ FUniqueObjectGuid FUniqueObjectGuid::GetOrCreateIDForObject(const class UObject 
 	return ObjectGuid;
 }
 
-FThreadSafeCounter FUniqueObjectGuid::CurrentAnnotationTag(1);
-
 /*-----------------------------------------------------------------------------------------------------------
 	FLazyObjectPtr
 -------------------------------------------------------------------------------------------------------------*/
@@ -102,21 +104,12 @@ void FLazyObjectPtr::PossiblySerializeObjectGuid(UObject *Object, FStructuredArc
 	if (UnderlyingArchive.IsSaving() || UnderlyingArchive.IsCountingMemory())
 	{
 		FUniqueObjectGuid Guid = GuidAnnotation.GetAnnotation(Object);
-		TOptional<FStructuredArchiveSlot> GuidSlot = Record.TryEnterField(SA_FIELD_NAME(TEXT("Guid")), Guid.IsValid());
+		TOptional<FStructuredArchiveSlot> GuidSlot = Record.TryEnterField(TEXT("Guid"), Guid.IsValid());
 		if (GuidSlot.IsSet())
 		{
 			if (UnderlyingArchive.GetPortFlags() & PPF_DuplicateForPIE)
 			{
-				check(GPlayInEditorID != -1);
-				FGuid &FoundGuid = PIEGuidMap[GPlayInEditorID % MAX_PIE_INSTANCES].FindOrAdd(Guid.GetGuid());
-				if (!FoundGuid.IsValid())
-				{
-					Guid = FoundGuid = FGuid::NewGuid();
-				}
-				else
-				{
-					Guid = FoundGuid;
-				}
+				Guid = RemapGuid(Guid, GPlayInEditorID);
 			}
 
 			GuidSlot.GetValue() << Guid;
@@ -124,7 +117,7 @@ void FLazyObjectPtr::PossiblySerializeObjectGuid(UObject *Object, FStructuredArc
 	}
 	else if (UnderlyingArchive.IsLoading())
 	{
-		TOptional<FStructuredArchiveSlot> GuidSlot = Record.TryEnterField(SA_FIELD_NAME(TEXT("Guid")), false);
+		TOptional<FStructuredArchiveSlot> GuidSlot = Record.TryEnterField(TEXT("Guid"), false);
 		if (GuidSlot.IsSet())
 		{
 			FUniqueObjectGuid Guid;
@@ -149,14 +142,27 @@ void FLazyObjectPtr::PossiblySerializeObjectGuid(UObject *Object, FStructuredArc
 							GuidAnnotation.RemoveAnnotation(OtherObject);
 							GuidAnnotation.AddAnnotation(Object, Guid);
 						}
+#if WITH_EDITOR
+						else if (Object->GetOutermostObject()->GetPackage()->HasAnyPackageFlags(PKG_PlayInEditor))
+						{
+							int32 PIEInstanceID = Object->GetOutermostObject()->GetPackage()->GetPIEInstanceID();
+
+							if (PIEInstanceID != INDEX_NONE)
+							{
+								Guid = RemapGuid(Guid, PIEInstanceID);
+								GuidAnnotation.AddAnnotation(Object, Guid);
+							}
+						}
+#endif
 						else
 						{
 							if (!bReassigning)
 							{
-								// Always warn for non-map packages, skip map packages in PIE or game
+								// Always warn for non-map packages, skip map packages in PIE, game, or when editor only. Editor-only maps are usually instances, and do not affect the game.
 								const bool bInGame = FApp::IsGame() || Package->HasAnyPackageFlags(PKG_PlayInEditor);
+								const bool bIsMapOrMapData = Package->ContainsMap() || Package->HasAnyPackageFlags(PKG_ContainsMapData);
 
-								UE_CLOG(!Package->ContainsMap() || !bInGame, LogUObjectGlobals, Warning,
+								UE_CLOG(!bIsMapOrMapData || (!bInGame && !Package->HasAnyPackageFlags(PKG_EditorOnly)), LogUObjectGlobals, Warning,
 									TEXT("Guid referenced by %s is already used by %s, which should never happen in the editor but could happen at runtime with duplicate level loading or PIE"),
 									*Object->GetFullName(), *OtherObject->GetFullName());
 							}
@@ -172,7 +178,6 @@ void FLazyObjectPtr::PossiblySerializeObjectGuid(UObject *Object, FStructuredArc
 					{
 						GuidAnnotation.AddAnnotation(Object, Guid);
 					}
-					FUniqueObjectGuid::InvalidateTag();
 				}
 			}
 		}
@@ -182,6 +187,6 @@ void FLazyObjectPtr::PossiblySerializeObjectGuid(UObject *Object, FStructuredArc
 void FLazyObjectPtr::ResetPIEFixups()
 {
 	check(GPlayInEditorID != -1);
-	PIEGuidMap[GPlayInEditorID % MAX_PIE_INSTANCES].Reset();
+	check(GPlayInEditorID < MAX_PIE_INSTANCES);
+	PIEGuidMap[GPlayInEditorID].Reset();
 }
-

@@ -15,29 +15,22 @@ public class AddContentDialog : ModuleRules
 
 		PrivateDependencyModuleNames.AddRange(
 			new string[] {
-				"Core",
 				"ApplicationCore",
-				"Slate",
-				"SlateCore",
+				"Core",
+				"CoreUObject",
+				"DesktopPlatform",
+				"DirectoryWatcher",
+				"EditorFramework",
+				"Engine",
+				"ImageWrapper",
 				"InputCore",
 				"Json",
-				"EditorStyle",
-				"DirectoryWatcher",
-				"DesktopPlatform",
 				"PakFile",
-				"ImageWrapper",
+				"Slate",
+				"SlateCore",
+				"ToolWidgets",
 				"UnrealEd",
-				"CoreUObject",				
-				"WidgetCarousel",				
-			
-			}
-		);
-
-		PrivateIncludePaths.AddRange(
-			new string[] {
-				"Editor/AddContentDialog/Private",
-				"Editor/AddContentDialog/Private/ViewModels",
-				"Editor/AddContentDialog/Private/ContentSourceProviders/FeaturePack",
+				"WidgetCarousel"
 			}
 		);
 	}

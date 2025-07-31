@@ -1,22 +1,51 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "K2Node_SpawnActor.h"
-#include "UObject/UnrealType.h"
-#include "Engine/Blueprint.h"
-#include "GameFramework/Actor.h"
-#include "Kismet/GameplayStatics.h"
+
+#include "Containers/EnumAsByte.h"
+#include "Containers/UnrealString.h"
+#include "EdGraph/EdGraph.h"
+#include "EdGraph/EdGraphPin.h"
 #include "EdGraphSchema_K2.h"
-#include "K2Node_CallFunction.h"
+#include "Engine/Blueprint.h"
+#include "Engine/MemberReference.h"
+#include "GameFramework/Actor.h"
+#include "HAL/PlatformMath.h"
+#include "Internationalization/Internationalization.h"
 #include "K2Node_CallArrayFunction.h"
+#include "K2Node_CallFunction.h"
+#include "Kismet/GameplayStatics.h"
 #include "Kismet2/BlueprintEditorUtils.h"
-#include "KismetCompilerMisc.h"
+#include "Kismet2/CompilerResultsLog.h"
 #include "KismetCompiler.h"
+#include "KismetCompilerMisc.h"
+#include "Math/Transform.h"
+#include "Misc/AssertionMacros.h"
+#include "Styling/AppStyle.h"
+#include "Templates/Casts.h"
+#include "Templates/SubclassOf.h"
+#include "Templates/UnrealTemplate.h"
+#include "UObject/Class.h"
+#include "UObject/NameTypes.h"
+#include "UObject/Object.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/UnrealNames.h"
+#include "UObject/UnrealType.h"
+#include "UObject/WeakObjectPtr.h"
+#include "UObject/WeakObjectPtrTemplates.h"
 
-static const FName WorldContextPinName(TEXT("WorldContextObject"));
-static const FName BlueprintPinName(TEXT("Blueprint"));
-static const FName SpawnTransformPinName(TEXT("SpawnTransform"));
-static const FName NoCollisionFailPinName(TEXT("SpawnEvenIfColliding"));
+struct FK2Node_SpawnActorHelper
+{
+	static const FName WorldContextPinName;
+	static const FName BlueprintPinName;
+	static const FName SpawnTransformPinName;
+	static const FName NoCollisionFailPinName;
+};
 
+const FName FK2Node_SpawnActorHelper::WorldContextPinName(TEXT("WorldContextObject"));
+const FName FK2Node_SpawnActorHelper::BlueprintPinName(TEXT("Blueprint"));
+const FName FK2Node_SpawnActorHelper::SpawnTransformPinName(TEXT("SpawnTransform"));
+const FName FK2Node_SpawnActorHelper::NoCollisionFailPinName(TEXT("SpawnEvenIfColliding"));
 
 #define LOCTEXT_NAMESPACE "K2Node_SpawnActor"
 
@@ -37,20 +66,20 @@ void UK2Node_SpawnActor::AllocateDefaultPins()
 	// If required add the world context pin
 	if (GetBlueprint()->ParentClass->HasMetaDataHierarchical(FBlueprintMetadata::MD_ShowWorldContextPin))
 	{
-		CreatePin(EGPD_Input, UEdGraphSchema_K2::PC_Object, UObject::StaticClass(), WorldContextPinName);
+		CreatePin(EGPD_Input, UEdGraphSchema_K2::PC_Object, UObject::StaticClass(), FK2Node_SpawnActorHelper::WorldContextPinName);
 	}
 
 	// Add blueprint pin
-	UEdGraphPin* BlueprintPin = CreatePin(EGPD_Input, UEdGraphSchema_K2::PC_Object, UBlueprint::StaticClass(), BlueprintPinName);
+	UEdGraphPin* BlueprintPin = CreatePin(EGPD_Input, UEdGraphSchema_K2::PC_Object, UBlueprint::StaticClass(), FK2Node_SpawnActorHelper::BlueprintPinName);
 	K2Schema->ConstructBasicPinTooltip(*BlueprintPin, LOCTEXT("BlueprintPinDescription", "The blueprint Actor you want to spawn"), BlueprintPin->PinToolTip);
 
 	// Transform pin
 	UScriptStruct* TransformStruct = TBaseStructure<FTransform>::Get();
-	UEdGraphPin* TransformPin = CreatePin(EGPD_Input, UEdGraphSchema_K2::PC_Struct, TransformStruct, SpawnTransformPinName);
+	UEdGraphPin* TransformPin = CreatePin(EGPD_Input, UEdGraphSchema_K2::PC_Struct, TransformStruct, FK2Node_SpawnActorHelper::SpawnTransformPinName);
 	K2Schema->ConstructBasicPinTooltip(*TransformPin, LOCTEXT("TransformPinDescription", "The transform to spawn the Actor with"), TransformPin->PinToolTip);
 
 	// bNoCollisionFail pin
-	UEdGraphPin* NoCollisionFailPin = CreatePin(EGPD_Input, UEdGraphSchema_K2::PC_Boolean, NoCollisionFailPinName);
+	UEdGraphPin* NoCollisionFailPin = CreatePin(EGPD_Input, UEdGraphSchema_K2::PC_Boolean, FK2Node_SpawnActorHelper::NoCollisionFailPinName);
 	K2Schema->ConstructBasicPinTooltip(*NoCollisionFailPin, LOCTEXT("NoCollisionFailPinDescription", "Determines if the Actor should be spawned when the location is blocked by a collision"), NoCollisionFailPin->PinToolTip);
 
 	// Result pin
@@ -133,16 +162,16 @@ bool UK2Node_SpawnActor::IsSpawnVarPin(UEdGraphPin* Pin) const
 	return(	Pin->PinName != UEdGraphSchema_K2::PN_Execute &&
 			Pin->PinName != UEdGraphSchema_K2::PN_Then &&
 			Pin->PinName != UEdGraphSchema_K2::PN_ReturnValue &&
-			Pin->PinName != BlueprintPinName &&
-			Pin->PinName != WorldContextPinName &&
-			Pin->PinName != NoCollisionFailPinName &&
-			Pin->PinName != SpawnTransformPinName );
+			Pin->PinName != FK2Node_SpawnActorHelper::BlueprintPinName &&
+			Pin->PinName != FK2Node_SpawnActorHelper::WorldContextPinName &&
+			Pin->PinName != FK2Node_SpawnActorHelper::NoCollisionFailPinName &&
+			Pin->PinName != FK2Node_SpawnActorHelper::SpawnTransformPinName );
 }
 
 
 void UK2Node_SpawnActor::PinDefaultValueChanged(UEdGraphPin* ChangedPin) 
 {
-	if (ChangedPin->PinName == BlueprintPinName)
+	if (ChangedPin->PinName == FK2Node_SpawnActorHelper::BlueprintPinName)
 	{
 		const UEdGraphSchema_K2* K2Schema = GetDefault<UEdGraphSchema_K2>();
 
@@ -157,7 +186,7 @@ void UK2Node_SpawnActor::PinDefaultValueChanged(UEdGraphPin* ChangedPin)
 			UEdGraphPin* OldPin = OldPins[i];
 			if (IsSpawnVarPin(OldPin))
 			{
-				OldPin->MarkPendingKill();
+				OldPin->MarkAsGarbage();
 				Pins.Remove(OldPin);
 			}
 		}
@@ -172,7 +201,7 @@ void UK2Node_SpawnActor::PinDefaultValueChanged(UEdGraphPin* ChangedPin)
 
 		// Refresh the UI for the graph so the pin changes show up
 		UEdGraph* Graph = GetGraph();
-		Graph->NotifyGraphChanged();
+		Graph->NotifyNodeChanged(this);
 
 		// Mark dirty
 		FBlueprintEditorUtils::MarkBlueprintAsModified(GetBlueprint());
@@ -200,7 +229,7 @@ UEdGraphPin* UK2Node_SpawnActor::GetBlueprintPin(const TArray<UEdGraphPin*>* InP
 	UEdGraphPin* Pin = nullptr;
 	for (UEdGraphPin* TestPin : *PinsToSearch)
 	{
-		if( TestPin && TestPin->PinName == BlueprintPinName )
+		if( TestPin && TestPin->PinName == FK2Node_SpawnActorHelper::BlueprintPinName )
 		{
 			Pin = TestPin;
 			break;
@@ -212,21 +241,21 @@ UEdGraphPin* UK2Node_SpawnActor::GetBlueprintPin(const TArray<UEdGraphPin*>* InP
 
 UEdGraphPin* UK2Node_SpawnActor::GetSpawnTransformPin()const
 {
-	UEdGraphPin* Pin = FindPinChecked(SpawnTransformPinName);
+	UEdGraphPin* Pin = FindPinChecked(FK2Node_SpawnActorHelper::SpawnTransformPinName);
 	check(Pin->Direction == EGPD_Input);
 	return Pin;
 }
 
 UEdGraphPin* UK2Node_SpawnActor::GetNoCollisionFailPin()const
 {
-	UEdGraphPin* Pin = FindPinChecked(NoCollisionFailPinName);
+	UEdGraphPin* Pin = FindPinChecked(FK2Node_SpawnActorHelper::NoCollisionFailPinName);
 	check(Pin->Direction == EGPD_Input);
 	return Pin;
 }
 
 UEdGraphPin* UK2Node_SpawnActor::GetWorldContextPin() const
 {
-	UEdGraphPin* Pin = FindPin(WorldContextPinName);
+	UEdGraphPin* Pin = FindPin(FK2Node_SpawnActorHelper::WorldContextPinName);
 	check(Pin == NULL || Pin->Direction == EGPD_Input);
 	return Pin;
 }
@@ -475,7 +504,7 @@ bool UK2Node_SpawnActor::HasExternalDependencies(TArray<class UStruct*>* Optiona
 {
 	UClass* SourceClass = GetClassToSpawn();
 	const UBlueprint* SourceBlueprint = GetBlueprint();
-	const bool bResult = (SourceClass != NULL) && (SourceClass->ClassGeneratedBy != SourceBlueprint);
+	const bool bResult = (SourceClass != NULL) && (SourceClass->ClassGeneratedBy.Get() != SourceBlueprint);
 	if (bResult && OptionalOutput)
 	{
 		OptionalOutput->AddUnique(SourceClass);
@@ -513,7 +542,7 @@ FEdGraphNodeDeprecationResponse UK2Node_SpawnActor::GetDeprecationResponse(EEdGr
 
 FSlateIcon UK2Node_SpawnActor::GetIconAndTint(FLinearColor& OutColor) const
 {
-	static FSlateIcon Icon("EditorStyle", "GraphEditor.SpawnActor_16x");
+	static FSlateIcon Icon(FAppStyle::GetAppStyleSetName(), "GraphEditor.SpawnActor_16x");
 	return Icon;
 }
 

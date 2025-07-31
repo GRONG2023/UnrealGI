@@ -2,24 +2,51 @@
 
 #include "K2Node_GetSubsystem.h"
 
-#include "KismetCompiler.h"
-#include "BlueprintNodeSpawner.h"
-#include "K2Node_CallFunction.h"
-#include "EditorCategoryUtils.h"
-#include "Kismet2/BlueprintEditorUtils.h"
 #include "BlueprintActionDatabaseRegistrar.h"
-
+#include "BlueprintEditorSettings.h"
+#include "BlueprintNodeSpawner.h"
+#include "Containers/EnumAsByte.h"
+#include "Containers/UnrealString.h"
+#include "Delegates/Delegate.h"
+#include "EdGraph/EdGraphPin.h"
+#include "EdGraphSchema_K2.h"
+#include "Editor/UnrealEdEngine.h"
+#include "EditorSubsystem.h"
+#include "Engine/Blueprint.h"
+#include "Engine/MemberReference.h"
+#include "GameFramework/PlayerController.h"
+#include "HAL/PlatformCrt.h"
+#include "HAL/PlatformMath.h"
+#include "Internationalization/Internationalization.h"
+#include "K2Node_CallFunction.h"
+#include "Kismet2/BlueprintEditorUtils.h"
+#include "Kismet2/CompilerResultsLog.h"
+#include "KismetCompiler.h"
+#include "Misc/AssertionMacros.h"
+#include "Preferences/UnrealEdOptions.h"
+#include "SourceCodeNavigation.h"
+#include "Styling/AppStyle.h"
+#include "Subsystems/AudioEngineSubsystem.h"
+#include "Subsystems/EditorSubsystemBlueprintLibrary.h"
 #include "Subsystems/EngineSubsystem.h"
 #include "Subsystems/GameInstanceSubsystem.h"
 #include "Subsystems/LocalPlayerSubsystem.h"
-#include "EditorSubsystem.h"
+#include "Subsystems/Subsystem.h"
 #include "Subsystems/SubsystemBlueprintLibrary.h"
-#include "Subsystems/EditorSubsystemBlueprintLibrary.h"
 #include "Subsystems/WorldSubsystem.h"
-#include "GameFramework/PlayerController.h"
-#include "Kismet2/BlueprintEditorUtils.h"
-#include "Subsystems/WorldSubsystem.h"
+#include "Templates/Casts.h"
+#include "Templates/UnrealTemplate.h"
+#include "UObject/Class.h"
+#include "UObject/NameTypes.h"
+#include "UObject/Object.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/UObjectHash.h"
+#include "UObject/WeakObjectPtr.h"
+#include "UObject/WeakObjectPtrTemplates.h"
+#include "UnrealEdGlobals.h"
 
+class FArchive;
+class UEdGraph;
 
 // ************************************************************************************
 //    UK2Node_GetSubsystem
@@ -46,7 +73,7 @@ void UK2Node_GetSubsystem::Initialize( UClass* NodeClass )
 void UK2Node_GetSubsystem::AllocateDefaultPins()
 {
 	// If required add the world context pin
-	if (GetBlueprint()->ParentClass->HasMetaData(FBlueprintMetadata::MD_ShowWorldContextPin))
+	if (GetBlueprint()->ParentClass->HasMetaDataHierarchical(FBlueprintMetadata::MD_ShowWorldContextPin))
 	{
 		CreatePin(EGPD_Input, UEdGraphSchema_K2::PC_Object, UObject::StaticClass(), TEXT("WorldContext"));
 	}
@@ -73,7 +100,7 @@ bool UK2Node_GetSubsystem::IsCompatibleWithGraph(const UEdGraph* TargetGraph) co
 FSlateIcon UK2Node_GetSubsystem::GetIconAndTint(FLinearColor& OutColor) const
 {
 	OutColor = GetNodeTitleColor();
-	static FSlateIcon Icon("EditorStyle", "Kismet.AllClasses.FunctionIcon");
+	static FSlateIcon Icon(FAppStyle::GetAppStyleSetName(), "Kismet.AllClasses.FunctionIcon");
 	return Icon;
 }
 
@@ -140,6 +167,10 @@ void UK2Node_GetSubsystem::ExpandNode(class FKismetCompilerContext& CompilerCont
 	else if (CustomClass->IsChildOf<ULocalPlayerSubsystem>())
 	{
 		Get_FunctionName = GET_FUNCTION_NAME_CHECKED(USubsystemBlueprintLibrary, GetLocalPlayerSubsystem);
+	}
+	else if (CustomClass->IsChildOf<UAudioEngineSubsystem>())
+	{
+		Get_FunctionName = GET_FUNCTION_NAME_CHECKED(USubsystemBlueprintLibrary, GetAudioEngineSubsystem);
 	}
 	else
 	{
@@ -216,6 +247,7 @@ void UK2Node_GetSubsystem::GetMenuActions(FBlueprintActionDatabaseRegistrar& Act
 	GetDerivedClasses(UGameInstanceSubsystem::StaticClass(), Subclasses);
 	GetDerivedClasses(UWorldSubsystem::StaticClass(), Subclasses);
 	GetDerivedClasses(ULocalPlayerSubsystem::StaticClass(), Subclasses);
+	GetDerivedClasses(UAudioEngineSubsystem::StaticClass(), Subclasses);
 
 	auto CustomizeCallback = [](UEdGraphNode* Node, bool bIsTemplateNode, UClass* Subclass)
 	{
@@ -256,6 +288,10 @@ FText UK2Node_GetSubsystem::GetMenuCategory() const
 	{
 		return NSLOCTEXT("K2Node", "GetSubsystem_WorldSubsystemsMenuCategory", "World Subsystems");
 	}
+	else if (CustomClass->IsChildOf<UAudioEngineSubsystem>())
+	{
+		return NSLOCTEXT("K2Node", "GetSubsystem_AudioEngineSubsystemsMenuCategory", "AudioEngine Subsystems");
+	}
 
 	return NSLOCTEXT("K2Node", "GetSubsystem_InvalidSubsystemTypeMenuCategory", "Invalid Subsystem Type");
 }
@@ -273,11 +309,18 @@ FText UK2Node_GetSubsystem::GetTooltipText() const
 		{
 			SubsystemTypeText = NSLOCTEXT("K2Node", "GetSubsystem_WorldSubsystemTooltip", "World Subsystem");
 		}
+		else if (CustomClass->IsChildOf<UAudioEngineSubsystem>())
+		{
+			SubsystemTypeText = NSLOCTEXT("K2Node", "GetSubsystem_AudioEngineSubsystemTooltip", "AudioEngine Subsystem");
+		}
 		else
 		{
 			SubsystemTypeText = NSLOCTEXT("K2Node", "GetSubsystem_LocalPlayerSubsystemTooltip", "LocalPlayer Subsystem");
 		}
-		return FText::FormatNamed(NSLOCTEXT("K2Node", "GetSubsystem_TooltipFormat", "Get {ClassName} a {SubsystemType}"), TEXT("ClassName"), CustomClass->GetDisplayNameText(), TEXT("SubsystemType"), SubsystemTypeText);
+		return FText::FormatNamed(NSLOCTEXT("K2Node", "GetSubsystem_TooltipFormat", "Get {ClassName} ({SubsystemType})\n\n{ClassTooltip}"),
+			TEXT("ClassName"), CustomClass->GetDisplayNameText(),
+			TEXT("SubsystemType"), SubsystemTypeText,
+			TEXT("ClassTooltip"), CustomClass->GetToolTipText(/*bShortTooltip=*/ true));
 	}
 
 	return NSLOCTEXT("K2Node", "GetSubsystem_InvalidSubsystemTypeTooltip", "Invalid Subsystem Type");
@@ -713,8 +756,41 @@ FText UK2Node_GetEditorSubsystem::GetTooltipText() const
 	{
 		return FText::FormatNamed(NSLOCTEXT("K2Node", "GetEditorSubsystem_TooltipFormat", "Get {ClassName} an Editor Subsystem"), TEXT("ClassName"), CustomClass->GetDisplayNameText());
 	}
-
+	 
 	return NSLOCTEXT("K2Node", "GetEditorSubsystem_InvalidSubsystemTypeTooltip", "Invalid Subsystem Type");
+}
+
+bool UK2Node_GetSubsystem::CanJumpToDefinition() const
+{
+	if (CustomClass && ensure(GUnrealEd) && GUnrealEd->GetUnrealEdOptions()->IsCPPAllowed())
+	{
+		return true;
+	}
+	return Super::CanJumpToDefinition();
+}
+
+void UK2Node_GetSubsystem::JumpToDefinition() const
+{
+	bool bSucceeded = false;
+	
+	if (CustomClass && ensure(GUnrealEd) && GUnrealEd->GetUnrealEdOptions()->IsCPPAllowed())
+	{
+		// Attempt to navigate to the header file where the class is defined if the 
+		// blueprint preferences allow for it
+		if (GetDefault<UBlueprintEditorSettings>()->bNavigateToNativeFunctionsFromCallNodes)
+		{
+			if (FSourceCodeNavigation::CanNavigateToClass(CustomClass))
+			{
+				bSucceeded = FSourceCodeNavigation::NavigateToClass(CustomClass);
+			}
+		}
+	}
+
+	// Otherwise fall back to the base class which will just bring focus to this node
+	if (!bSucceeded)
+	{
+		Super::JumpToDefinition();
+	}
 }
 
 bool UK2Node_GetEditorSubsystem::IsActionFilteredOut(class FBlueprintActionFilter const& Filter)

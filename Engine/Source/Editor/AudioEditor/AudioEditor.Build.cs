@@ -1,32 +1,24 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
+using System.IO;
 using UnrealBuildTool;
 
 public class AudioEditor : ModuleRules
 {
 	public AudioEditor(ReadOnlyTargetRules Target) : base(Target)
 	{
-		PrivateIncludePaths.AddRange
-		(
-			new string[]
-			{
-				"Editor/AudioEditor/Private",
-				"Editor/AudioEditor/Private/Factories",
-				"Editor/AudioEditor/Private/AssetTypeActions"
-			}
-		);
-
 		PrivateDependencyModuleNames.AddRange
 		(
 			new string[]
 			{
-				"AudioMixer",
 				"EditorSubsystem",
 				"GameProjectGeneration",
 				"ToolMenus",
 				"UMG",
+				"DeveloperSettings",
 				"UMGEditor",
-				"AudioExtensions"
+				"AudioExtensions",
+				"AudioLinkEngine"
 			}
 		);
 
@@ -37,13 +29,15 @@ public class AudioEditor : ModuleRules
 				"Core",
 				"CoreUObject",
 				"ApplicationCore",
+				"AssetDefinition",
 				"AudioMixer",
+				"SignalProcessing",
 				"InputCore",
 				"Engine",
+				"EditorFramework",
 				"UnrealEd",
 				"Slate",
 				"SlateCore",
-				"EditorStyle",
 				"RenderCore",
 				"LevelEditor",
 				"Landscape",
@@ -59,7 +53,8 @@ public class AudioEditor : ModuleRules
 		(
 			new string[]
 			{
-				"AssetTools"
+				"AssetTools",
+				"WorkspaceMenuStructure",
 			}
 		);
 
@@ -72,9 +67,12 @@ public class AudioEditor : ModuleRules
 			}
 		);
 
+		
+		
+		
 		if (Target.IsInPlatformGroup(UnrealPlatformGroup.Windows))
 		{
-			string PlatformName = Target.Platform == UnrealTargetPlatform.Win32 ? "Win32" : "Win64";
+			string PlatformName = "Win64";
 
 			string LibSndFilePath = Target.UEThirdPartyBinariesDirectory + "libsndfile/";
 			LibSndFilePath += PlatformName;
@@ -86,6 +84,32 @@ public class AudioEditor : ModuleRules
 
 			RuntimeDependencies.Add("$(EngineDir)/Binaries/ThirdParty/libsndfile/" + PlatformName + "/libsndfile-1.dll");
 
+			PublicDefinitions.Add("WITH_SNDFILE_IO=1");
+		}
+		else if (Target.IsInPlatformGroup(UnrealPlatformGroup.Apple))
+		{
+			string PlatformName = "Mac/";
+			string LibFilename = "libsndfile.1.dylib";
+			string LibFolder = "libsndfile/";
+			string LibSndFilePath = Path.Combine(Target.UEThirdPartyBinariesDirectory, LibFolder, PlatformName, LibFilename);
+
+			PublicDelayLoadDLLs.Add(LibSndFilePath);
+			PublicIncludePathModuleNames.Add("UELibSampleRate");
+			RuntimeDependencies.Add(LibSndFilePath);
+			
+			PublicDefinitions.Add("WITH_SNDFILE_IO=1");
+		}
+		else if (Target.IsInPlatformGroup(UnrealPlatformGroup.Linux))
+		{
+			string PlatformName = "Linux/";
+			string LibFilename = "libsndfile.so.1";
+			string LibFolder = "libsndfile/";
+			string LibSndFilePath = Path.Combine(Target.UEThirdPartyBinariesDirectory, LibFolder, PlatformName, LibFilename);
+
+			PublicDelayLoadDLLs.Add(LibSndFilePath);
+			PublicIncludePathModuleNames.Add("UELibSampleRate");
+			RuntimeDependencies.Add(LibSndFilePath);
+			
 			PublicDefinitions.Add("WITH_SNDFILE_IO=1");
 		}
 		else

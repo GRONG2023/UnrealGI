@@ -6,18 +6,11 @@ public class AnimationBlueprintEditor : ModuleRules
 {
 	public AnimationBlueprintEditor(ReadOnlyTargetRules Target) : base(Target)
 	{
-		PrivateIncludePaths.Add("Editor/AnimationBlueprintEditor/Private");	// For PCH includes (because they don't work with relative paths, yet)
-
 		PrivateIncludePathModuleNames.AddRange(
 			new string[] {
-				"AssetRegistry", 
-				"MainFrame",
-				"DesktopPlatform",
                 "SkeletonEditor",
-                "ContentBrowser",
-                "AssetTools",
-                "AnimationEditor",
-            }
+				"MessageLog"
+			}
 		);
 
 		PrivateDependencyModuleNames.AddRange(
@@ -34,12 +27,14 @@ public class AnimationBlueprintEditor : ModuleRules
                 "InputCore",
 				"KismetWidgets",
 				"AnimGraph",
-                "PropertyEditor",
+				"AnimGraphRuntime",
+				"PropertyEditor",
 				"EditorWidgets",
                 "BlueprintGraph",
                 "RHI",
                 "KismetCompiler",
 				"ToolMenus",
+				"AnimGraphRuntime",
             }
 		);
 
@@ -59,6 +54,7 @@ public class AnimationBlueprintEditor : ModuleRules
             new string[] {
                 "Kismet",
                 "Persona",
+				"EditorFramework"
             }
         );
     }

@@ -2,26 +2,54 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "SlateFwd.h"
-#include "Input/Reply.h"
 #include "ClassViewerModule.h"
-#include "Widgets/DeclarativeSyntaxSupport.h"
-#include "Widgets/SWidget.h"
-#include "Widgets/SCompoundWidget.h"
-#include "Widgets/Views/STableViewBase.h"
-#include "Widgets/Views/STableRow.h"
-#include "Widgets/Views/STreeView.h"
-#include "Settings/ClassViewerSettings.h"
+#include "Containers/Array.h"
+#include "Containers/BitArray.h"
+#include "Containers/Map.h"
+#include "Containers/Set.h"
+#include "Containers/SparseArray.h"
+#include "CoreMinimal.h"
+#include "Delegates/Delegate.h"
 #include "Engine/EngineTypes.h"
+#include "HAL/Platform.h"
+#include "HAL/PlatformCrt.h"
+#include "Input/Reply.h"
+#include "Internationalization/Text.h"
+#include "Misc/Optional.h"
+#include "Settings/ClassViewerSettings.h"
+#include "SlateFwd.h"
+#include "Templates/SharedPointer.h"
+#include "Templates/TypeHash.h"
+#include "Templates/UnrealTemplate.h"
+#include "Types/SlateEnums.h"
+#include "UObject/NameTypes.h"
 #include "UObject/SoftObjectPath.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
+#include "Widgets/SCompoundWidget.h"
+#include "Widgets/SWidget.h"
+#include "Widgets/Views/SListView.h"
+#include "Widgets/Views/STableRow.h"
+#include "Widgets/Views/STableViewBase.h"
+#include "Widgets/Views/STreeView.h"
 
+class FClassViewerFilter;
+class FClassViewerFilterOption;
 class FClassViewerNode;
 class FMenuBuilder;
+class FString;
 class FTextFilterExpressionEvaluator;
-class UBlueprint;
+class ITableRow;
 class SComboButton;
-class FClassViewerFilter;
+class SSearchBox;
+class SWidget;
+class UBlueprint;
+class UClass;
+struct FDirectoryPath;
+struct FFocusEvent;
+struct FGeometry;
+struct FKeyEvent;
+struct FPointerEvent;
+struct FSoftClassPath;
 
 //////////////////////////////////////////////////////////////////////////
 // SClassViewer
@@ -64,6 +92,9 @@ public:
 
 	/** Sends a requests to the Class Viewer to refresh itself the next chance it gets */
 	CLASSVIEWER_API void Refresh();
+
+	/** Requests a repopulation of the internal Class Hierarchy database */
+	CLASSVIEWER_API static void RequestPopulateClassHierarchy();
 
 	/** Destroys the internal Class Hierarchy database */
 	static void DestroyClassHierarchy();
@@ -177,8 +208,7 @@ private:
 	/** Expands all of the root nodes */
 	virtual void ExpandRootNodes();
 
-	/** Returns the foreground color for the view button */
-	FSlateColor GetViewButtonForegroundColor() const;
+
 
 	/** Handler for when the view combo button is clicked */
 	TSharedRef<SWidget> GetViewButtonContent();
@@ -206,6 +236,12 @@ private:
 	
 	/** Whether or not it's possible to show internal use classes */
 	bool IsToggleShowInternalClassesAllowed() const;
+
+	/** Toggle whether a custom class filter option is enabled */
+	void ToggleCustomFilterOption(TSharedRef<FClassViewerFilterOption> FilterOption);
+
+	/** Returns whether a custom class filter option is currently enabled */
+	bool IsCustomFilterOptionEnabled(TSharedRef<FClassViewerFilterOption> FilterOption) const;
 
 	/** Get the total number of classes passing the current filters.*/
 	const int GetNumItems() const;
@@ -275,4 +311,7 @@ private:
 
 	/** Number of classes that passed the filter*/
 	int NumClasses;
+
+	/** Custom filter options for the View Options menu */
+	TArray<TSharedRef<FClassViewerFilterOption>> CustomClassFilterOptions;
 };

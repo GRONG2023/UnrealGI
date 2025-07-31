@@ -1,18 +1,17 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "CoreMinimal.h"
-#include "Modules/ModuleManager.h"
-#include "Widgets/DeclarativeSyntaxSupport.h"
-#include "Widgets/SWindow.h"
+#include "ContentSourceProviderManager.h"
+#include "ContentSourceProviders/FeaturePack/FeaturePackContentSourceProvider.h"
 #include "Framework/Application/SlateApplication.h"
 #include "IAddContentDialogModule.h"
-#include "ContentSourceProviderManager.h"
-#include "AddContentDialogStyle.h"
+#include "Modules/ModuleManager.h"
 #include "SAddContentDialog.h"
-
-#include "ContentSourceProviders/FeaturePack/FeaturePackContentSourceProvider.h"
+#include "Templates/SharedPointer.h"
 #include "WidgetCarouselModule.h"
 #include "WidgetCarouselStyle.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
+
+class SWindow;
 
 #define LOCTEXT_NAMESPACE "AddContentDialog"
 
@@ -27,12 +26,10 @@ public:
 
 		ContentSourceProviderManager = TSharedPtr<FContentSourceProviderManager>(new FContentSourceProviderManager());
 		ContentSourceProviderManager->RegisterContentSourceProvider(MakeShareable(new FFeaturePackContentSourceProvider()));
-		FAddContentDialogStyle::Initialize();
 	}
 
 	virtual void ShutdownModule() override
 	{
-		FAddContentDialogStyle::Shutdown();
 		FWidgetCarouselModuleStyle::Shutdown();
 	}
 

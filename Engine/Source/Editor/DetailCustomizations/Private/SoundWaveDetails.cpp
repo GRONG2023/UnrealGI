@@ -1,16 +1,38 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "SoundWaveDetails.h"
-#include "Settings/EditorExperimentalSettings.h"
-#include "Sound/SoundWave.h"
-#include "DetailLayoutBuilder.h"
-#include "ScopedTransaction.h"
-#include "IDetailPropertyRow.h"
+
+#include "Containers/Array.h"
 #include "DetailCategoryBuilder.h"
-#include "Widgets/Input/SButton.h"
-#include "Engine/CurveTable.h"
+#include "DetailLayoutBuilder.h"
 #include "DetailWidgetRow.h"
+#include "Engine/CurveTable.h"
+#include "Fonts/SlateFontInfo.h"
+#include "HAL/Platform.h"
+#include "IDetailPropertyRow.h"
+#include "Internationalization/Internationalization.h"
+#include "Misc/Attribute.h"
+#include "Misc/Optional.h"
+#include "PropertyEditorModule.h"
+#include "PropertyHandle.h"
+#include "ScopedTransaction.h"
+#include "SlotBase.h"
+#include "Sound/SoundWave.h"
+#include "ISoundWaveCloudStreaming.h"
+#include "Templates/Casts.h"
+#include "Types/SlateEnums.h"
+#include "UObject/NameTypes.h"
+#include "UObject/Object.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/UObjectGlobals.h"
+#include "UObject/WeakObjectPtr.h"
+#include "UObject/WeakObjectPtrTemplates.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
+#include "Widgets/Input/SButton.h"
+#include "Widgets/SBoxPanel.h"
 #include "Widgets/Text/STextBlock.h"
+
+class SWidget;
 
 #define LOCTEXT_NAMESPACE "FSoundWaveDetails"
 
@@ -24,6 +46,12 @@ TSharedRef<IDetailCustomization> FSoundWaveDetails::MakeInstance()
 void FSoundWaveDetails::CustomizeDetails(IDetailLayoutBuilder& DetailBuilder)
 {
 	CustomizeCurveDetails(DetailBuilder);
+	CustomizeCloudStreamingPlatformDetails(DetailBuilder);
+
+	if(!FModuleManager::Get().IsModuleLoaded("WaveformTransformations"))
+	{
+		DetailBuilder.HideCategory("Waveform Processing");
+	}
 }
 
 void FSoundWaveDetails::CustomizeCurveDetails(IDetailLayoutBuilder& DetailBuilder)
@@ -147,5 +175,48 @@ FReply FSoundWaveDetails::HandleUseInternalCurves(USoundWave* SoundWave, TShared
 	
 	return FReply::Handled();
 }
+
+void FSoundWaveDetails::CustomizeCloudStreamingPlatformDetails(IDetailLayoutBuilder& DetailBuilder)
+{
+#if WITH_EDITOR
+	IModularFeatures::FScopedLockModularFeatureList ScopedLockModularFeatureList;
+	TArray<Audio::ISoundWaveCloudStreamingFeature*> Features = IModularFeatures::Get().GetModularFeatureImplementations<Audio::ISoundWaveCloudStreamingFeature>(Audio::ISoundWaveCloudStreamingFeature::GetModularFeatureName());
+	bool bEnabled = false;
+	for(int32 i=0; i<Features.Num(); ++i)
+	{
+		if (Features[i]->AddCustomizationCloudStreamingPlatformDetails(DetailBuilder))
+		{
+			bEnabled = true;
+			break;
+		}
+	}
+	if (!bEnabled)
+	{
+		DetailBuilder.HideCategory("Platform specific");
+
+		// If there are objects that have the cloud streaming flag set without there being a suitable feature plugin available now,
+		// we do not hide the flag so that it can be disabled.
+		TArray<TWeakObjectPtr<UObject>> Objects;
+		DetailBuilder.GetObjectsBeingCustomized(Objects);
+		Objects = Objects.FilterByPredicate([](const TWeakObjectPtr<UObject>& ObjectPtr) { return ObjectPtr.IsValid() && ObjectPtr->IsA<USoundWave>() && Cast<USoundWave>(ObjectPtr)->IsCloudStreamingEnabled(); });
+		TSharedPtr<IPropertyHandle> CloudStreamingProperty = DetailBuilder.GetProperty(USoundWave::GetCloudStreamingEnabledPropertyName());
+		if (CloudStreamingProperty.IsValid())
+		{
+			if (Objects.Num() == 0)
+			{
+				DetailBuilder.HideProperty(CloudStreamingProperty);
+			}
+			else
+			{
+				FText CurrentToolTipText = CloudStreamingProperty->GetToolTipText();
+				FText NewToolTipText = FText::FromString(FString::Printf(TEXT("%s\n\nNo suitable plugin has been found. You can disable this flag to get back to non-cloud streaming settings."), *CurrentToolTipText.ToString()));
+				CloudStreamingProperty->SetToolTipText(NewToolTipText);
+			}
+		}
+	}
+#endif
+}
+
+
 
 #undef LOCTEXT_NAMESPACE

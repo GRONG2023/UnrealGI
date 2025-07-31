@@ -1,27 +1,70 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "SBehaviorTreeDiff.h"
-#include "Widgets/Layout/SSplitter.h"
-#include "EdGraph/EdGraph.h"
-#include "SlateOptMacros.h"
-#include "Framework/Commands/Commands.h"
-#include "Widgets/Text/STextBlock.h"
-#include "Framework/MultiBox/MultiBoxDefs.h"
-#include "Framework/MultiBox/MultiBoxBuilder.h"
-#include "Widgets/Input/SButton.h"
-#include "Widgets/Views/SListView.h"
-#include "EditorStyleSet.h"
-#include "ISourceControlProvider.h"
-#include "ISourceControlModule.h"
-#include "DiffResults.h"
-#include "BehaviorTreeGraphNode.h"
-#include "PropertyEditorModule.h"
-#include "GraphDiffControl.h"
-#include "EdGraphUtilities.h"
-#include "BehaviorTreeEditorUtils.h"
+
 #include "BehaviorTree/BehaviorTree.h"
+#include "BehaviorTreeEditorUtils.h"
+#include "BehaviorTreeGraphNode.h"
+#include "Containers/BitArray.h"
+#include "Containers/Set.h"
+#include "Containers/UnrealString.h"
+#include "DetailsViewArgs.h"
+#include "DiffResults.h"
+#include "EdGraph/EdGraph.h"
+#include "EdGraph/EdGraphNode.h"
+#include "EdGraph/EdGraphPin.h"
+#include "EdGraphUtilities.h"
+#include "Framework/Commands/Commands.h"
 #include "Framework/Commands/GenericCommands.h"
+#include "Framework/Commands/InputChord.h"
+#include "Framework/Commands/UIAction.h"
+#include "Framework/Commands/UICommandInfo.h"
+#include "Framework/Commands/UICommandList.h"
+#include "Framework/MultiBox/MultiBoxBuilder.h"
+#include "Framework/MultiBox/MultiBoxDefs.h"
+#include "Framework/Views/ITypedTableView.h"
+#include "GenericPlatform/GenericApplication.h"
+#include "GraphDiffControl.h"
 #include "HAL/PlatformApplicationMisc.h"
+#include "HAL/PlatformCrt.h"
+#include "IDetailsView.h"
+#include "ISourceControlModule.h"
+#include "ISourceControlProvider.h"
+#include "InputCoreTypes.h"
+#include "Internationalization/Internationalization.h"
+#include "Layout/Children.h"
+#include "Layout/Margin.h"
+#include "Layout/Visibility.h"
+#include "Math/Color.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/Attribute.h"
+#include "Modules/ModuleManager.h"
+#include "PropertyEditorDelegates.h"
+#include "PropertyEditorModule.h"
+#include "SlateOptMacros.h"
+#include "SlotBase.h"
+#include "Styling/AppStyle.h"
+#include "Styling/SlateColor.h"
+#include "Templates/Casts.h"
+#include "Templates/Sorting.h"
+#include "Templates/UnrealTemplate.h"
+#include "Textures/SlateIcon.h"
+#include "UObject/NameTypes.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/UnrealNames.h"
+#include "Widgets/Input/SButton.h"
+#include "Widgets/Layout/SBorder.h"
+#include "Widgets/Layout/SSplitter.h"
+#include "Widgets/SBoxPanel.h"
+#include "Widgets/Text/STextBlock.h"
+#include "Widgets/Views/SListView.h"
+#include "Widgets/Views/STableRow.h"
+
+class ITableRow;
+class STableViewBase;
+class SWidget;
+class UObject;
+struct FSlateBrush;
 
 #define LOCTEXT_NAMESPACE "SBehaviorTreeDiff"
 
@@ -43,7 +86,7 @@ struct FTreeDiffResultItem : public TSharedFromThis<FTreeDiffResultItem>
 	TSharedRef<SWidget>	GenerateWidget() const
 	{
 		FText ToolTip = Result.ToolTip;
-		FLinearColor Color = Result.DisplayColor;
+		FSlateColor Color = Result.GetDisplayColor();
 		FText Text = Result.DisplayString;
 		if(Text.IsEmpty())
 		{
@@ -69,7 +112,7 @@ class FDiffListCommands : public TCommands<FDiffListCommands>
 public:
 	/** Constructor */
 	FDiffListCommands() 
-		: TCommands<FDiffListCommands>("DiffList", LOCTEXT("Diff", "Behavior Tree Diff"), NAME_None, FEditorStyle::GetStyleSetName())
+		: TCommands<FDiffListCommands>("DiffList", LOCTEXT("Diff", "Behavior Tree Diff"), NAME_None, FAppStyle::GetAppStyleSetName())
 	{
 	}
 
@@ -95,6 +138,7 @@ void SBehaviorTreeDiff::Construct( const FArguments& InArgs )
 {
 	LastPinTarget = NULL;
 	LastOtherPinTarget = NULL;
+	FoundDiffs = MakeShared<TArray<FDiffSingleResult>>();
 
 	FDiffListCommands::Register();
 
@@ -121,7 +165,7 @@ void SBehaviorTreeDiff::Construct( const FArguments& InArgs )
 	this->ChildSlot
 	[	
 		SNew(SBorder)
-		.BorderImage(FEditorStyle::GetBrush("ToolPanel.GroupBorder"))
+		.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
 		.Content()
 		[
 			SNew(SSplitter)
@@ -179,8 +223,8 @@ void SBehaviorTreeDiff::Construct( const FArguments& InArgs )
 		]
 	];
 
-	PanelOld.GeneratePanel(PanelOld.BehaviorTree->BTGraph, PanelNew.BehaviorTree->BTGraph);
-	PanelNew.GeneratePanel(PanelNew.BehaviorTree->BTGraph, PanelOld.BehaviorTree->BTGraph);
+	PanelOld.GeneratePanel(PanelOld.BehaviorTree ? PanelOld.BehaviorTree->BTGraph : nullptr, FoundDiffs);
+	PanelNew.GeneratePanel(PanelNew.BehaviorTree ? PanelNew.BehaviorTree->BTGraph : nullptr, FoundDiffs);
 }
 END_SLATE_FUNCTION_BUILD_OPTIMIZATION
 
@@ -195,14 +239,7 @@ TSharedRef<SWidget> SBehaviorTreeDiff::GenerateDiffListWidget()
 	BuildDiffSourceArray();
 	if(DiffListSource.Num() > 0)
 	{
-		struct FSortDiff
-		{
-			bool operator () (const FSharedDiffOnGraph& A, const FSharedDiffOnGraph& B) const
-			{
-				return A->Result.Diff < B->Result.Diff;
-			}
-		};
-		Sort(DiffListSource.GetData(),DiffListSource.Num(), FSortDiff());
+		Algo::SortBy(DiffListSource, [](const FSharedDiffOnGraph& Data) { return Data->Result.Diff; });
 
 		// Map commands through UI
 		const FDiffListCommands& Commands = FDiffListCommands::Get();
@@ -212,8 +249,8 @@ TSharedRef<SWidget> SBehaviorTreeDiff::GenerateDiffListWidget()
 		KeyCommands->MapAction(Commands.Next, FExecuteAction::CreateSP(this, &SBehaviorTreeDiff::NextDiff));
 
 		FToolBarBuilder ToolbarBuilder(KeyCommands.ToSharedRef(), FMultiBoxCustomization::None);
-		ToolbarBuilder.AddToolBarButton(Commands.Previous, NAME_None, TAttribute<FText>(), TAttribute<FText>(), FSlateIcon(FEditorStyle::GetStyleSetName(), "BlueprintDif.PrevDiff"));
-		ToolbarBuilder.AddToolBarButton(Commands.Next, NAME_None, TAttribute<FText>(), TAttribute<FText>(), FSlateIcon(FEditorStyle::GetStyleSetName(), "BlueprintDif.NextDiff"));
+		ToolbarBuilder.AddToolBarButton(Commands.Previous, NAME_None, TAttribute<FText>(), TAttribute<FText>(), FSlateIcon(FAppStyle::GetAppStyleSetName(), "BlueprintDif.PrevDiff"));
+		ToolbarBuilder.AddToolBarButton(Commands.Next, NAME_None, TAttribute<FText>(), TAttribute<FText>(), FSlateIcon(FAppStyle::GetAppStyleSetName(), "BlueprintDif.NextDiff"));
 
 		TSharedRef<SHorizontalBox> Result =	SNew(SHorizontalBox)
 		+SHorizontalBox::Slot()
@@ -232,9 +269,9 @@ TSharedRef<SWidget> SBehaviorTreeDiff::GenerateDiffListWidget()
 			.AutoHeight()
 			[
 				SNew(SBorder)
-				.BorderImage(FEditorStyle::GetBrush("PropertyWindow.CategoryBackground"))
+				.BorderImage(FAppStyle::GetBrush("PropertyWindow.CategoryBackground"))
 				.Padding(FMargin(2.0f))
-				.ForegroundColor(FEditorStyle::GetColor("PropertyWindow.CategoryForeground"))
+				.ForegroundColor(FAppStyle::GetColor("PropertyWindow.CategoryForeground"))
 				.ToolTipText(LOCTEXT("BehvaiorTreeDifDifferencesToolTip", "List of differences found between revisions, click to select"))
 				.HAlign(HAlign_Center)
 				[
@@ -247,7 +284,7 @@ TSharedRef<SWidget> SBehaviorTreeDiff::GenerateDiffListWidget()
 			.FillHeight(1.f)
 			[
 				SAssignNew(DiffList, SListViewType)
-				.ItemHeight(24)
+				.ItemHeight(24.f)
 				.ListItemsSource(&DiffListSource)
 				.OnGenerateRow(this, &SBehaviorTreeDiff::OnGenerateRow)
 				.SelectionMode(ESelectionMode::Single)
@@ -264,11 +301,16 @@ TSharedRef<SWidget> SBehaviorTreeDiff::GenerateDiffListWidget()
 
 void SBehaviorTreeDiff::BuildDiffSourceArray()
 {
-	TArray<FDiffSingleResult> FoundDiffs;
-	FGraphDiffControl::DiffGraphs(PanelOld.BehaviorTree->BTGraph, PanelNew.BehaviorTree->BTGraph, FoundDiffs);
-
+	FoundDiffs->Empty();
 	DiffListSource.Empty();
-	for (auto DiffIt(FoundDiffs.CreateConstIterator()); DiffIt; ++DiffIt)
+	if (!PanelOld.BehaviorTree || !PanelNew.BehaviorTree)
+	{
+		return;
+	}
+	
+	FGraphDiffControl::DiffGraphs(PanelOld.BehaviorTree->BTGraph, PanelNew.BehaviorTree->BTGraph, *FoundDiffs);
+
+	for (auto DiffIt(FoundDiffs->CreateConstIterator()); DiffIt; ++DiffIt)
 	{
 		DiffListSource.Add(FSharedDiffOnGraph(new FTreeDiffResultItem(*DiffIt)));
 	}
@@ -322,8 +364,6 @@ TSharedRef<ITableRow> SBehaviorTreeDiff::OnGenerateRow(FSharedDiffOnGraph Item, 
 
 void SBehaviorTreeDiff::OnSelectionChanged(FSharedDiffOnGraph Item, ESelectInfo::Type SelectionType)
 {
-	DisablePinDiffFocus();
-
 	if(!Item.IsValid())
 	{
 		return;
@@ -341,7 +381,6 @@ void SBehaviorTreeDiff::OnSelectionChanged(FSharedDiffOnGraph Item, ESelectInfo:
 			if (InPin)
 			{
 				LastPinTarget = InPin;
-				InPin->bIsDiffing = true;
 
 				UEdGraph* NodeGraph = InPin->GetOwningNode()->GetGraph();
 				SGraphEditor* NodeGraphEditor = GetGraphEditorForGraph(NodeGraph);
@@ -369,7 +408,7 @@ void SBehaviorTreeDiff::OnSelectionChanged(FSharedDiffOnGraph Item, ESelectInfo:
 				{
 					// This is a sub-node, we need to find our parent node in the graph
 					// todo: work out why BTNode->ParentNode is always null
-					UEdGraphNode** ParentNodePtr = NodeGraph->Nodes.FindByPredicate([BTNode](UEdGraphNode* PotentialParentNode) -> bool
+					TObjectPtr<UEdGraphNode>* ParentNodePtr = NodeGraph->Nodes.FindByPredicate([BTNode](UEdGraphNode* PotentialParentNode) -> bool
 					{
 						UBehaviorTreeGraphNode* BTPotentialParentNode = Cast<UBehaviorTreeGraphNode>(PotentialParentNode);
 						return BTPotentialParentNode && (BTPotentialParentNode->Decorators.Contains(BTNode) || BTPotentialParentNode->Services.Contains(BTNode));
@@ -410,18 +449,6 @@ SGraphEditor* SBehaviorTreeDiff::GetGraphEditorForGraph(UEdGraph* Graph) const
 	return NULL;
 }
 
-void SBehaviorTreeDiff::DisablePinDiffFocus()
-{
-	if(LastPinTarget)
-	{
-		LastPinTarget->bIsDiffing = false;
-	}
-	if(LastOtherPinTarget)
-	{
-		LastOtherPinTarget->bIsDiffing = false;
-	}
-}
-
 
 //////////////////////////////////////////////////////////////////////////
 // FBehaviorTreeDiffPanel
@@ -432,7 +459,7 @@ SBehaviorTreeDiff::FBehaviorTreeDiffPanel::FBehaviorTreeDiffPanel()
 	BehaviorTree = NULL;
 }
 
-void SBehaviorTreeDiff::FBehaviorTreeDiffPanel::GeneratePanel(UEdGraph* Graph, UEdGraph* GraphToDiff)
+void SBehaviorTreeDiff::FBehaviorTreeDiffPanel::GeneratePanel(UEdGraph* Graph, TSharedPtr<TArray<FDiffSingleResult>> DiffResults)
 {
 	TSharedPtr<SWidget> Widget = SNew(SBorder)
 		.HAlign(HAlign_Center)
@@ -442,7 +469,8 @@ void SBehaviorTreeDiff::FBehaviorTreeDiffPanel::GeneratePanel(UEdGraph* Graph, U
 		];
 
 	FPropertyEditorModule& PropertyEditorModule = FModuleManager::GetModuleChecked<FPropertyEditorModule>( "PropertyEditor" );
-	FDetailsViewArgs DetailsViewArgs( false, false, true, FDetailsViewArgs::ObjectsUseNameArea, false );
+	FDetailsViewArgs DetailsViewArgs;
+	DetailsViewArgs.NameAreaSettings = FDetailsViewArgs::HideNameArea;
 	DetailsViewArgs.DefaultsOnlyVisibility = EEditDefaultsOnlyNodeVisibility::Hide;
 	DetailsView = PropertyEditorModule.CreateDetailView( DetailsViewArgs );
 	DetailsView->SetObject( NULL );
@@ -468,7 +496,7 @@ void SBehaviorTreeDiff::FBehaviorTreeDiffPanel::GeneratePanel(UEdGraph* Graph, U
 		auto Editor = SNew(SGraphEditor)
 			.AdditionalCommands(GraphEditorCommands)
 			.GraphToEdit(Graph)
-			.GraphToDiff(GraphToDiff)
+			.DiffResults(DiffResults)
 			.IsEditable(false)
 			.TitleBar(SNew(SBorder).HAlign(HAlign_Center)
 			[
@@ -477,7 +505,7 @@ void SBehaviorTreeDiff::FBehaviorTreeDiffPanel::GeneratePanel(UEdGraph* Graph, U
 			.Appearance(AppearanceInfo)
 			.GraphEvents(InEvents);
 
-		const FSlateBrush* ContentAreaBrush = FEditorStyle::GetBrush( "Docking.Tab", ".ContentAreaBrush" );
+		const FSlateBrush* ContentAreaBrush = FAppStyle::GetBrush( "Docking.Tab", ".ContentAreaBrush" );
 
 		auto NewWidget = SNew(SSplitter)
 			.Orientation(Orient_Vertical)
@@ -516,7 +544,7 @@ FText SBehaviorTreeDiff::FBehaviorTreeDiffPanel::GetTitle() const
 		const FText RevisionText = FText::FromString(RevisionInfo.Revision);
 		const FText ChangelistText = FText::AsNumber(RevisionInfo.Changelist, &FNumberFormattingOptions::DefaultNoGrouping());
 
-		if (bShowAssetName)
+		if (bShowAssetName && BehaviorTree)
 		{
 			FString AssetName = BehaviorTree->GetName();
 			if(ISourceControlModule::Get().GetProvider().UsesChangelists())
@@ -544,7 +572,7 @@ FText SBehaviorTreeDiff::FBehaviorTreeDiffPanel::GetTitle() const
 			}
 		}
 	}
-	else if (bShowAssetName)
+	else if (bShowAssetName && BehaviorTree)
 	{
 		FString AssetName = BehaviorTree->GetName();
 		FText LocalizedFormat = LOCTEXT("NamedCurrentRevisionFmt", "{0} - Current Revision");

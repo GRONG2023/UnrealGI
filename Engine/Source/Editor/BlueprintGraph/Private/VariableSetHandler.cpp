@@ -1,16 +1,35 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "VariableSetHandler.h"
+
+#include "BPTerminal.h"
+#include "Containers/Array.h"
+#include "Containers/EnumAsByte.h"
+#include "Containers/Map.h"
+#include "Containers/UnrealString.h"
+#include "EdGraph/EdGraph.h"
+#include "EdGraph/EdGraphNode.h"
+#include "EdGraph/EdGraphPin.h"
+#include "EdGraphSchema_K2.h"
+#include "EdGraphUtilities.h"
+#include "Engine/MemberReference.h"
 #include "GameFramework/Actor.h"
+#include "HAL/PlatformMath.h"
+#include "Internationalization/Internationalization.h"
+#include "Internationalization/Text.h"
 #include "K2Node_CallFunction.h"
 #include "K2Node_Variable.h"
 #include "K2Node_VariableSet.h"
-#include "K2Node_Self.h"
-#include "Kismet2/BlueprintEditorUtils.h"
-#include "PushModelHelpers.h"
-
-#include "EdGraphUtilities.h"
+#include "Kismet2/CompilerResultsLog.h"
+#include "KismetCompiledFunctionContext.h"
 #include "KismetCompiler.h"
+#include "Misc/AssertionMacros.h"
+#include "PushModelHelpers.h"
+#include "Templates/Casts.h"
+#include "UObject/Class.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/UnrealNames.h"
+#include "UObject/UnrealType.h"
 
 #define LOCTEXT_NAMESPACE "VariableSetHandler"
 
@@ -75,7 +94,11 @@ void FKCHandler_VariableSet::InnerAssignment(FKismetFunctionContext& Context, UE
 
 	if (VariableTerm && ValueTerm)
 	{
-		FKismetCompilerUtilities::CreateObjectAssignmentStatement(Context, Node, *ValueTerm, *VariableTerm);
+		FKismetCompilerUtilities::CreateObjectAssignmentStatement(Context,
+																  Node,
+																  *ValueTerm,
+																  *VariableTerm,
+																  (UsesVariablePinAsKey() ? VariablePin : nullptr));
 
 		if (!(*VariableTerm)->IsTermWritable())
 		{
@@ -147,7 +170,9 @@ void FKCHandler_VariableSet::Transform(FKismetFunctionContext& Context, UEdGraph
 {
 	// Expands node out to include a (local) call to the RepNotify function if necessary
 	UK2Node_VariableSet* SetNotify = Cast<UK2Node_VariableSet>(Node);
-	if ((SetNotify != NULL))
+
+	// If property is HasFieldNotificationBroadcast, then the net code and broadcast will be executed in native code.
+	if (SetNotify && !SetNotify->HasFieldNotificationBroadcast())
 	{
 		if (SetNotify->ShouldFlushDormancyOnSet())
 		{

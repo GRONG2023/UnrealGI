@@ -1,23 +1,72 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "AnimationBlueprintEditorMode.h"
+
+#include "Animation/AnimBlueprint.h"
 #include "Animation/DebugSkelMeshComponent.h"
-#include "Animation/AnimInstance.h"
-
-
-
-#include "IPersonaToolkit.h"
+#include "AnimationBlueprintEditor.h"
+#include "BlueprintEditor.h"
 #include "BlueprintEditorTabs.h"
-#include "ISkeletonEditorModule.h"
-#include "PersonaModule.h"
-#include "SBlueprintEditorToolbar.h"
+#include "Delegates/Delegate.h"
+#include "Framework/Docking/LayoutExtender.h"
+#include "Framework/Docking/TabManager.h"
+#include "Framework/MultiBox/MultiBoxExtender.h"
+#include "HAL/PlatformMath.h"
 #include "IPersonaPreviewScene.h"
+#include "IPersonaToolkit.h"
+#include "ISkeletonEditorModule.h"
+#include "ISkeletonTree.h"
+#include "Modules/ModuleManager.h"
+#include "PersonaDelegates.h"
+#include "PersonaModule.h"
 #include "PersonaUtils.h"
+#include "SBlueprintEditorToolbar.h"
+#include "Templates/Casts.h"
+#include "Types/SlateEnums.h"
+#include "UObject/NameTypes.h"
+#include "UObject/WeakObjectPtr.h"
+#include "AnimAssetFindReplace.h"
 
-#include "ToolMenus.h"
+class UToolMenu;
 
 /////////////////////////////////////////////////////
 // FAnimationBlueprintEditorMode
+
+namespace UE::Anim::BP::Editor
+{
+	TSharedRef<FTabManager::FStack> CreateLeftBottomStack(bool bIsTemplate)
+	{
+		TSharedRef<FTabManager::FStack> Stack = FTabManager::NewStack();
+
+		if (!bIsTemplate)
+		{
+			Stack->AddTab(AnimationBlueprintEditorTabs::CurveNamesTab, ETabState::ClosedTab);
+			Stack->AddTab(AnimationBlueprintEditorTabs::SkeletonTreeTab, ETabState::ClosedTab);
+		}
+
+		Stack->AddTab(AnimationBlueprintEditorTabs::PoseWatchTab, ETabState::OpenedTab);
+		Stack->AddTab(FBlueprintEditorTabs::MyBlueprintID, ETabState::OpenedTab);
+
+		return Stack;
+	}
+
+	TSharedRef<FTabManager::FStack> CreateRightBottomStack(bool bIsTemplate)
+	{
+		TSharedRef<FTabManager::FStack> Stack = FTabManager::NewStack();
+
+		Stack->AddTab(AnimationBlueprintEditorTabs::AnimBlueprintPreviewEditorTab, ETabState::OpenedTab);
+		Stack->AddTab(AnimationBlueprintEditorTabs::AssetBrowserTab, ETabState::OpenedTab);
+
+		if (!bIsTemplate)
+		{
+			Stack->AddTab(AnimationBlueprintEditorTabs::SlotNamesTab, ETabState::ClosedTab);
+		}
+
+		Stack->SetForegroundTab(AnimationBlueprintEditorTabs::AnimBlueprintPreviewEditorTab);
+
+		return Stack;
+	}
+}
 
 FAnimationBlueprintEditorMode::FAnimationBlueprintEditorMode(const TSharedRef<FAnimationBlueprintEditor>& InAnimationBlueprintEditor)
 	: FBlueprintEditorApplicationMode(InAnimationBlueprintEditor, FAnimationBlueprintEditorModes::AnimationBlueprintEditorMode, FAnimationBlueprintEditorModes::GetLocalizedMode, false, false)
@@ -25,19 +74,17 @@ FAnimationBlueprintEditorMode::FAnimationBlueprintEditorMode(const TSharedRef<FA
 	PreviewScenePtr = InAnimationBlueprintEditor->GetPreviewScene();
 	AnimBlueprintPtr = CastChecked<UAnimBlueprint>(InAnimationBlueprintEditor->GetBlueprintObj());
 
-	TabLayout = FTabManager::NewLayout( "Stanalone_AnimationBlueprintEditMode_Layout_v1.3" )
+	bool bIsTemplate = false;
+	if (UAnimBlueprint* AnimBlueprint = AnimBlueprintPtr.Get())
+	{
+		bIsTemplate = AnimBlueprint->bIsTemplate;
+	}
+
+	TabLayout = FTabManager::NewLayout( "Stanalone_AnimationBlueprintEditMode_Layout_v1.6" )
 		->AddArea
 		(
 			FTabManager::NewPrimaryArea()
 			->SetOrientation(Orient_Vertical)
-			->Split
-			(
-				// Top toolbar
-				FTabManager::NewStack() 
-				->SetSizeCoefficient(0.186721f)
-				->SetHideTabWell(true)
-				->AddTab(InAnimationBlueprintEditor->GetToolbarTabId(), ETabState::OpenedTab )
-			)
 			->Split
 			(
 				// Main application area
@@ -60,11 +107,8 @@ FAnimationBlueprintEditorMode::FAnimationBlueprintEditorMode(const TSharedRef<FA
 					->Split
 					(
 						//	Left bottom - preview settings
-						FTabManager::NewStack()
+						UE::Anim::BP::Editor::CreateLeftBottomStack(bIsTemplate)
 						->SetSizeCoefficient(0.5f)
-						->AddTab(AnimationBlueprintEditorTabs::CurveNamesTab, ETabState::ClosedTab)
-						->AddTab(AnimationBlueprintEditorTabs::SkeletonTreeTab, ETabState::ClosedTab)
-						->AddTab(FBlueprintEditorTabs::MyBlueprintID, ETabState::OpenedTab)
 					)
 				)
 				->Split
@@ -87,6 +131,7 @@ FAnimationBlueprintEditorMode::FAnimationBlueprintEditorMode(const TSharedRef<FA
 						->SetSizeCoefficient(0.2f)
 						->AddTab(FBlueprintEditorTabs::CompilerResultsID, ETabState::ClosedTab)
 						->AddTab(FBlueprintEditorTabs::FindResultsID, ETabState::ClosedTab)
+						->AddTab(AnimationBlueprintEditorTabs::FindReplaceTab, ETabState::ClosedTab)
 					)
 				)
 				->Split
@@ -109,20 +154,13 @@ FAnimationBlueprintEditorMode::FAnimationBlueprintEditorMode(const TSharedRef<FA
 					->Split
 					(
 						// Right bottom - Asset browser & advanced preview settings
-						FTabManager::NewStack()
+						UE::Anim::BP::Editor::CreateRightBottomStack(bIsTemplate)
 						->SetHideTabWell(false)
 						->SetSizeCoefficient(0.5f)
-						->AddTab(AnimationBlueprintEditorTabs::AnimBlueprintPreviewEditorTab, ETabState::OpenedTab)
-						->AddTab(AnimationBlueprintEditorTabs::AssetBrowserTab, ETabState::OpenedTab)
-						->AddTab(AnimationBlueprintEditorTabs::SlotNamesTab, ETabState::ClosedTab)
-						->SetForegroundTab(AnimationBlueprintEditorTabs::AnimBlueprintPreviewEditorTab)
 					)
 				)
 			)
 		);
-
-	ISkeletonEditorModule& SkeletonEditorModule = FModuleManager::LoadModuleChecked<ISkeletonEditorModule>("SkeletonEditor");
-	TabFactories.RegisterFactory(SkeletonEditorModule.CreateSkeletonTreeTabFactory(InAnimationBlueprintEditor, InAnimationBlueprintEditor->GetSkeletonTree()));
 
 	FPersonaModule& PersonaModule = FModuleManager::LoadModuleChecked<FPersonaModule>("Persona");
 
@@ -137,8 +175,17 @@ FAnimationBlueprintEditorMode::FAnimationBlueprintEditorMode(const TSharedRef<FA
 	TabFactories.RegisterFactory(PersonaModule.CreateAnimationAssetBrowserTabFactory(InAnimationBlueprintEditor, InAnimationBlueprintEditor->GetPersonaToolkit(), FOnOpenNewAsset::CreateSP(&InAnimationBlueprintEditor.Get(), &FAnimationBlueprintEditor::HandleOpenNewAsset), FOnAnimationSequenceBrowserCreated(), true));
 	TabFactories.RegisterFactory(PersonaModule.CreateAnimBlueprintPreviewTabFactory(InAnimationBlueprintEditor, InAnimationBlueprintEditor->GetPersonaToolkit()->GetPreviewScene()));
 	TabFactories.RegisterFactory(PersonaModule.CreateAnimBlueprintAssetOverridesTabFactory(InAnimationBlueprintEditor, InAnimationBlueprintEditor->GetPersonaToolkit()->GetAnimBlueprint(), InAnimationBlueprintEditor->OnPostUndo));
-	TabFactories.RegisterFactory(PersonaModule.CreateSkeletonSlotNamesTabFactory(InAnimationBlueprintEditor, InAnimationBlueprintEditor->GetSkeletonTree()->GetEditableSkeleton(), InAnimationBlueprintEditor->OnPostUndo, FOnObjectSelected::CreateSP(&InAnimationBlueprintEditor.Get(), &FAnimationBlueprintEditor::HandleObjectSelected)));
-	TabFactories.RegisterFactory(PersonaModule.CreateCurveViewerTabFactory(InAnimationBlueprintEditor, InAnimationBlueprintEditor->GetSkeletonTree()->GetEditableSkeleton(), InAnimationBlueprintEditor->GetPersonaToolkit()->GetPreviewScene(), InAnimationBlueprintEditor->OnPostUndo, FOnObjectsSelected::CreateSP(&InAnimationBlueprintEditor.Get(), &FAnimationBlueprintEditor::HandleObjectsSelected)));
+	TabFactories.RegisterFactory(PersonaModule.CreatePoseWatchTabFactory(InAnimationBlueprintEditor));
+	TSharedPtr<ISkeletonTree> SkeletonTree = InAnimationBlueprintEditor->GetSkeletonTree();
+	TabFactories.RegisterFactory(PersonaModule.CreateCurveViewerTabFactory(InAnimationBlueprintEditor, SkeletonTree.IsValid() ? SkeletonTree->GetEditableSkeleton().ToSharedPtr() : nullptr, InAnimationBlueprintEditor->GetPersonaToolkit()->GetPreviewScene(), FOnObjectsSelected::CreateSP(&InAnimationBlueprintEditor.Get(), &FAnimationBlueprintEditor::HandleObjectsSelected)));
+	TabFactories.RegisterFactory(PersonaModule.CreateAnimAssetFindReplaceTabFactory(InAnimationBlueprintEditor, FAnimAssetFindReplaceConfig()));
+
+	if (!bIsTemplate)
+	{
+		ISkeletonEditorModule& SkeletonEditorModule = FModuleManager::LoadModuleChecked<ISkeletonEditorModule>("SkeletonEditor");
+		TabFactories.RegisterFactory(SkeletonEditorModule.CreateSkeletonTreeTabFactory(InAnimationBlueprintEditor, InAnimationBlueprintEditor->GetSkeletonTree().ToSharedRef()));
+		TabFactories.RegisterFactory(PersonaModule.CreateSkeletonSlotNamesTabFactory(InAnimationBlueprintEditor, InAnimationBlueprintEditor->GetSkeletonTree()->GetEditableSkeleton(), FOnObjectSelected::CreateSP(&InAnimationBlueprintEditor.Get(), &FAnimationBlueprintEditor::HandleObjectSelected)));
+	}
 
 	// setup toolbar - clear existing toolbar extender from the BP mode
 	//@TODO: Keep this in sync with BlueprintEditorModes.cpp

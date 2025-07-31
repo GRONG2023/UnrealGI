@@ -1,18 +1,41 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "K2Node_GetClassDefaults.h"
-#include "UObject/UnrealType.h"
-#include "Engine/Blueprint.h"
+
+#include "BPTerminal.h"
+#include "BlueprintActionDatabaseRegistrar.h"
+#include "BlueprintNodeSpawner.h"
+#include "Containers/EnumAsByte.h"
+#include "Containers/Map.h"
+#include "Delegates/Delegate.h"
+#include "EdGraph/EdGraph.h"
+#include "EdGraph/EdGraphPin.h"
+#include "EdGraph/EdGraphSchema.h"
 #include "EdGraphSchema_K2.h"
+#include "EdGraphUtilities.h"
+#include "EditorCategoryUtils.h"
+#include "Engine/Blueprint.h"
+#include "HAL/Platform.h"
+#include "HAL/PlatformCrt.h"
+#include "Internationalization/Internationalization.h"
+#include "K2Node_PureAssignmentStatement.h"
 #include "K2Node_TemporaryVariable.h"
 #include "Kismet2/BlueprintEditorUtils.h"
-#include "EditorCategoryUtils.h"
-#include "BlueprintNodeSpawner.h"
-#include "BlueprintActionDatabaseRegistrar.h"
-#include "EdGraphUtilities.h"
-#include "KismetCompilerMisc.h"
+#include "Kismet2/CompilerResultsLog.h"
+#include "KismetCompiledFunctionContext.h"
 #include "KismetCompiler.h"
-#include "K2Node_PureAssignmentStatement.h"
+#include "KismetCompilerMisc.h"
+#include "Misc/AssertionMacros.h"
+#include "Templates/Casts.h"
+#include "Templates/SubclassOf.h"
+#include "Templates/UnrealTemplate.h"
+#include "UObject/Class.h"
+#include "UObject/Field.h"
+#include "UObject/NameTypes.h"
+#include "UObject/Object.h"
+#include "UObject/UnrealNames.h"
+#include "UObject/UnrealType.h"
+#include "UObject/WeakObjectPtrTemplates.h"
 
 #define LOCTEXT_NAMESPACE "UK2Node_GetClassDefaults"
 
@@ -140,7 +163,7 @@ namespace
 						ClassContextTerm->SetContextTypeClass();
 
 						// Infer the class type from the context term
-						if(const UClass* ClassType = Cast<UClass>(ClassContextTerm->bIsLiteral ? ClassContextTerm->ObjectLiteral : ClassContextTerm->Type.PinSubCategoryObject.Get()))
+						if(const UClass* ClassType = Cast<UClass>(ClassContextTerm->bIsLiteral ? ClassContextTerm->ObjectLiteral.Get() : ClassContextTerm->Type.PinSubCategoryObject.Get()))
 						{
 							// Create a local term for each output pin (class property)
 							for(int32 PinIndex = 0; PinIndex < Node->Pins.Num(); ++PinIndex)
@@ -571,13 +594,19 @@ void UK2Node_GetClassDefaults::OnClassPinChanged()
 		UEdGraphPin* OldPin = OldOutputPins[PinIndex];
 		if(OldPin->Direction == EGPD_Input)
 		{
-			OldOutputPins.RemoveAt(PinIndex--, 1, false);
+			OldOutputPins.RemoveAt(PinIndex--, 1, EAllowShrinking::No);
 			Pins.Add(OldPin);
 		}
 	}
 
-	// Clear the current output pin settings (so they don't carry over to the new set)
-	ShowPinForProperties.Reset();
+	// If the blueprint is currently compiling, we shouldn't be changing the showpins settings
+	const bool bIsCompiling = GetBlueprint()->bBeingCompiled;
+
+	if (!bIsCompiling)
+	{
+		// Clear the current output pin settings (so they don't carry over to the new set)
+		ShowPinForProperties.Reset();
+	}
 
 	// Create output pins for the new class type
 	UClass* InputClass = GetInputClass();
@@ -590,7 +619,7 @@ void UK2Node_GetClassDefaults::OnClassPinChanged()
 	// Notify the graph that the node has been changed
 	if(UEdGraph* Graph = GetGraph())
 	{
-		Graph->NotifyGraphChanged();
+		Graph->NotifyNodeChanged(this);
 	}
 }
 

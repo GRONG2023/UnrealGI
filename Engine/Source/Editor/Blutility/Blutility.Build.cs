@@ -6,8 +6,6 @@ public class Blutility : ModuleRules
 {
 	public Blutility(ReadOnlyTargetRules Target) : base(Target)
 	{
-		PrivateIncludePaths.Add("Editor/Blutility/Private");
-
 		PrivateIncludePathModuleNames.Add("AssetTools");
 
         PublicDependencyModuleNames.AddRange(new string[] {
@@ -17,27 +15,37 @@ public class Blutility : ModuleRules
 
 		PrivateDependencyModuleNames.AddRange(
 			new string[] {
+				"AutomationController",
 				"Core",
 				"CoreUObject",
 				"Engine",
                 "InputCore",
 				"Slate",
 				"SlateCore",
-                "EditorStyle",
+				"EditorFramework",
 				"UnrealEd",
 				"Kismet",
+				"AssetDefinition",
 				"AssetRegistry",
 				"AssetTools",
 				"WorkspaceMenuStructure",
 				"ContentBrowser",
+				"ContentBrowserData",
 				"ClassViewer",
 				"CollectionManager",
                 "PropertyEditor",
                 "BlueprintGraph",
+                "Json",
+                "JsonUtilities",
 				"UMG",
                 "UMGEditor",
                 "KismetCompiler",
 				"ToolMenus",
+				"RHI",
+				"RenderCore",
+				"ImageWrapper",
+				"ImageWriteQueue",
+				"DeveloperSettings",
 			}
 			);
 	}

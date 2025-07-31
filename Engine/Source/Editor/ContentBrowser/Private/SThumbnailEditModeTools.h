@@ -2,18 +2,23 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "UObject/WeakObjectPtr.h"
-#include "Layout/Visibility.h"
 #include "Input/CursorReply.h"
 #include "Input/Reply.h"
+#include "Layout/Visibility.h"
+#include "Math/IntPoint.h"
+#include "Math/MathFwd.h"
+#include "Templates/SharedPointer.h"
+#include "ThumbnailRendering/ThumbnailManager.h"
+#include "UObject/WeakObjectPtr.h"
+#include "UObject/WeakObjectPtrTemplates.h"
 #include "Widgets/DeclarativeSyntaxSupport.h"
 #include "Widgets/SCompoundWidget.h"
-#include "ThumbnailRendering/ThumbnailManager.h"
 
 class FAssetThumbnail;
 class USceneThumbnailInfo;
 class USceneThumbnailInfoWithPrimitive;
+struct FGeometry;
+struct FPointerEvent;
 struct FSlateBrush;
 
 class SThumbnailEditModeTools : public SCompoundWidget
@@ -53,19 +58,18 @@ protected:
 	FReply ResetToDefault();
 
 	/** Helper accessors for ThumbnailInfo objects */
-	USceneThumbnailInfo* GetSceneThumbnailInfo();
-	USceneThumbnailInfoWithPrimitive* GetSceneThumbnailInfoWithPrimitive();
-	USceneThumbnailInfoWithPrimitive* ConstGetSceneThumbnailInfoWithPrimitive() const;
+	USceneThumbnailInfo* GetSceneThumbnailInfo() const;
+	USceneThumbnailInfoWithPrimitive* GetSceneThumbnailInfoWithPrimitive() const;
 
 	EThumbnailPrimType GetDefaultThumbnailType() const;
 
-	/** Event fired when the asset data for this asset is loaded or changed */
-	void OnAssetDataChanged();
-
 protected:
+	bool bInSmallView;
 	bool bModifiedThumbnailWhileDragging;
 	FIntPoint DragStartLocation;
 	TWeakPtr<FAssetThumbnail> AssetThumbnail;
-	TWeakObjectPtr<USceneThumbnailInfo> SceneThumbnailInfo;
-	bool bInSmallView;
+
+private:
+	// Never access this directly.
+	mutable TWeakObjectPtr<USceneThumbnailInfo> SceneThumbnailInfoPtr;
 };

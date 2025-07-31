@@ -1,21 +1,62 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "DialogueStructsCustomizations.h"
+
 #include "AssetThumbnail.h"
+#include "Containers/Array.h"
+#include "Containers/BitArray.h"
+#include "Containers/Set.h"
+#include "Containers/SparseArray.h"
+#include "CoreTypes.h"
+#include "Delegates/Delegate.h"
+#include "DetailLayoutBuilder.h"
+#include "DetailWidgetRow.h"
+#include "DialogueWaveWidgets.h"
+#include "Fonts/SlateFontInfo.h"
+#include "HAL/PlatformCrt.h"
+#include "IDetailChildrenBuilder.h"
+#include "Internationalization/Internationalization.h"
+#include "Internationalization/Text.h"
+#include "Layout/Children.h"
+#include "Layout/Geometry.h"
+#include "Layout/Margin.h"
+#include "Layout/Visibility.h"
+#include "Math/Color.h"
+#include "Math/Vector2D.h"
+#include "Misc/Attribute.h"
+#include "Misc/Optional.h"
+#include "PropertyHandle.h"
+#include "Serialization/Archive.h"
 #include "SlateOptMacros.h"
-#include "Widgets/Layout/SBorder.h"
-#include "Widgets/Layout/SWrapBox.h"
-#include "Widgets/Images/SImage.h"
-#include "Widgets/Text/STextBlock.h"
-#include "Widgets/Layout/SBox.h"
-#include "Widgets/Notifications/SErrorText.h"
-#include "Widgets/Notifications/SErrorHint.h"
-#include "Widgets/Input/SComboBox.h"
+#include "SlotBase.h"
+#include "Sound/DialogueTypes.h"
 #include "Sound/DialogueVoice.h"
 #include "Sound/DialogueWave.h"
-#include "DetailLayoutBuilder.h"
-#include "IDetailChildrenBuilder.h"
-#include "DialogueWaveWidgets.h"
+#include "Styling/AppStyle.h"
+#include "Styling/SlateColor.h"
+#include "Templates/Casts.h"
+#include "Templates/TypeHash.h"
+#include "Templates/UnrealTemplate.h"
+#include "Types/SlateEnums.h"
+#include "Types/SlateStructs.h"
+#include "UObject/Object.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/UnrealType.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
+#include "Widgets/Images/SImage.h"
+#include "Widgets/Input/SComboBox.h"
+#include "Widgets/Layout/SBorder.h"
+#include "Widgets/Layout/SBox.h"
+#include "Widgets/Layout/SWrapBox.h"
+#include "Widgets/Notifications/SErrorHint.h"
+#include "Widgets/Notifications/SErrorText.h"
+#include "Widgets/SBoxPanel.h"
+#include "Widgets/SCompoundWidget.h"
+#include "Widgets/SNullWidget.h"
+#include "Widgets/SOverlay.h"
+#include "Widgets/Text/STextBlock.h"
+
+class SWidget;
 
 #define LOCTEXT_NAMESPACE "DialogueWaveDetails"
 
@@ -31,7 +72,7 @@ void FDialogueContextStructCustomization::CustomizeHeader( TSharedRef<IPropertyH
 		HeaderRow
 		[
 			SNew( SBorder )
-			.BorderImage( FEditorStyle::GetBrush("DialogueWaveDetails.HeaderBorder") )
+			.BorderImage( FAppStyle::GetBrush("DialogueWaveDetails.HeaderBorder") )
 			[
 				SNew( SVerticalBox )
 				+SVerticalBox::Slot()
@@ -106,8 +147,8 @@ void SSpeakerDropDown::Construct( const FArguments& InArgs, const TSharedRef<IPr
 		.AutoHeight()
 		[
 			SAssignNew( ComboBox, SComboBox< TSharedPtr<UDialogueVoice*> > )
-			.ButtonStyle( FEditorStyle::Get(), "PropertyEditor.AssetComboStyle" )
-			.ForegroundColor(FEditorStyle::GetColor("PropertyEditor.AssetName.ColorAndOpacity"))
+			.ButtonStyle( FAppStyle::Get(), "PropertyEditor.AssetComboStyle" )
+			.ForegroundColor(FAppStyle::GetColor("PropertyEditor.AssetName.ColorAndOpacity"))
 			.OptionsSource( &OptionsSource )
 			.OnGenerateWidget( this, &SSpeakerDropDown::MakeComboButtonItemWidget )
 			.OnSelectionChanged( this, &SSpeakerDropDown::OnSelectionChanged )
@@ -236,7 +277,7 @@ void SSpeakerDropDown::OnSelectionChanged(TSharedPtr<UDialogueVoice*> Speaker, E
 	{
 		SpeakerPropertyHandle->NotifyPreChange();
 		*SpeakerToChange = *Speaker;
-		SpeakerPropertyHandle->NotifyPostChange();
+		SpeakerPropertyHandle->NotifyPostChange(EPropertyChangeType::ValueSet);
 	}
 }
 
@@ -330,8 +371,8 @@ void STargetSetDropDown::Construct( const FArguments& InArgs, const TSharedRef<I
 		.AutoHeight()
 		[
 			SAssignNew( ComboBox, SComboBox< TSharedPtr<FTargetSet> > )
-			.ButtonStyle( FEditorStyle::Get(), "PropertyEditor.AssetComboStyle" )
-			.ForegroundColor(FEditorStyle::GetColor("PropertyEditor.AssetName.ColorAndOpacity"))
+			.ButtonStyle( FAppStyle::Get(), "PropertyEditor.AssetComboStyle" )
+			.ForegroundColor(FAppStyle::GetColor("PropertyEditor.AssetName.ColorAndOpacity"))
 			.OptionsSource( &OptionsSource )
 			.OnGenerateWidget( this, &STargetSetDropDown::MakeComboButtonItemWidget )
 			.OnSelectionChanged( this, &STargetSetDropDown::OnSelectionChanged )
@@ -464,7 +505,7 @@ void STargetSetDropDown::OnSelectionChanged(TSharedPtr<FTargetSet> TargetSet, ES
 	{
 		TargetsPropertyHandle->NotifyPreChange();
 		*TargetSetToChange = *TargetSet;
-		TargetsPropertyHandle->NotifyPostChange();
+		TargetsPropertyHandle->NotifyPostChange(EPropertyChangeType::ValueSet);
 	}
 }
 
@@ -649,7 +690,7 @@ void SValidatedDialogueContextHeaderWidget::Construct( const FArguments& InArgs,
 		ChildSlot
 		[
 			SNew( SBorder )
-			.BorderImage( FEditorStyle::GetBrush("DialogueWaveDetails.HeaderBorder") )
+			.BorderImage( FAppStyle::GetBrush("DialogueWaveDetails.HeaderBorder") )
 			[
 				SNew( SVerticalBox )
 				+SVerticalBox::Slot()
@@ -735,7 +776,7 @@ void SValidatedDialogueContextHeaderWidget::Construct( const FArguments& InArgs,
 					.AutoWidth()
 					[
 						SNew( SImage )
-						.Image( FEditorStyle::GetBrush("DialogueWaveDetails.SpeakerToTarget") )
+						.Image( FAppStyle::GetBrush("DialogueWaveDetails.SpeakerToTarget") )
 						.ColorAndOpacity( FSlateColor::UseForeground() )
 					]
 					+SHorizontalBox::Slot()
@@ -850,7 +891,7 @@ void SValidatedDialogueContextHeaderWidget::Tick( const FGeometry& AllottedGeome
 
 					if( bTargetSetNeedsReset && TargetSet )
 					{
-						bTargetSetNeedsReset = ( DialogueWave->ContextMappings[i].Context.Targets != *TargetSet );
+						bTargetSetNeedsReset = ( ToRawPtrTArrayUnsafe(DialogueWave->ContextMappings[i].Context.Targets) != *TargetSet );
 					}
 
 					if( !bSpeakerNeedsReset && !bTargetSetNeedsReset)
@@ -877,7 +918,7 @@ void SValidatedDialogueContextHeaderWidget::Tick( const FGeometry& AllottedGeome
 					{
 						TargetsPropertyHandle->NotifyPreChange();
 						*TargetSet = DialogueWave->ContextMappings[0].Context.Targets;
-						TargetsPropertyHandle->NotifyPostChange();
+						TargetsPropertyHandle->NotifyPostChange(EPropertyChangeType::ValueSet);
 					}
 				}
 			}
@@ -886,39 +927,39 @@ void SValidatedDialogueContextHeaderWidget::Tick( const FGeometry& AllottedGeome
 
 	if( !IsDialogueWaveValid() )
 	{
-		if( ContextErrorHint.IsValid() )	{ ContextErrorHint->SetError(	LOCTEXT("InvalidDialogueWaveError", "Invalid dialogue wave.") ); }
-
-		if( SpeakerErrorHint.IsValid() )	{ SpeakerErrorHint->SetError(	FText::GetEmpty() ); }
-		if( SpeakerErrorText.IsValid() )		{ SpeakerErrorText->SetError(		LOCTEXT("SelectDialogueWaveError", "Select a valid dialogue wave.") ); }
-		if( TargetsErrorHint.IsValid() )	{ TargetsErrorHint->SetError(	FText::GetEmpty() ); }
-		if( TargetsErrorText.IsValid() )		{ TargetsErrorText->SetError(		LOCTEXT("SelectDialogueWaveError", "Select a valid dialogue wave.") ); }
-	}
-	else if( !IsSpeakerValid() )
-	{
-		if( ContextErrorHint.IsValid() )	{ ContextErrorHint->SetError(	FText::GetEmpty() ); }
-
-		if( SpeakerErrorHint.IsValid() )	{ SpeakerErrorHint->SetError(	LOCTEXT("InvalidSpeakerError", "Invalid speaker for dialogue wave.") ); }
-		if( SpeakerErrorText.IsValid() )		{ SpeakerErrorText->SetError(		FText::GetEmpty() ); }
-		if( TargetsErrorHint.IsValid() )	{ TargetsErrorHint->SetError(	FText::GetEmpty() ); }
-		if( TargetsErrorText.IsValid() )		{ TargetsErrorText->SetError(		LOCTEXT("SelectSpeakerError", "Select a valid speaker.") ); }
-	}
-	else if( !IsTargetSetValid() )
-	{
-		if( ContextErrorHint.IsValid() )	{ ContextErrorHint->SetError(	FText::GetEmpty() ); }
-
-		if( SpeakerErrorHint.IsValid() )	{ SpeakerErrorHint->SetError(	FText::GetEmpty() ); }
-		if( SpeakerErrorText.IsValid() )		{ SpeakerErrorText->SetError(		FText::GetEmpty() ); }
-		if( TargetsErrorHint.IsValid() )	{ TargetsErrorHint->SetError(	LOCTEXT("SelectTargetsError", "Select a valid target set.") ); }
-		if( TargetsErrorText.IsValid() )		{ TargetsErrorText->SetError(		FText::GetEmpty() ); }
-	}
-	else
-	{
-		if( ContextErrorHint.IsValid() )	{ ContextErrorHint->SetError(	FText::GetEmpty() ); }
-
-		if( SpeakerErrorHint.IsValid() )	{ SpeakerErrorHint->SetError(	FText::GetEmpty() ); }
-		if( SpeakerErrorText.IsValid() )		{ SpeakerErrorText->SetError(		FText::GetEmpty() ); }
-		if( TargetsErrorHint.IsValid() )	{ TargetsErrorHint->SetError(	FText::GetEmpty() ); }
-		if( TargetsErrorText.IsValid() )		{ TargetsErrorText->SetError(		FText::GetEmpty() ); }
+		if( ContextErrorHint.IsValid() )	{ ContextErrorHint->SetError( LOCTEXT("InvalidDialogueWaveError", "Invalid dialogue wave.") ); }
+																		  
+		if( SpeakerErrorHint.IsValid() )	{ SpeakerErrorHint->SetError( FText::GetEmpty() ); }
+		if( SpeakerErrorText.IsValid() )	{ SpeakerErrorText->SetError( LOCTEXT("SelectDialogueWaveError", "Select a valid dialogue wave.") ); }
+		if( TargetsErrorHint.IsValid() )	{ TargetsErrorHint->SetError( FText::GetEmpty() ); }
+		if( TargetsErrorText.IsValid() )	{ TargetsErrorText->SetError( LOCTEXT("SelectDialogueWaveError", "Select a valid dialogue wave.") ); }
+	}																	  
+	else if( !IsSpeakerValid() )										  
+	{																	  
+		if( ContextErrorHint.IsValid() )	{ ContextErrorHint->SetError( FText::GetEmpty() ); }
+																		  
+		if( SpeakerErrorHint.IsValid() )	{ SpeakerErrorHint->SetError( LOCTEXT("InvalidSpeakerError", "Invalid speaker for dialogue wave.") ); }
+		if( SpeakerErrorText.IsValid() )	{ SpeakerErrorText->SetError( FText::GetEmpty() ); }
+		if( TargetsErrorHint.IsValid() )	{ TargetsErrorHint->SetError( FText::GetEmpty() ); }
+		if( TargetsErrorText.IsValid() )	{ TargetsErrorText->SetError( LOCTEXT("SelectSpeakerError", "Select a valid speaker.") ); }
+	}																	  
+	else if( !IsTargetSetValid() )										  
+	{																	  
+		if( ContextErrorHint.IsValid() )	{ ContextErrorHint->SetError( FText::GetEmpty() ); }
+																		  
+		if( SpeakerErrorHint.IsValid() )	{ SpeakerErrorHint->SetError( FText::GetEmpty() ); }
+		if( SpeakerErrorText.IsValid() )	{ SpeakerErrorText->SetError( FText::GetEmpty() ); }
+		if( TargetsErrorHint.IsValid() )	{ TargetsErrorHint->SetError( LOCTEXT("SelectTargetsError", "Select a valid target set.") ); }
+		if( TargetsErrorText.IsValid() )	{ TargetsErrorText->SetError( FText::GetEmpty() ); }
+	}																	  
+	else																  
+	{																	  
+		if( ContextErrorHint.IsValid() )	{ ContextErrorHint->SetError( FText::GetEmpty() ); }
+																		  
+		if( SpeakerErrorHint.IsValid() )	{ SpeakerErrorHint->SetError( FText::GetEmpty() ); }
+		if( SpeakerErrorText.IsValid() )	{ SpeakerErrorText->SetError( FText::GetEmpty() ); }
+		if( TargetsErrorHint.IsValid() )	{ TargetsErrorHint->SetError( FText::GetEmpty() ); }
+		if( TargetsErrorText.IsValid() )	{ TargetsErrorText->SetError( FText::GetEmpty() ); }
 	}
 }
 

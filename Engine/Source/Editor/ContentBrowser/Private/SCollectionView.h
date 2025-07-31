@@ -2,28 +2,50 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "SlateFwd.h"
-#include "Layout/Visibility.h"
-#include "Widgets/DeclarativeSyntaxSupport.h"
-#include "Input/Reply.h"
-#include "Widgets/SCompoundWidget.h"
-#include "AssetData.h"
-#include "AssetTagItemTypes.h"
 #include "CollectionManagerTypes.h"
-#include "Widgets/Views/STableViewBase.h"
-#include "Widgets/Views/STableRow.h"
-#include "Widgets/Views/STreeView.h"
+#include "CollectionViewTypes.h"
+#include "Containers/Array.h"
+#include "Containers/BitArray.h"
+#include "Containers/Map.h"
+#include "Containers/Set.h"
+#include "Containers/SparseArray.h"
+#include "Containers/UnrealString.h"
+#include "Delegates/Delegate.h"
+#include "HAL/Platform.h"
+#include "HAL/PlatformCrt.h"
+#include "Input/Reply.h"
+#include "Internationalization/Text.h"
+#include "Layout/Visibility.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/Attribute.h"
+#include "Misc/Optional.h"
 #include "Misc/TextFilter.h"
-#include "Editor/ContentBrowser/Private/CollectionViewTypes.h"
+#include "Styling/SlateTypes.h"
+#include "Templates/SharedPointer.h"
+#include "Templates/TypeHash.h"
+#include "Templates/UnrealTemplate.h"
+#include "Types/SlateConstants.h"
+#include "Types/SlateEnums.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
+#include "Widgets/SCompoundWidget.h"
+#include "Widgets/Views/STableViewBase.h"
+#include "Widgets/Views/STreeView.h"
 
 class FCollectionAssetManagement;
-class FCollectionContextMenu;
-class FCollectionDragDropOp;
+class FDragDropEvent;
+class FMenuBuilder;
+class FName;
+class FSlateRect;
 class FSourcesSearch;
 class FUICommandList;
+class ITableRow;
 class SHorizontalBox;
+class SWidget;
+struct FGeometry;
 struct FHistoryData;
+struct FKeyEvent;
+struct FPointerEvent;
+struct FSlateBrush;
 
 /**
  * The list view of collections.
@@ -37,8 +59,8 @@ public:
 	SLATE_BEGIN_ARGS( SCollectionView )
 		: _AllowCollectionButtons(true)
 		, _AllowRightClickMenu(true)
-		, _AllowCollapsing(true)
 		, _AllowContextMenu(true)
+		, _IsDocked(false)
 		, _AllowCollectionDrag(false)
 		, _AllowQuickAssetManagement(false)
 		, _ShowSeparator(true)
@@ -50,8 +72,8 @@ public:
 		/** If true, collection buttons will be displayed */
 		SLATE_ARGUMENT( bool, AllowCollectionButtons )
 		SLATE_ARGUMENT( bool, AllowRightClickMenu )
-		SLATE_ARGUMENT( bool, AllowCollapsing )
 		SLATE_ARGUMENT( bool, AllowContextMenu )
+		SLATE_ATTRIBUTE( bool, IsDocked)
 
 		/** If true, the user will be able to drag collections from this view */
 		SLATE_ARGUMENT( bool, AllowCollectionDrag )
@@ -70,9 +92,6 @@ public:
 	/** Constructs this widget with InArgs */
 	void Construct( const FArguments& InArgs );
 
-	/** Set whether we're using an external search or not */
-	void SetAllowExternalSearch(const bool InAllowExternalSearch);
-
 	/** Selects the specified collections */
 	void SetSelectedCollections(const TArray<FCollectionNameType>& CollectionsToSelect, const bool bEnsureVisible = true);
 
@@ -86,7 +105,7 @@ public:
 	TArray<FCollectionNameType> GetSelectedCollections() const;
 
 	/** Let the collections view know that the list of selected assets has changed, so that it can update the quick asset management check boxes */
-	void SetSelectedAssetPaths(const TArray<FName>& SelectedAssets);
+	void SetSelectedAssetPaths(const TArray<FSoftObjectPath>& SelectedAssets);
 
 	/** Sets the state of the collection view to the one described by the history data */
 	void ApplyHistoryData ( const FHistoryData& History );
@@ -105,7 +124,11 @@ public:
 	virtual FReply OnDrop( const FGeometry& MyGeometry, const FDragDropEvent& DragDropEvent ) override;
 
 	/** Creates the menu for the save dynamic collection button */
-	void MakeSaveDynamicCollectionMenu(FText InQueryString);
+	void MakeSaveDynamicCollectionMenu(FText InQueryString, FSimpleDelegate OnSaveSearchClicked = FSimpleDelegate());
+
+	/** Creates the menu for the add collection button */
+	FReply OnAddCollectionClicked();
+	void MakeAddCollectionMenu(TSharedRef<SWidget> MenuParent);
 
 private:
 
@@ -146,27 +169,6 @@ private:
 	/** True if the selection changed delegate is allowed at the moment */
 	bool ShouldAllowSelectionChangedDelegate() const;
 
-	/** Creates the menu for the add collection button */
-	FReply MakeAddCollectionMenu();
-
-	/** Gets the visibility of the collections title text */
-	EVisibility GetCollectionsTitleTextVisibility() const;
-
-	/** Gets the visibility of the collections search box */
-	EVisibility GetCollectionsSearchBoxVisibility() const;
-
-	/** Gets the visibility of the collection buttons */
-	EVisibility GetCollectionButtonsVisibility() const;
-	
-	/** Get the icon used on the collection view mode switcher button */
-	const FSlateBrush* GetSwitchCollectionViewModeIcon() const;
-
-	/** Get the tooltip text used on the collection view mode switcher button */
-	FText GetSwitchCollectionViewModeToolTipText() const;
-
-	/** Handle the collection view mode switcher button being clicked */
-	FReply OnSwitchCollectionViewMode();
-
 	/** Sets up an inline creation process for a new collection of the specified type */
 	void CreateCollectionItem( ECollectionShareType::Type CollectionType, ECollectionStorageMode::Type StorageMode, const FCreateCollectionPayload& InCreationPayload );
 
@@ -178,6 +180,9 @@ private:
 
 	/** Returns the visibility of the collection tree */
 	EVisibility GetCollectionTreeVisibility() const;
+
+	/** Returns the visibility of the collection tree header. Collapsed if the collection tree is docked */
+	EVisibility GetHeaderVisibility() const;
 
 	/** Get the border of the collection tree */
 	const FSlateBrush* GetCollectionViewDropTargetBorder() const;
@@ -249,10 +254,10 @@ private:
 	void HandleCollectionUpdated( const FCollectionNameType& Collection );
 
 	/** Handles assets being added to a collection */
-	void HandleAssetsAddedToCollection( const FCollectionNameType& Collection, const TArray<FName>& AssetsAdded );
+	void HandleAssetsAddedToCollection( const FCollectionNameType& Collection, TConstArrayView<FSoftObjectPath> AssetsAdded );
 
 	/** Handles assets being removed from a collection */
-	void HandleAssetsRemovedFromCollection( const FCollectionNameType& Collection, const TArray<FName>& AssetsRemoved );
+	void HandleAssetsRemovedFromCollection( const FCollectionNameType& Collection, TConstArrayView<FSoftObjectPath> AssetsRemoved );
 
 	/** Handles the source control provider changing */
 	void HandleSourceControlProviderChanged(class ISourceControlProvider& OldProvider, class ISourceControlProvider& NewProvider);
@@ -275,6 +280,8 @@ private:
 	/** Get the active filter text */
 	FText GetCollectionsSearchFilterText() const;
 
+	/** Make the menu to save a search using the given delegate */
+	void MakeSaveSearchMenu(FMenuBuilder& InMenuBuilder, FSimpleDelegate OnSaveSearchClicked) const;
 private:
 
 	/** A helper class to manage PreventSelectionChangedDelegateCount by incrementing it when constructed (on the stack) and decrementing when destroyed */
@@ -326,11 +333,11 @@ private:
 	/** The context menu logic and data */
 	TSharedPtr<class FCollectionContextMenu> CollectionContextMenu;
 
-	/** The collections SExpandableArea */
-	TSharedPtr< SExpandableArea > CollectionsExpandableAreaPtr;
-
 	/** Delegate to invoke when selection changes. */
 	FOnCollectionSelected OnCollectionSelected;
+
+	/** Whether or not the collection view is docked under the sources panel */
+	TAttribute<bool> IsDocked;
 
 	/** If true, collection buttons (such as add) are allowed */
 	bool bAllowCollectionButtons;
@@ -346,9 +353,6 @@ private:
 
 	/** True when a drag is over this view with a valid operation for drop */
 	bool bDraggedOver;
-
-	/** The view mode that collections within this view should use */
-	EAssetTagItemViewMode CollectionViewMode = EAssetTagItemViewMode::Standard;
 
 	/** If > 0, the selection changed delegate will not be called. Used to update the tree from an external source or in certain bulk operations. */
 	int32 PreventSelectionChangedDelegateCount;

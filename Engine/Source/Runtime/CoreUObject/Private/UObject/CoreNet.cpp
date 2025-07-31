@@ -5,8 +5,9 @@
 =============================================================================*/
 
 #include "UObject/CoreNet.h"
+#include "UObject/PropertyOptional.h"
 #include "UObject/UnrealType.h"
-#include "Misc/NetworkVersion.h"
+#include "Misc/EngineNetworkCustomVersion.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogCoreNet, Log, All);
 
@@ -27,19 +28,19 @@ void FClassNetCacheMgr::SortProperties( TArray< FProperty* >& Properties ) const
 	// Sort NetProperties so that their ClassReps are sorted by memory offset
 	struct FCompareUFieldOffsets
 	{
-		FORCEINLINE bool operator()( FProperty & A, FProperty & B ) const
+		FORCEINLINE bool operator()(FProperty* A, FProperty* B) const
 		{
 			// Ensure stable sort
-			if ( A.GetOffset_ForGC() == B.GetOffset_ForGC() )
+			if (A->GetOffset_ForGC() == B->GetOffset_ForGC())
 			{
-				return A.GetName() < B.GetName();
+				return A->GetName() < B->GetName();
 			}
 
-			return A.GetOffset_ForGC() < B.GetOffset_ForGC();
+			return A->GetOffset_ForGC() < B->GetOffset_ForGC();
 		}
 	};
 
-	Sort( Properties.GetData(), Properties.Num(), FCompareUFieldOffsets() );
+	Algo::Sort(Properties, FCompareUFieldOffsets());
 }
 
 uint32 FClassNetCacheMgr::SortedStructFieldsChecksum( const UStruct* Struct, uint32 Checksum ) const
@@ -108,6 +109,12 @@ uint32 FClassNetCacheMgr::GetPropertyChecksum( const FProperty* Property, uint32
 			Checksum = SortedStructFieldsChecksum( StructProperty->Struct, Checksum );
 
 			const_cast< FClassNetCacheMgr* >( this )->DebugChecksumIndent--;
+		}
+
+		// Evolve checksum on optional inner
+		if (const FOptionalProperty* OptionalProperty = CastField<FOptionalProperty>(Property))
+		{
+			return GetPropertyChecksum(OptionalProperty->GetValueProperty(), Checksum, bIncludeChildren);
 		}
 	}
 
@@ -230,8 +237,12 @@ const FClassNetCache* FClassNetCacheMgr::GetClassNetCache( UClass* Class )
 			Result->FieldChecksumMap.Add( It->FieldChecksum, &*It );
 		}
 
-		// Initialize class checksum (just use properties for this)
-		SortProperties( Properties );
+		const bool bIsNativeClass = Class->HasAnyClassFlags(CLASS_Native);
+		if (!bIsNativeClass)
+		{
+			// Initialize class checksum (just use properties for this)
+			SortProperties(Properties);
+		}
 
 		for ( auto Property : Properties )
 		{
@@ -290,7 +301,7 @@ bool UPackageMap::StaticSerializeName(FArchive& Ar, FName& InName)
 		{
 			// replicated by hardcoded index
 			uint32 NameIndex;
-			if (Ar.EngineNetVer() < HISTORY_CHANNEL_NAMES)
+			if (Ar.EngineNetVer() < FEngineNetworkCustomVersion::ChannelNames)
 			{
 				Ar.SerializeInt(NameIndex, MAX_NETWORKED_HARDCODED_NAME + 1);
 			}
@@ -299,7 +310,7 @@ bool UPackageMap::StaticSerializeName(FArchive& Ar, FName& InName)
 				Ar.SerializeIntPacked(NameIndex);
 			}
 
-			if (NameIndex < NAME_MaxHardcodedNameIndex)
+			if (NameIndex < (uint32)EName::MaxHardcodedNameIndex)
 			{
 				InName = EName(NameIndex);
 				// hardcoded names never have a Number
@@ -321,13 +332,13 @@ bool UPackageMap::StaticSerializeName(FArchive& Ar, FName& InName)
 	else if (Ar.IsSaving())
 	{
 		const EName* InEName = InName.ToEName();
-		uint8 bHardcoded = InEName && ShouldReplicateAsInteger(*InEName);
+		uint8 bHardcoded = InEName && ShouldReplicateAsInteger(*InEName, InName);
 		Ar.SerializeBits(&bHardcoded, 1);
 		if (bHardcoded && /* silence static analyzer */ InEName)
 		{
 			// send by hardcoded index
 			checkSlow(InName.GetNumber() <= 0); // hardcoded names should never have a Number
-			uint32 NameIndex = *InEName;
+			uint32 NameIndex = (uint32)*InEName;
 			Ar.SerializeIntPacked(NameIndex);
 		}
 		else
@@ -440,7 +451,43 @@ FArchive& FNetBitWriter::operator<<(FSoftObjectPath& Value)
 
 FArchive& FNetBitWriter::operator<<(FSoftObjectPtr& Value)
 {
-	return FArchiveUObject::SerializeSoftObjectPtr(*this, Value);
+	// Keep in sync with FNetBitReader::operator<<(FSoftObjectPtr&)
+	UsingCustomVersion(FEngineNetworkCustomVersion::Guid);
+
+	if (EngineNetVer() >= FEngineNetworkCustomVersion::SoftObjectPtrNetGuids)
+	{
+		// Treat soft pointers to dynamic (non-stably named) objects as weak pointers.
+		// This allows these objects to be resolved on clients and to only replicate a NetGUID.
+		//
+		// In theory stably named objects could be replicated as NetGUIDs also via the package map,
+		// only exporting and replicating the path string once, but this would require a refactor
+		// of the package map to handle "soft" references to packages and not automatically load them
+		// when they're referenced.
+		UObject* Object = Value.Get();
+		const bool bUsePath = !Object || Object->IsFullNameStableForNetworking();
+
+		WriteBit(bUsePath);
+
+		if (bUsePath)
+		{
+			FArchiveUObject::SerializeSoftObjectPtr(*this, Value);
+		}
+		else
+		{
+			PackageMap->SerializeObject(*this, UObject::StaticClass(), Object, nullptr);
+		}
+	}
+	else
+	{
+		FArchiveUObject::SerializeSoftObjectPtr(*this, Value);
+	}
+
+	return *this;
+}
+
+FArchive& FNetBitWriter::operator<<(FObjectPtr& Value)
+{
+	return FArchiveUObject::SerializeObjectPtr(*this, Value);
 }
 
 FArchive& FNetBitWriter::operator<<(struct FWeakObjectPtr& WeakObjectPtr)
@@ -458,7 +505,7 @@ void FNetBitWriter::CountMemory(FArchive& Ar) const
 // ----------------------------------------------------------------
 //	FNetBitReader
 // ----------------------------------------------------------------
-FNetBitReader::FNetBitReader(UPackageMap* InPackageMap, uint8* Src, int64 CountBits)
+FNetBitReader::FNetBitReader(UPackageMap* InPackageMap, const uint8* Src, int64 CountBits)
 	: FBitReader(Src, CountBits)
 	, PackageMap( InPackageMap )
 {
@@ -496,13 +543,53 @@ FArchive& FNetBitReader::operator<<(FSoftObjectPath& Value)
 
 FArchive& FNetBitReader::operator<<(FSoftObjectPtr& Value)
 {
-	return FArchiveUObject::SerializeSoftObjectPtr(*this, Value);
+	// Keep in sync with FNetBitWriter::operator<<(FSoftObjectPtr&)
+	UsingCustomVersion(FEngineNetworkCustomVersion::Guid);
+
+	if (EngineNetVer() >= FEngineNetworkCustomVersion::SoftObjectPtrNetGuids)
+	{
+		// Treat soft pointers to dynamic (non-stably named) objects as weak pointers.
+		// This allows these objects to be resolved on clients and to only replicate a NetGUID.
+		//
+		// In theory stably named objects could be replicated as NetGUIDs also via the package map,
+		// only exporting and replicating the path string once, but this would require a refactor
+		// of the package map to handle "soft" references to packages and not automatically load them
+		// when they're referenced.
+		const bool bUsePath = ReadBit() != 0;
+
+		UObject* Object = nullptr;
+
+		if (bUsePath)
+		{
+			FArchiveUObject::SerializeSoftObjectPtr(*this, Value);
+		}
+		else
+		{
+			PackageMap->SerializeObject(*this, UObject::StaticClass(), Object, nullptr);
+		}
+
+		if (!bUsePath)
+		{
+			Value = Object;
+		}
+		Value.GetUniqueID().FixupForPIE();
+	}
+	else
+	{
+		FArchiveUObject::SerializeSoftObjectPtr(*this, Value);
+	}
+
+	return *this;
+}
+
+FArchive& FNetBitReader::operator<<(FObjectPtr& Value)
+{
+	return FArchiveUObject::SerializeObjectPtr(*this, Value);
 }
 
 FArchive& FNetBitReader::operator<<(struct FWeakObjectPtr& WeakObjectPtr)
 {
 	return FArchiveUObject::SerializeWeakObjectPtr(*this, WeakObjectPtr);
-	return *this;
 }
 
 void FNetBitReader::CountMemory(FArchive& Ar) const
@@ -545,29 +632,4 @@ const TCHAR* LexToString(const EChannelCloseReason Value)
 	}
 
 	return TEXT("Unknown");
-}
-
-void INetSerializeCB::NetSerializeStruct(
-	class UScriptStruct* Struct,
-	class FBitArchive& Ar,
-	class UPackageMap* Map,
-	void* Data,
-	bool& bHasUnmapped)
-{
-	FNetDeltaSerializeInfo Params;
-	Params.Struct = Struct;
-	Params.Map = Map;
-	Params.Data = Data;
-
-	if (Ar.IsSaving())
-	{
-		Params.Writer = static_cast<FBitWriter*>(&Ar);
-	}
-	else
-	{
-		Params.Reader = static_cast<FBitReader*>(&Ar);
-	}
-
-	NetSerializeStruct(Params);
-	bHasUnmapped = Params.bOutHasMoreUnmapped;
 }

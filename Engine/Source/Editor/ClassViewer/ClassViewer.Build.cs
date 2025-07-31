@@ -12,7 +12,7 @@ public class ClassViewer : ModuleRules
                 "AssetTools",
 				"EditorWidgets",
 				"GameProjectGeneration",
-                "PropertyEditor",
+				"WorkspaceMenuStructure"
 			}
 		);
 
@@ -24,7 +24,7 @@ public class ClassViewer : ModuleRules
                 "InputCore",
 				"Slate",
 				"SlateCore",
-                "EditorStyle",
+				"EditorFramework",
 				"UnrealEd",
 				"PropertyEditor",
 				"ContentBrowserData",

@@ -1,11 +1,25 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "EditorUtilityTask.h"
-#include "EditorUtilitySubsystem.h"
+
+#include "Containers/UnrealString.h"
+#include "CoreGlobals.h"
 #include "Editor.h"
-#include "Framework/Notifications/NotificationManager.h"
-#include "Widgets/Notifications/SNotificationList.h"
+#include "Editor/EditorEngine.h"
 #include "EditorUtilityCommon.h"
+#include "EditorUtilitySubsystem.h"
+#include "Engine/Engine.h"
+#include "HAL/Platform.h"
+#include "Internationalization/Internationalization.h"
+#include "Internationalization/Text.h"
+#include "Logging/LogCategory.h"
+#include "Logging/LogMacros.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/AsyncTaskNotification.h"
+#include "Misc/Attribute.h"
+#include "Trace/Detail/Channel.h"
+#include "UObject/Class.h"
+#include "UObject/UObjectBaseUtility.h"
 
 //////////////////////////////////////////////////////////////////////
 
@@ -18,7 +32,7 @@ UEditorUtilityTask::UEditorUtilityTask()
 void UEditorUtilityTask::Run()
 {
 	UEditorUtilitySubsystem* EditorUtilitySubsystem = GEditor->GetEditorSubsystem<UEditorUtilitySubsystem>();
-	EditorUtilitySubsystem->RegisterAndExecuteTask(this);
+	EditorUtilitySubsystem->RegisterAndExecuteTask(this, nullptr);
 }
 
 UWorld* UEditorUtilityTask::GetWorld() const
@@ -45,6 +59,8 @@ void UEditorUtilityTask::StartExecutingTask()
 
 void UEditorUtilityTask::FinishExecutingTask()
 {
+	SetTaskNotificationText(LOCTEXT("TaskComplete", "Complete"));
+
 	if (ensure(MyTaskManager))
 	{
 		MyTaskManager->RemoveTaskFromActiveList(this);
@@ -57,12 +73,30 @@ void UEditorUtilityTask::FinishExecutingTask()
 	}
 
 	GIsRunningUnattendedScript = Cached_GIsRunningUnattendedScript;
+
+	// Notify anyone who needs to know that we're done.
+	OnFinished.Broadcast(this);
+}
+
+FText UEditorUtilityTask::GetTaskTitle() const
+{
+	return GetClass()->GetDisplayNameText();
 }
 
 void UEditorUtilityTask::CreateNotification()
 {
+	FText TaskTitle = GetTaskTitleOverride();
+	if (TaskTitle.IsEmpty())
+	{
+		TaskTitle = GetTaskTitle();
+	}
+	if (TaskTitle.IsEmpty())
+	{
+		TaskTitle = GetClass()->GetDisplayNameText();
+	}
+
 	FAsyncTaskNotificationConfig NotificationConfig;
-	NotificationConfig.TitleText = FText::Format(LOCTEXT("NotificationEditorUtilityTaskTitle", "Task {0}"), GetClass()->GetDisplayNameText());
+	NotificationConfig.TitleText = FText::Format(LOCTEXT("NotificationEditorUtilityTaskTitle", "Task {0}"), TaskTitle);
 	NotificationConfig.ProgressText = LOCTEXT("Running", "Running");
 	NotificationConfig.bCanCancel = true;
 	TaskNotification = MakeUnique<FAsyncTaskNotification>(NotificationConfig);
@@ -70,7 +104,17 @@ void UEditorUtilityTask::CreateNotification()
 
 void UEditorUtilityTask::RequestCancel()
 {
-	bCancelRequested = true;
+	if (!bCancelRequested)
+	{
+		bCancelRequested = true;
+
+		SetTaskNotificationText(LOCTEXT("TaskCanceling", "Canceling"));
+
+		CancelRequested();
+		ReceiveCancelRequested();
+
+		FinishExecutingTask();
+	}
 }
 
 bool UEditorUtilityTask::WasCancelRequested() const

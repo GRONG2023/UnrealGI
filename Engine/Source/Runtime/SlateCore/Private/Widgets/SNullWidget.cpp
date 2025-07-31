@@ -8,8 +8,6 @@
 #include "Widgets/DeclarativeSyntaxSupport.h"
 
 
-FNoChildren NullWidgetNoChildren;
-
 class SLATECORE_API SNullWidgetContent
 	: public SWidget
 {
@@ -35,7 +33,7 @@ public:
 private:
 	virtual void SetVisibility( TAttribute<EVisibility> InVisibility ) override final
 	{
-		ensureMsgf( false, TEXT("Attempting to SetVisibility() on SNullWidget. Mutating SNullWidget is not allowed.") );
+		ensureMsgf(!IsConstructed(), TEXT("Attempting to SetVisibility() on SNullWidget. Mutating SNullWidget is not allowed.") );
 	}
 public:
 	
@@ -48,7 +46,7 @@ public:
 
 	virtual FChildren* GetChildren( ) override final
 	{
-		return &NullWidgetNoChildren;
+		return &FNoChildren::NoChildrenInstance;
 	}
 
 	virtual void OnArrangeChildren( const FGeometry& AllottedGeometry, FArrangedChildren& ArrangedChildren ) const override final
@@ -70,5 +68,14 @@ protected:
 	// End of SWidget interface
 };
 
+namespace NullWidgetPrivate
+{
+	TSharedRef<SWidget> Construct()
+	{
+		static TSharedRef<SWidget> Result = SNew(SNullWidgetContent).Visibility(EVisibility::Hidden);
+		return Result;
+	}
+}
+SLATECORE_API TSharedRef<SWidget> SNullWidget::NullWidget = NullWidgetPrivate::Construct();
 
-SLATECORE_API TSharedRef<SWidget> SNullWidget::NullWidget = SNew(SNullWidgetContent).Visibility(EVisibility::Hidden);
+FNoChildren FNoChildren::NoChildrenInstance(&NullWidgetPrivate::Construct().Get());

@@ -2,18 +2,26 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "UObject/GCObject.h"
-#include "Layout/Visibility.h"
-#include "Widgets/DeclarativeSyntaxSupport.h"
-#include "Widgets/SWidget.h"
-#include "Widgets/SCompoundWidget.h"
+#include "Containers/Array.h"
+#include "Containers/UnrealString.h"
+#include "Delegates/Delegate.h"
 #include "EdGraph/EdGraphSchema.h"
+#include "HAL/Platform.h"
+#include "Internationalization/Text.h"
+#include "Layout/Visibility.h"
+#include "Templates/SharedPointer.h"
+#include "Types/SlateEnums.h"
+#include "UObject/GCObject.h"
+#include "UObject/NameTypes.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
+#include "Widgets/SCompoundWidget.h"
 
 class FExtender;
 class FMenuBuilder;
+class FReferenceCollector;
 class FUICommandList;
 class SGraphActionMenu;
+class SWidget;
 class UBlackboardData;
 struct FBlackboardEntry;
 struct FCreateWidgetForActionData;
@@ -34,10 +42,8 @@ DECLARE_DELEGATE_RetVal(bool, FOnIsDebuggerPaused);
 DECLARE_DELEGATE_RetVal(bool, FOnGetDisplayCurrentState);
 
 /** Delegate used to get the debugger's current timestamp */
-DECLARE_DELEGATE_RetVal_OneParam(float, FOnGetDebugTimeStamp, bool /* bUseCurrentState */);
+DECLARE_DELEGATE_RetVal_OneParam(double, FOnGetDebugTimeStamp, bool /* bUseCurrentState */);
 
-/** Delegate for when a blackboard key changes (added, removed, renamed) */
-DECLARE_DELEGATE_TwoParams(FOnBlackboardKeyChanged, UBlackboardData* /*InBlackboardData*/, FBlackboardEntry* const /*InKey*/);
 
 /** Blackboard entry in the list */
 class FEdGraphSchemaAction_BlackboardEntry : public FEdGraphSchemaAction_Dummy
@@ -46,12 +52,12 @@ public:
 	static FName StaticGetTypeId();
 	virtual FName GetTypeId() const;
 
-	FEdGraphSchemaAction_BlackboardEntry( UBlackboardData* InBlackboardData, FBlackboardEntry& InKey, bool bInIsInherited );
+	FEdGraphSchemaAction_BlackboardEntry( TWeakObjectPtr<UBlackboardData> InBlackboardData, FBlackboardEntry& InKey, bool bInIsInherited );
 
 	void Update();
 
 	/** Blackboard we reference our key in */
-	UBlackboardData* BlackboardData;
+	TWeakObjectPtr<UBlackboardData> BlackboardData;
 
 	/** Actual key */
 	FBlackboardEntry& Key;
@@ -64,7 +70,7 @@ public:
 };
 
 /** Displays blackboard entries */
-class SBehaviorTreeBlackboardView : public SCompoundWidget, public FGCObject
+class SBehaviorTreeBlackboardView : public SCompoundWidget
 {
 public:
 	SLATE_BEGIN_ARGS( SBehaviorTreeBlackboardView ) 
@@ -78,15 +84,12 @@ public:
 		SLATE_EVENT(FOnIsDebuggerReady, OnIsDebuggerReady)
 		SLATE_EVENT(FOnIsDebuggerPaused, OnIsDebuggerPaused)
 		SLATE_EVENT(FOnGetDebugTimeStamp, OnGetDebugTimeStamp)
-		SLATE_EVENT(FOnBlackboardKeyChanged, OnBlackboardKeyChanged)
 		SLATE_ARGUMENT(bool, IsReadOnly)
 
 	SLATE_END_ARGS()
 
 	void Construct(const FArguments& InArgs, TSharedRef<FUICommandList> InCommandList, UBlackboardData* InBlackboardData);
-
-	/** FGCObject implementation */
-	virtual void AddReferencedObjects( FReferenceCollector& Collector ) override;
+	~SBehaviorTreeBlackboardView();
 
 	/**
 	 * Retrieves the blackboard item currently selected by the user.
@@ -106,6 +109,9 @@ public:
 	void SetObject(UBlackboardData* InBlackboardData);
 
 protected:
+	/** Delegate handler for when a blackboard key changes (added, removed, renamed) */
+	void HandleBlackboardKeyChanged(const UBlackboardData& InBlackboardData, FBlackboardEntry* const InKey);
+
 	/** Delegate handler used to generate a widget for an 'action' (key) in the list */
 	TSharedRef<SWidget> HandleCreateWidgetForAction(FCreateWidgetForActionData* const InCreateData);
 
@@ -162,7 +168,7 @@ protected:
 
 protected:
 	/** The blackboard we are editing/viewing */
-	UBlackboardData* BlackboardData;
+	TWeakObjectPtr<UBlackboardData> BlackboardData;
 
 	/** The list of blackboard entries */
 	TSharedPtr<SGraphActionMenu> GraphActionMenu;
@@ -185,8 +191,8 @@ protected:
 	/** Delegate used to get the debugger's current timestamp */
 	FOnGetDebugTimeStamp OnGetDebugTimeStamp;
 
-	/** Delegate for when a blackboard key changes (added, removed, renamed) */
-	FOnBlackboardKeyChanged OnBlackboardKeyChanged;
+	/** Handle to the registered OnBlackboardKeyChanged delegate */
+	FDelegateHandle OnBlackboardKeyChangedDelegateHandle;
 
 	/** Whether we want to show the current or saved state */
 	bool bShowCurrentState;

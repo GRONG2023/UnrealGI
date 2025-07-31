@@ -2,17 +2,26 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "Stats/Stats.h"
 #include "BehaviorTree/BehaviorTreeComponent.h"
-#include "BehaviorTreeGraphNode_Root.h"
+#include "Containers/Array.h"
+#include "Containers/Map.h"
+#include "Containers/UnrealString.h"
+#include "Delegates/Delegate.h"
+#include "HAL/Platform.h"
+#include "Internationalization/Text.h"
+#include "Stats/Stats2.h"
+#include "Templates/SharedPointer.h"
 #include "Tickable.h"
+#include "UObject/NameTypes.h"
+#include "UObject/WeakObjectPtrTemplates.h"
 
 class AActor;
 class APawn;
 class FBehaviorTreeEditor;
 class UBehaviorTree;
+class UBehaviorTreeGraphNode;
 class UBlackboardData;
+class UObject;
 
 class FBehaviorTreeDebugger : public FTickableGameObject
 {
@@ -38,6 +47,7 @@ public:
 	bool IsDebuggerRunning() const;
 	bool IsShowingCurrentState() const;
 	int32 GetShownStateIndex() const;
+	bool IsBehaviorExecutionPaused() const;
 
 	void OnObjectSelected(UObject* Object);
 	void OnAIDebugSelected(const APawn* Pawn);
@@ -77,6 +87,8 @@ public:
 	bool HasContinuousNextStep() const;
 	bool HasContinuousPrevStep() const;
 
+	UBehaviorTree* GetDynamicSubtreeTaskBehaviorTree(const UBTTask_RunBehaviorDynamic* Node) const;
+
 	/**
 	 * Find a (display) value for a given key.
 	 * @param	InKeyName			Key to find a value for
@@ -86,7 +98,7 @@ public:
 	FText FindValueForKey(const FName& InKeyName, bool bUseCurrentState) const;
 
 	/** Gets the timestamp to be displayed, either current or saved */
-	float GetTimeStamp(bool bUseCurrentState) const;
+	double GetTimeStamp(bool bUseCurrentState) const;
 
 	/** Delegate fired when the debugged blackboard is changed */
 	DECLARE_EVENT_OneParam(FBehaviorTreeDebugger, FOnDebuggedBlackboardChanged, UBlackboardData*);
@@ -145,8 +157,8 @@ private:
 	TMap<FName, FString> CurrentValues;
 
 	/** Debugger timestamps */
-	float SavedTimestamp;
-	float CurrentTimestamp;
+	double SavedTimestamp;
+	double CurrentTimestamp;
 
 	/** set value of DebuggerInstanceIndex variable */
 	void UpdateDebuggerInstance();

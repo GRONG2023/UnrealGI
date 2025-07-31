@@ -7,24 +7,48 @@
 #include "Widgets/Accessibility/SlateCoreAccessibleWidgets.h"
 #endif
 
+
+SLATE_IMPLEMENT_WIDGET(SImage)
+void SImage::PrivateRegisterAttributes(FSlateAttributeInitializer& AttributeInitializer)
+{
+	SLATE_ADD_MEMBER_ATTRIBUTE_DEFINITION_WITH_NAME(AttributeInitializer, "Image", ImageAttribute, EInvalidateWidgetReason::Layout);
+	SLATE_ADD_MEMBER_ATTRIBUTE_DEFINITION_WITH_NAME(AttributeInitializer, "ColorAndOpacity", ColorAndOpacityAttribute, EInvalidateWidgetReason::Paint);
+	SLATE_ADD_MEMBER_ATTRIBUTE_DEFINITION_WITH_NAME(AttributeInitializer, "DesiredSizeOverride", DesiredSizeOverrideAttribute, EInvalidateWidgetReason::Layout);
+}
+
+SImage::SImage()
+	: ImageAttribute(*this)
+	, ColorAndOpacityAttribute(*this)
+	, DesiredSizeOverrideAttribute(*this)
+{
+	SetCanTick(false);
+	bCanSupportFocus = false;
+}
+
 void SImage::Construct( const FArguments& InArgs )
 {
-	Image = FInvalidatableBrushAttribute(InArgs._Image);
-	ColorAndOpacity = InArgs._ColorAndOpacity;
+	ImageAttribute.Assign(*this, InArgs._Image);
+	ColorAndOpacityAttribute.Assign(*this, InArgs._ColorAndOpacity);
 	bFlipForRightToLeftFlowDirection = InArgs._FlipForRightToLeftFlowDirection;
-	SetOnMouseButtonDown(InArgs._OnMouseButtonDown);
+
+	DesiredSizeOverrideAttribute.Assign(*this, InArgs._DesiredSizeOverride);
+
+	if (InArgs._OnMouseButtonDown.IsBound())
+	{
+		SetOnMouseButtonDown(InArgs._OnMouseButtonDown);
+	}
 }
 
 int32 SImage::OnPaint( const FPaintArgs& Args, const FGeometry& AllottedGeometry, const FSlateRect& MyCullingRect, FSlateWindowElementList& OutDrawElements, int32 LayerId, const FWidgetStyle& InWidgetStyle, bool bParentEnabled ) const
 {
-	const FSlateBrush* ImageBrush = Image.GetImage().Get();
+	const FSlateBrush* ImageBrush = ImageAttribute.Get();
 
 	if ((ImageBrush != nullptr) && (ImageBrush->DrawAs != ESlateBrushDrawType::NoDrawType))
 	{
 		const bool bIsEnabled = ShouldBeEnabled(bParentEnabled);
 		const ESlateDrawEffect DrawEffects = bIsEnabled ? ESlateDrawEffect::None : ESlateDrawEffect::DisabledEffect;
 
-		const FLinearColor FinalColorAndOpacity( InWidgetStyle.GetColorAndOpacityTint() * ColorAndOpacity.Get().GetColor(InWidgetStyle) * ImageBrush->GetTint( InWidgetStyle ) );
+		const FLinearColor FinalColorAndOpacity( InWidgetStyle.GetColorAndOpacityTint() * ColorAndOpacityAttribute.Get().GetColor(InWidgetStyle) * ImageBrush->GetTint( InWidgetStyle ) );
 
 		if (bFlipForRightToLeftFlowDirection && GSlateFlowDirection == EFlowDirection::RightToLeft)
 		{
@@ -42,27 +66,49 @@ int32 SImage::OnPaint( const FPaintArgs& Args, const FGeometry& AllottedGeometry
 
 FVector2D SImage::ComputeDesiredSize( float ) const
 {
-	const FSlateBrush* ImageBrush = Image.Get();
+	const FSlateBrush* ImageBrush = ImageAttribute.Get();
 	if (ImageBrush != nullptr)
 	{
-		return ImageBrush->ImageSize;
+		const TOptional<FVector2D>& CurrentSizeOverride = DesiredSizeOverrideAttribute.Get();
+
+		return CurrentSizeOverride.IsSet() ? CurrentSizeOverride.GetValue() : FVector2D(ImageBrush->ImageSize.X, ImageBrush->ImageSize.Y);
 	}
 	return FVector2D::ZeroVector;
 }
 
-void SImage::SetColorAndOpacity( const TAttribute<FSlateColor>& InColorAndOpacity )
+void SImage::SetColorAndOpacity(TAttribute<FSlateColor> InColorAndOpacity )
 {
-	SetAttribute(ColorAndOpacity, InColorAndOpacity, EInvalidateWidgetReason::Paint);
+	ColorAndOpacityAttribute.Assign(*this, MoveTemp(InColorAndOpacity));
 }
 
-void SImage::SetColorAndOpacity( FLinearColor InColorAndOpacity )
+void SImage::SetColorAndOpacity(FLinearColor InColorAndOpacity)
 {
-	SetColorAndOpacity(TAttribute<FSlateColor>(InColorAndOpacity));
+	ColorAndOpacityAttribute.Set(*this, InColorAndOpacity);
 }
 
 void SImage::SetImage(TAttribute<const FSlateBrush*> InImage)
 {
-	Image.SetImage(*this, InImage);
+	ImageAttribute.Assign(*this, MoveTemp(InImage));
+}
+
+
+void SImage::InvalidateImage()
+{
+	Invalidate(EInvalidateWidgetReason::Layout);
+}
+
+void SImage::SetDesiredSizeOverride(TAttribute<TOptional<FVector2D>> InDesiredSizeOverride)
+{
+	DesiredSizeOverrideAttribute.Assign(*this, MoveTemp(InDesiredSizeOverride));
+}
+
+void SImage::FlipForRightToLeftFlowDirection(bool InbFlipForRightToLeftFlowDirection)
+{
+	if (InbFlipForRightToLeftFlowDirection != bFlipForRightToLeftFlowDirection)
+	{
+		bFlipForRightToLeftFlowDirection = InbFlipForRightToLeftFlowDirection;
+		Invalidate(EInvalidateWidgetReason::Paint);
+	}
 }
 
 #if WITH_ACCESSIBILITY

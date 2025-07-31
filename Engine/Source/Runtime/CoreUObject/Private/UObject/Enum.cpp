@@ -2,7 +2,6 @@
 
 #include "CoreMinimal.h"
 #include "Misc/ConfigCacheIni.h"
-#include "UObject/ErrorException.h"
 #include "UObject/ObjectMacros.h"
 #include "UObject/Class.h"
 #include "UObject/Package.h"
@@ -20,7 +19,8 @@ DEFINE_LOG_CATEGORY_STATIC(LogEnum, Log, All);
 	UEnum implementation.
 -----------------------------------------------------------------------------*/
 
-TMap<FName, UEnum*> UEnum::AllEnumNames;
+FRWLock UEnum::AllEnumNamesLock;
+TMap<FName, TMap<FName, UEnum*> > UEnum::AllEnumNames;
 
 UEnum::UEnum(const FObjectInitializer& ObjectInitializer)
 	: UField(ObjectInitializer)
@@ -37,7 +37,7 @@ void UEnum::Serialize( FArchive& Ar )
 	Super::Serialize(Ar);
 	if (Ar.IsLoading())
 	{
-		if (Ar.UE4Ver() < VER_UE4_TIGHTLY_PACKED_ENUMS)
+		if (Ar.UEVer() < VER_UE4_TIGHTLY_PACKED_ENUMS)
 		{
 			TArray<FName> TempNames;
 			Ar << TempNames;
@@ -67,7 +67,7 @@ void UEnum::Serialize( FArchive& Ar )
 		Ar << Names;
 	}
 
-	if (Ar.UE4Ver() < VER_UE4_ENUM_CLASS_SUPPORT)
+	if (Ar.UEVer() < VER_UE4_ENUM_CLASS_SUPPORT)
 	{
 		bool bIsNamespace;
 		Ar << bIsNamespace;
@@ -90,13 +90,13 @@ void UEnum::Serialize( FArchive& Ar )
 			// Rename enum names to reflect new class.
 			RenameNamesAfterDuplication();
 		}
-		AddNamesToMasterList();
+		AddNamesToPrimaryList();
 	}
 }
 
 void UEnum::BeginDestroy()
 {
-	RemoveNamesFromMasterList();
+	RemoveNamesFromPrimaryList();
 
 	Super::BeginDestroy();
 }
@@ -111,7 +111,7 @@ FString UEnum::GetBaseEnumNameOnDuplication() const
 	check(DoubleColonPos != INDEX_NONE);
 
 	// Get actual base name.
-	BaseEnumName.LeftChopInline(BaseEnumName.Len() - DoubleColonPos, false);
+	BaseEnumName.LeftChopInline(BaseEnumName.Len() - DoubleColonPos, EAllowShrinking::No);
 
 	return BaseEnumName;
 }
@@ -216,7 +216,7 @@ int64 UEnum::GetMaxEnumValue() const
 	}
 
 	int64 MaxValue = Names[0].Value;
-	for (int32 i = 0; i < NamesNum; ++i)
+	for (int32 i = 1; i < NamesNum; ++i)
 	{
 		int64 CurrentValue = Names[i].Value;
 		if (CurrentValue > MaxValue)
@@ -258,14 +258,17 @@ bool UEnum::IsValidEnumName(FName InName) const
 	return false;
 }
 
-void UEnum::AddNamesToMasterList()
+void UEnum::AddNamesToPrimaryList()
 {
+	FWriteScopeLock ScopeLock(AllEnumNamesLock);
+	EnumPackage = GetPackage()->GetFName();
+	TMap<FName, UEnum*>& PackageEnumValues = AllEnumNames.FindOrAdd(EnumPackage);
 	for (TPair<FName, int64> Kvp : Names)
 	{
-		UEnum* Enum = AllEnumNames.FindRef(Kvp.Key);
+		UEnum* Enum = PackageEnumValues.FindRef(Kvp.Key);
 		if (Enum == nullptr || Enum->HasAnyFlags(RF_NewerVersionExists))
 		{
-			AllEnumNames.Add(Kvp.Key, this);
+			PackageEnumValues.Add(Kvp.Key, this);
 		}
 		else if (Enum != this && Enum->GetOutermost() != GetTransientPackage())
 		{
@@ -274,16 +277,148 @@ void UEnum::AddNamesToMasterList()
 	}
 }
 
-void UEnum::RemoveNamesFromMasterList()
+void UEnum::RemoveNamesFromPrimaryList()
 {
-	for (TPair<FName, int64> Kvp : Names)
+	FWriteScopeLock ScopeLock(AllEnumNamesLock);
+	TMap<FName, UEnum*>* PackageEnumValues = AllEnumNames.Find(EnumPackage);
+	if (PackageEnumValues != nullptr)
 	{
-		UEnum* Enum = AllEnumNames.FindRef(Kvp.Key);
-		if (Enum == this)
+		for (TPair<FName, int64> Kvp : Names)
 		{
-			AllEnumNames.Remove(Kvp.Key);
+			UEnum* Enum = PackageEnumValues->FindRef(Kvp.Key);
+			if (Enum == this)
+			{
+				PackageEnumValues->Remove(Kvp.Key);
+			}
+		}
+		if (PackageEnumValues->Num() == 0)
+		{
+			AllEnumNames.Remove(EnumPackage);
 		}
 	}
+}
+
+UEnum* UEnum::LookupAllEnumNamesWithOptions(FName PackageName, EFindFirstObjectOptions Options, TFunctionRef<bool(FName)> CompareNameFunction)
+{
+	UEnum* TheEnum = nullptr;
+	bool bLastFoundEnumWasNative = false;
+
+	auto LookupAllEnumNamesInPackageWithOptions = [Options, &CompareNameFunction, &bLastFoundEnumWasNative](UEnum*& OutEnum, FName CurrentPackageName, const TMap<FName, UEnum*>& EnumNameToUEnumMap)
+	{		
+		bool bIsNativePackageOrDontCare = !(Options & EFindFirstObjectOptions::NativeFirst) || FPackageName::IsScriptPackage(FNameBuilder(CurrentPackageName));
+
+		for (const TPair<FName, UEnum*>& ValueNameToEnumPair : EnumNameToUEnumMap)
+		{
+			if (CompareNameFunction(ValueNameToEnumPair.Key))
+			{
+				if (OutEnum)
+				{
+					if (!!(Options & EFindFirstObjectOptions::EnsureIfAmbiguous))
+					{
+						ensureAlwaysMsgf(false, TEXT("Ambiguous results in LookupAllEnumNamesWithOptions: first enum found \"%s\" but it could also be: \"%s\""),
+							*OutEnum->GetPathName(), *ValueNameToEnumPair.Value->GetPathName());
+					}
+
+					if (bIsNativePackageOrDontCare && !bLastFoundEnumWasNative)
+					{
+						OutEnum = ValueNameToEnumPair.Value;
+						bLastFoundEnumWasNative = bIsNativePackageOrDontCare;
+					}
+				}
+				else
+				{
+					OutEnum = ValueNameToEnumPair.Value;
+					bLastFoundEnumWasNative = bIsNativePackageOrDontCare;
+
+					// If we don't want to check if the search is ambiguous and we don't care if the enum is native or not (or we do care and it's native), abort now
+					if (!(Options & EFindFirstObjectOptions::EnsureIfAmbiguous) && bIsNativePackageOrDontCare)
+					{
+						break;
+					}
+				}
+			}
+		}
+	};
+
+	if (!PackageName.IsNone())
+	{
+		// Fast path, we only need to look in the specified package
+		const TMap<FName, UEnum*>* EnumNameToUEnumMap = AllEnumNames.Find(PackageName);
+		if (EnumNameToUEnumMap)
+		{
+			LookupAllEnumNamesInPackageWithOptions(TheEnum, PackageName, *EnumNameToUEnumMap);
+		}
+	}
+	else
+	{
+		// Slow path, look through all existing packages
+		for (const TPair<FName, TMap<FName, UEnum*>>& PackageToValuesPair : AllEnumNames)
+		{
+			LookupAllEnumNamesInPackageWithOptions(TheEnum, PackageToValuesPair.Key, PackageToValuesPair.Value);
+
+			if (TheEnum && bLastFoundEnumWasNative && !(Options & EFindFirstObjectOptions::EnsureIfAmbiguous))
+			{
+				break;
+			}
+		}
+	}
+
+	return TheEnum;
+}
+
+int64 UEnum::LookupEnumName(FName PackageName, FName TestName, EFindFirstObjectOptions Options /*= EFindFirstObjectOptions::None*/, UEnum** OutFoundEnum /*= nullptr*/)
+{
+	FReadScopeLock ScopeLock(AllEnumNamesLock);
+	UEnum* TheEnum = nullptr;
+	if (!PackageName.IsNone() && Options == EFindFirstObjectOptions::None)
+	{
+		TMap<FName, UEnum*>* PackageEnumValues = AllEnumNames.Find(PackageName);
+		if (PackageEnumValues)
+		{
+			TheEnum = PackageEnumValues->FindRef(TestName);
+		}
+	}
+	else
+	{
+		if (Options == EFindFirstObjectOptions::None)
+		{
+			// If no options are specified we can just look the value name up with a TMap lookup for each of the packages until we find a match
+			for (const TPair<FName, TMap<FName, UEnum*>>& PackageToValuesPair : AllEnumNames)
+			{
+				TheEnum = PackageToValuesPair.Value.FindRef(TestName);
+				if (TheEnum)
+				{
+					break;
+				}
+			}
+		}
+		else
+		{
+			TheEnum = LookupAllEnumNamesWithOptions(PackageName, Options, [TestName](FName EnumValueName) { return TestName == EnumValueName; });
+		}
+	}
+
+	if (OutFoundEnum != nullptr)
+	{
+		*OutFoundEnum = TheEnum;
+	}
+	return (TheEnum != nullptr) ? TheEnum->GetValueByName(TestName) : INDEX_NONE;
+}
+
+int64 UEnum::LookupEnumNameSlow(FName PackageName, const TCHAR* InTestShortName, EFindFirstObjectOptions Options /*= EFindFirstObjectOptions::None*/, UEnum** OutFoundEnum /*= nullptr*/)
+{
+	FReadScopeLock ScopeLock(AllEnumNamesLock);
+	FName TestName(InTestShortName);
+	FString TestShortName(FString(TEXT("::")) + InTestShortName);
+	UEnum* TheEnum = LookupAllEnumNamesWithOptions(PackageName, Options, [TestName, &TestShortName](FName EnumValueName) { return TestName == EnumValueName || EnumValueName.ToString().Contains(TestShortName); });
+
+	if (OutFoundEnum != nullptr)
+	{
+		*OutFoundEnum = TheEnum;
+	}
+	int64 Result = (TheEnum != nullptr) ? TheEnum->GetValueByName(InTestShortName) : INDEX_NONE;
+
+	return Result;
 }
 
 FString UEnum::GenerateEnumPrefix() const
@@ -308,7 +443,7 @@ FString UEnum::GenerateEnumPrefix() const
 			}
 
 			// Trim the prefix to the length of the common prefix.
-			Prefix.LeftInline(PrefixIdx, false);
+			Prefix.LeftInline(PrefixIdx, EAllowShrinking::No);
 		}
 
 		// Find the index of the rightmost underscore in the prefix.
@@ -317,7 +452,7 @@ FString UEnum::GenerateEnumPrefix() const
 		// If an underscore was found, trim the prefix so only the part before the rightmost underscore is included.
 		if (UnderscoreIdx > 0)
 		{
-			Prefix.LeftInline(UnderscoreIdx, false);
+			Prefix.LeftInline(UnderscoreIdx, EAllowShrinking::No);
 		}
 		else
 		{
@@ -362,6 +497,36 @@ FString UEnum::GetNameStringByValue(int64 Value) const
 {
 	int32 Index = GetIndexByValue(Value);
 	return GetNameStringByIndex(Index);
+}
+
+FString UEnum::GetValueOrBitfieldAsString(int64 InValue) const
+{
+	if (!HasAnyEnumFlags(EEnumFlags::Flags) || InValue == 0)
+	{
+		return GetNameStringByValue(InValue);
+	}
+	else
+	{
+		FString BitfieldString;
+		bool WroteFirstFlag = false;
+		while (InValue != 0)
+		{
+			int64 NextValue = 1ll << FMath::CountTrailingZeros64(InValue);
+			InValue = InValue & ~NextValue;
+			if (WroteFirstFlag)
+			{
+				// We don't just want to use the NameValuePair.Key because we want to strip enum class prefixes
+				BitfieldString.Appendf(TEXT(" | %s"), *GetNameStringByValue(NextValue));
+			}
+			else
+			{
+				// We don't just want to use the NameValuePair.Key because we want to strip enum class prefixes
+				BitfieldString.Appendf(TEXT("%s"), *GetNameStringByValue(NextValue));
+				WroteFirstFlag = true;
+			}
+		}
+		return BitfieldString;
+	}
 }
 
 bool UEnum::FindNameStringByValue(FString& Out, int64 InValue) const
@@ -551,14 +716,17 @@ int32 UEnum::GetIndexByNameString(const FString& InSearchString, EGetByNameFlags
 	{
 		// None is passed in by blueprints at various points, isn't an error. Any other failed resolve should be fixed
 		UObject* SerializedObject = nullptr;
-		if (FLinkerLoad* Linker = GetLinker())
+		if (FUObjectSerializeContext* LoadContext = FUObjectThreadContext::Get().GetSerializeContext())
 		{
-			if (FUObjectSerializeContext* LoadContext = Linker->GetSerializeContext())
-			{
-				SerializedObject = LoadContext->SerializedObject;
-			}
+			SerializedObject = LoadContext->SerializedObject;
 		}
-		UE_LOG(LogEnum, Warning, TEXT("In asset '%s', there is an enum property of type '%s' with an invalid value of '%s'"), *GetPathNameSafe(SerializedObject ? SerializedObject : FUObjectThreadContext::Get().ConstructedObject), *GetName(), *InSearchString);
+		const bool bIsNativeOrLoaded = (!HasAnyFlags(RF_WasLoaded) || HasAnyFlags(RF_LoadCompleted));
+		UE_LOG(LogEnum, Warning, TEXT("UEnum: In asset '%s', there is an enum property of type '%s' with an invalid value of '%s' - %s - %d"), 
+			*GetPathNameSafe(SerializedObject ? SerializedObject : FUObjectThreadContext::Get().ConstructedObject), 
+			*GetName(), 
+			*InSearchString,
+			bIsNativeOrLoaded ? TEXT("loaded") : TEXT("not loaded"),
+			Count);
 	}
 
 	return INDEX_NONE;
@@ -596,7 +764,7 @@ bool UEnum::SetEnums(TArray<TPair<FName, int64>>& InNames, UEnum::ECppForm InCpp
 {
 	if (Names.Num() > 0)
 	{
-		RemoveNamesFromMasterList();
+		RemoveNamesFromPrimaryList();
 	}
 	Names     = InNames;
 	CppForm   = InCppForm;
@@ -607,7 +775,7 @@ bool UEnum::SetEnums(TArray<TPair<FName, int64>>& InNames, UEnum::ECppForm InCpp
 		if (!ContainsExistingMax())
 		{
 			FName MaxEnumItem = *GenerateFullEnumName(*(GenerateEnumPrefix() + TEXT("_MAX")));
-			if (LookupEnumName(MaxEnumItem) != INDEX_NONE)
+			if (LookupEnumName(GetOutermost()->GetFName(), MaxEnumItem) != INDEX_NONE)
 			{
 				// the MAX identifier is already being used by another enum
 				return false;
@@ -616,7 +784,7 @@ bool UEnum::SetEnums(TArray<TPair<FName, int64>>& InNames, UEnum::ECppForm InCpp
 			Names.Emplace(MaxEnumItem, GetMaxEnumValue() + 1);
 		}
 	}
-	AddNamesToMasterList();
+	AddNamesToPrimaryList();
 
 	return true;
 }
@@ -709,7 +877,7 @@ FString UEnum::GetMetaData( const TCHAR* Key, int32 NameIndex/*=INDEX_NONE*/, bo
 		if (!GConfig->GetString(TEXT("EnumRemap"), *KeyString, ResultString, GEngineIni))
 		{
 			// if this fails, then use what's after the ini:
-			ResultString.MidInline(4, MAX_int32, false);
+			ResultString.MidInline(4, MAX_int32, EAllowShrinking::No);
 		}
 	}
 
@@ -775,7 +943,7 @@ int64 UEnum::ParseEnum(const TCHAR*& Str)
 	if (FParse::AlnumToken(ParsedStr, Token))
 	{
 		FName TheName = FName(*Token, FNAME_Find);
-		int64 Result = LookupEnumName(TheName);
+		int64 Result = LookupEnumName(FName(), TheName);
 		if (Result != INDEX_NONE)
 		{
 			Str = ParsedStr;
@@ -792,3 +960,77 @@ IMPLEMENT_CORE_INTRINSIC_CLASS(UEnum, UField,
 	{
 	}
 );
+
+#if WITH_DEV_AUTOMATION_TESTS 
+
+#include "Misc/AutomationTest.h"
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FEnumBitfieldTest, "System.CoreUObject.EnumBitfields", EAutomationTestFlags::ApplicationContextMask | EAutomationTestFlags::EngineFilter);
+bool FEnumBitfieldTest::RunTest(const FString& Parameters)
+{
+	UPackage* NativePackage = CreatePackage(TEXT("/Script/TestEnumBitfieldsPackage"));
+	NativePackage->SetPackageFlags(PKG_CompiledIn);
+
+	{
+		const FName BitfieldTestEnumName(TEXT("EBitfieldTestEnum"));
+		TArray<TPair<FName, int64>> BitfieldTestEnumValueNames =
+		{
+		 { TEXT("EBitfieldTestEnum::TestValue0"), 0 },
+		 { TEXT("EBitfieldTestEnum::TestValue1"), 1 << 0 },
+		 { TEXT("EBitfieldTestEnum::TestValue2"), 1 << 1 },
+		 { TEXT("EBitfieldTestEnum::TestValue4"), 1 << 2 },
+		 { TEXT("EBitfieldTestEnum::TestValue2to63"), 1ll << 63 },
+		};
+
+		UEnum* NativeEnum = NewObject<UEnum>(NativePackage, BitfieldTestEnumName);
+		NativeEnum->SetEnums(BitfieldTestEnumValueNames, UEnum::ECppForm::EnumClass);
+		NativeEnum->SetEnumFlags(EEnumFlags::Flags);
+
+		FString BitfieldTestValueOf3 = NativeEnum->GetValueOrBitfieldAsString(3);
+		TestEqual(TEXT("Test bitfield with value 3"), BitfieldTestValueOf3, FString(TEXT("TestValue1 | TestValue2")));
+
+		FString BitfieldTestValueOf1 = NativeEnum->GetValueOrBitfieldAsString(1);
+		TestEqual(TEXT("Test bitfield with value 1"), BitfieldTestValueOf1, FString(TEXT("TestValue1")));
+
+		FString BitfieldTestValueOf0 = NativeEnum->GetValueOrBitfieldAsString(0);
+		TestEqual(TEXT("Test bitfield with value 0"), BitfieldTestValueOf0, FString(TEXT("TestValue0")));
+
+		FString BitfieldTestValueOf2to63 = NativeEnum->GetValueOrBitfieldAsString(1ll << 63);
+		TestEqual(TEXT("Test bitfield with value 2^63"), BitfieldTestValueOf2to63, FString(TEXT("TestValue2to63")));
+
+		FString BitfieldTestValueOf8 = NativeEnum->GetValueOrBitfieldAsString(1ll << 3);
+		TestEqual(TEXT("Test bitfield with invalid value 8"), BitfieldTestValueOf8, FString(TEXT("")));
+	}
+
+	{
+		const FName BitfieldTestStandardEnumName(TEXT("EBitfieldTestStandardEnum"));
+		TArray<TPair<FName, int64>> BitfieldTestStandardEnumValueNames =
+		{
+		 { TEXT("EBitfieldTestStandardEnum::TestValue0"), 0 },
+		 { TEXT("EBitfieldTestStandardEnum::TestValue1"), 1 },
+		 { TEXT("EBitfieldTestStandardEnum::TestValue2"), 2 },
+		 { TEXT("EBitfieldTestStandardEnum::TestValue3"), 3 },
+		 { TEXT("EBitfieldTestStandardEnum::TestValue2to63"), 1ll << 63 },
+		};
+
+		UEnum* NativeEnum = NewObject<UEnum>(NativePackage, BitfieldTestStandardEnumName);
+		NativeEnum->SetEnums(BitfieldTestStandardEnumValueNames, UEnum::ECppForm::EnumClass);
+
+		FString BitfieldTestValueOf3 = NativeEnum->GetValueOrBitfieldAsString(3);
+		TestEqual(TEXT("Test non bitfield with value 3"), BitfieldTestValueOf3, FString(TEXT("TestValue3")));
+
+		FString BitfieldTestValueOf1 = NativeEnum->GetValueOrBitfieldAsString(1);
+		TestEqual(TEXT("Test non bitfield with value 1"), BitfieldTestValueOf1, FString(TEXT("TestValue1")));
+
+		FString BitfieldTestValueOf0 = NativeEnum->GetValueOrBitfieldAsString(0);
+		TestEqual(TEXT("Test non bitfield with value 0"), BitfieldTestValueOf0, FString(TEXT("TestValue0")));
+
+		FString BitfieldTestValueOf2to63 = NativeEnum->GetValueOrBitfieldAsString(1ll << 63);
+		TestEqual(TEXT("Test non bitfield with value 2^63"), BitfieldTestValueOf2to63, FString(TEXT("TestValue2to63")));
+
+		FString BitfieldTestValueOf8 = NativeEnum->GetValueOrBitfieldAsString(8);
+		TestEqual(TEXT("Test non bitfield with bad value"), BitfieldTestValueOf8, FString(TEXT("")));
+	}
+	return true;
+}
+
+#endif // WITH_DEV_AUTOMATION_TESTS

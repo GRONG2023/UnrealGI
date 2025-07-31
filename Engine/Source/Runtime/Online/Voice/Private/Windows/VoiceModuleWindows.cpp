@@ -6,7 +6,7 @@
 #include "VoiceCaptureWindows.h"
 #include "VoiceCodecOpus.h"
 #include "Voice.h"
-#include "Runtime/HeadMountedDisplay/Public/IHeadMountedDisplayModule.h"
+#include "IHeadMountedDisplayModule.h"
 #include "HAL/IConsoleManager.h"
 #if PLATFORM_SUPPORTS_VOICE_CAPTURE
 
@@ -37,7 +37,7 @@ BOOL CALLBACK CaptureDeviceCallback(
 {
 	// @todo identify the proper device
 	FVoiceCaptureDeviceWindows* VCPtr = (FVoiceCaptureDeviceWindows*)(lpContext);
-	UE_LOG(LogVoiceCapture, Display, TEXT("Device: %s Desc: %s GUID: %s Context:0x%08x"), lpcstrDescription, lpcstrModule, *PrintMSGUID(lpGuid), lpContext);
+	UE_LOG(LogVoiceCapture, Display, TEXT("Device: %hs Desc: %hs GUID: %s Context:0x%08x"), lpcstrDescription, lpcstrModule, *PrintMSGUID(lpGuid), lpContext);
 
 	if (lpGuid != nullptr)
 	{
@@ -59,7 +59,7 @@ BOOL CALLBACK CaptureDeviceCallback(
 		// Allow HMD to override the default voice capture device
 		if (!VCPtr->HMDAudioInputDevice.IsEmpty() && !VCPtr->HMDAudioInputDevice.Compare((LPCWSTR)lpcstrModule))
 		{
-			UE_LOG(LogVoice, Display, TEXT("VoiceCapture device overridden by HMD to use '%s' %s"), lpcstrDescription, *PrintMSGUID(lpGuid));
+			UE_LOG(LogVoice, Display, TEXT("VoiceCapture device overridden by HMD to use '%hs' %s"), lpcstrDescription, *PrintMSGUID(lpGuid));
 			VCPtr->DefaultVoiceCaptureDevice = DeviceDesc;
 			VCPtr->Devices.Add(DeviceDescription, VCPtr->DefaultVoiceCaptureDevice);
 		}

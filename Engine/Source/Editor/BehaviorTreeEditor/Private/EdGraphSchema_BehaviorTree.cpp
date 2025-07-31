@@ -1,15 +1,18 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "EdGraphSchema_BehaviorTree.h"
-#include "Layout/SlateRect.h"
-#include "EdGraphNode_Comment.h"
-#include "Modules/ModuleManager.h"
+
+#include "AIGraphTypes.h"
+#include "BehaviorTree/BTCompositeNode.h"
 #include "BehaviorTree/BTDecorator.h"
 #include "BehaviorTree/BTService.h"
 #include "BehaviorTree/BTTaskNode.h"
-#include "BehaviorTree/BTCompositeNode.h"
+#include "BehaviorTree/Composites/BTComposite_SimpleParallel.h"
+#include "BehaviorTree/Tasks/BTTask_RunBehavior.h"
+#include "BehaviorTreeConnectionDrawingPolicy.h"
+#include "BehaviorTreeDebugger.h"
+#include "BehaviorTreeEditorModule.h"
 #include "BehaviorTreeEditorTypes.h"
-#include "EdGraph/EdGraph.h"
 #include "BehaviorTreeGraph.h"
 #include "BehaviorTreeGraphNode.h"
 #include "BehaviorTreeGraphNode_Composite.h"
@@ -17,21 +20,27 @@
 #include "BehaviorTreeGraphNode_Decorator.h"
 #include "BehaviorTreeGraphNode_Root.h"
 #include "BehaviorTreeGraphNode_Service.h"
-#include "BehaviorTreeGraphNode_Task.h"
-#include "Framework/MultiBox/MultiBoxBuilder.h"
-#include "ToolMenus.h"
-#include "ObjectEditorUtils.h"
-#include "BehaviorTreeEditorModule.h"
-#include "IBehaviorTreeEditor.h"
-#include "BehaviorTreeDebugger.h"
-#include "GraphEditorActions.h"
-#include "BehaviorTreeConnectionDrawingPolicy.h"
-#include "Toolkits/ToolkitManager.h"
-#include "BehaviorTree/BehaviorTree.h"
-#include "BehaviorTree/Tasks/BTTask_RunBehavior.h"
-#include "BehaviorTree/Composites/BTComposite_SimpleParallel.h"
 #include "BehaviorTreeGraphNode_SimpleParallel.h"
 #include "BehaviorTreeGraphNode_SubtreeTask.h"
+#include "BehaviorTreeGraphNode_Task.h"
+#include "Containers/EnumAsByte.h"
+#include "Containers/Set.h"
+#include "Containers/UnrealString.h"
+#include "EdGraph/EdGraph.h"
+#include "EdGraph/EdGraphNode.h"
+#include "EdGraph/EdGraphPin.h"
+#include "GraphEditorActions.h"
+#include "HAL/PlatformMath.h"
+#include "Internationalization/Internationalization.h"
+#include "Modules/ModuleManager.h"
+#include "ObjectEditorUtils.h"
+#include "Templates/Casts.h"
+#include "Templates/SharedPointer.h"
+#include "ToolMenu.h"
+#include "ToolMenuSection.h"
+#include "UObject/Class.h"
+#include "UObject/NameTypes.h"
+#include "UObject/ObjectPtr.h"
 
 #define LOCTEXT_NAMESPACE "BehaviorTreeEditor"
 
@@ -57,12 +66,16 @@ UEdGraphNode* FBehaviorTreeSchemaAction_AutoArrange::PerformAction(class UEdGrap
 
 UEdGraphSchema_BehaviorTree::UEdGraphSchema_BehaviorTree(const FObjectInitializer& ObjectInitializer) : Super(ObjectInitializer)
 {
+	CompositeDecoratorClass = UBehaviorTreeGraphNode_CompositeDecorator::StaticClass();
+	DecoratorClass = UBehaviorTreeGraphNode_Decorator::StaticClass();
+	TaskClass = UBehaviorTreeGraphNode_Task::StaticClass();
+	ServiceClass = UBehaviorTreeGraphNode_Service::StaticClass();
 }
 
 void UEdGraphSchema_BehaviorTree::CreateDefaultNodesForGraph(UEdGraph& Graph) const
 {
 	FGraphNodeCreator<UBehaviorTreeGraphNode_Root> NodeCreator(Graph);
-	UBehaviorTreeGraphNode_Root* MyNode = NodeCreator.CreateNode();
+	UBehaviorTreeGraphNode_Root* MyNode = NodeCreator.CreateNode(true, Cast<UBehaviorTreeGraph>(&Graph)->RootNodeClass);
 	NodeCreator.Finalize();
 	SetNodeMetaData(MyNode, FNodeMetadata::DefaultGraphNode);
 }
@@ -73,10 +86,10 @@ void UEdGraphSchema_BehaviorTree::GetGraphNodeContextActions(FGraphContextMenuBu
 
 	if (SubNodeFlags == ESubNode::Decorator)
 	{
-		const FText Category = FObjectEditorUtils::GetCategoryText(UBehaviorTreeGraphNode_CompositeDecorator::StaticClass());
+		const FText Category = FObjectEditorUtils::GetCategoryText(CompositeDecoratorClass);
 		UEdGraph* Graph = (UEdGraph*)ContextMenuBuilder.CurrentGraph;
-		UBehaviorTreeGraphNode_CompositeDecorator* OpNode = NewObject<UBehaviorTreeGraphNode_CompositeDecorator>(Graph);
-		TSharedPtr<FAISchemaAction_NewSubNode> AddOpAction = UAIGraphSchema::AddNewSubNodeAction(ContextMenuBuilder, Category, FText::FromString(OpNode->GetNodeTypeDescription()), FText::GetEmpty());
+		UBehaviorTreeGraphNode_CompositeDecorator* OpNode = NewObject<UBehaviorTreeGraphNode_CompositeDecorator>(Graph, CompositeDecoratorClass);
+		TSharedPtr<FAISchemaAction_NewSubNode> AddOpAction = UAIGraphSchema::AddNewSubNodeAction(ContextMenuBuilder, Category, FText::FromString(OpNode->GetNodeTypeDescription()), OpNode->GetTooltipText());
 		AddOpAction->ParentNode = Cast<UBehaviorTreeGraphNode>(ContextMenuBuilder.SelectedObjects[0]);
 		AddOpAction->NodeTemplate = OpNode;
 	}
@@ -84,19 +97,31 @@ void UEdGraphSchema_BehaviorTree::GetGraphNodeContextActions(FGraphContextMenuBu
 
 void UEdGraphSchema_BehaviorTree::GetSubNodeClasses(int32 SubNodeFlags, TArray<FGraphNodeClassData>& ClassData, UClass*& GraphNodeClass) const
 {
-	FBehaviorTreeEditorModule& EditorModule = FModuleManager::GetModuleChecked<FBehaviorTreeEditorModule>(TEXT("BehaviorTreeEditor"));
-	FGraphNodeClassHelper* ClassCache = EditorModule.GetClassCache().Get();
+	FGraphNodeClassHelper& ClassCache = GetClassCache();
 
 	if (SubNodeFlags == ESubNode::Decorator)
 	{
-		ClassCache->GatherClasses(UBTDecorator::StaticClass(), ClassData);
-		GraphNodeClass = UBehaviorTreeGraphNode_Decorator::StaticClass();
+		ClassCache.GatherClasses(UBTDecorator::StaticClass(), ClassData);
+		GraphNodeClass = DecoratorClass;
 	}
 	else
 	{
-		ClassCache->GatherClasses(UBTService::StaticClass(), ClassData);
-		GraphNodeClass = UBehaviorTreeGraphNode_Service::StaticClass();
+		ClassCache.GatherClasses(UBTService::StaticClass(), ClassData);
+		GraphNodeClass = ServiceClass;
 	}
+}
+
+FGraphNodeClassHelper& UEdGraphSchema_BehaviorTree::GetClassCache() const
+{
+	const FBehaviorTreeEditorModule& EditorModule = FModuleManager::GetModuleChecked<FBehaviorTreeEditorModule>(TEXT("BehaviorTreeEditor"));
+	FGraphNodeClassHelper* ClassHelper = EditorModule.GetClassCache().Get();
+	check(ClassHelper);
+	return *ClassHelper;
+}
+
+bool UEdGraphSchema_BehaviorTree::IsNodeSubtreeTask(const FGraphNodeClassData& NodeClass) const
+{
+	return NodeClass.GetClassName() == UBTTask_RunBehavior::StaticClass()->GetName();
 }
 
 void UEdGraphSchema_BehaviorTree::GetGraphContextActions(FGraphContextMenuBuilder& ContextMenuBuilder) const
@@ -111,22 +136,21 @@ void UEdGraphSchema_BehaviorTree::GetGraphContextActions(FGraphContextMenuBuilde
 	const bool bAllowComposites = bNoParent || !bOnlyTasks || bOnlyComposites;
 	const bool bAllowTasks = bNoParent || !bOnlyComposites || bOnlyTasks;
 
-	FBehaviorTreeEditorModule& EditorModule = FModuleManager::GetModuleChecked<FBehaviorTreeEditorModule>(TEXT("BehaviorTreeEditor"));
-	FGraphNodeClassHelper* ClassCache = EditorModule.GetClassCache().Get();
+	FGraphNodeClassHelper& ClassCache = GetClassCache();
 
 	if (bAllowComposites)
 	{
 		FCategorizedGraphActionListBuilder CompositesBuilder(TEXT("Composites"));
 
 		TArray<FGraphNodeClassData> NodeClasses;
-		ClassCache->GatherClasses(UBTCompositeNode::StaticClass(), NodeClasses);
+		ClassCache.GatherClasses(UBTCompositeNode::StaticClass(), NodeClasses);
 
 		const FString ParallelClassName = UBTComposite_SimpleParallel::StaticClass()->GetName();
 		for (const auto& NodeClass : NodeClasses)
 		{
 			const FText NodeTypeName = FText::FromString(FName::NameToDisplayString(NodeClass.ToString(), false));
 
-			TSharedPtr<FAISchemaAction_NewNode> AddOpAction = UAIGraphSchema::AddNewNodeAction(CompositesBuilder, NodeClass.GetCategory(), NodeTypeName, FText::GetEmpty());
+			TSharedPtr<FAISchemaAction_NewNode> AddOpAction = UAIGraphSchema::AddNewNodeAction(CompositesBuilder, NodeClass.GetCategory(), NodeTypeName, NodeClass.GetTooltip());
 
 			UClass* GraphNodeClass = UBehaviorTreeGraphNode_Composite::StaticClass();
 			if (NodeClass.GetClassName() == ParallelClassName)
@@ -147,16 +171,16 @@ void UEdGraphSchema_BehaviorTree::GetGraphContextActions(FGraphContextMenuBuilde
 		FCategorizedGraphActionListBuilder TasksBuilder(TEXT("Tasks"));
 
 		TArray<FGraphNodeClassData> NodeClasses;
-		ClassCache->GatherClasses(UBTTaskNode::StaticClass(), NodeClasses);
+		ClassCache.GatherClasses(UBTTaskNode::StaticClass(), NodeClasses);
 
 		for (const auto& NodeClass : NodeClasses)
 		{
 			const FText NodeTypeName = FText::FromString(FName::NameToDisplayString(NodeClass.ToString(), false));
 
-			TSharedPtr<FAISchemaAction_NewNode> AddOpAction = UAIGraphSchema::AddNewNodeAction(TasksBuilder, NodeClass.GetCategory(), NodeTypeName, FText::GetEmpty());
+			TSharedPtr<FAISchemaAction_NewNode> AddOpAction = UAIGraphSchema::AddNewNodeAction(TasksBuilder, NodeClass.GetCategory(), NodeTypeName, NodeClass.GetTooltip());
 			
-			UClass* GraphNodeClass = UBehaviorTreeGraphNode_Task::StaticClass();
-			if (NodeClass.GetClassName() == UBTTask_RunBehavior::StaticClass()->GetName())
+			UClass* GraphNodeClass = TaskClass;
+			if (IsNodeSubtreeTask(NodeClass))
 			{
 				GraphNodeClass = UBehaviorTreeGraphNode_SubtreeTask::StaticClass();
 			}

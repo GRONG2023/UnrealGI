@@ -20,20 +20,11 @@ public class CommonMenuExtensions : ModuleRules
 		PrivateDependencyModuleNames.AddRange(
 			new string[] {
 				"Core",
-				"CoreUObject",
-				"LauncherPlatform",
 				"InputCore",
 				"Slate",
 				"SlateCore",
-				"EditorStyle",
 				"Engine",
-				"MessageLog",
 				"UnrealEd", 
-				"RenderCore",
-				"EngineSettings",
-				"HierarchicalLODOutliner",
-				"HierarchicalLODUtilities",
-				"MaterialShaderQualitySettings",
 				"ToolMenus",
 			}
 		);

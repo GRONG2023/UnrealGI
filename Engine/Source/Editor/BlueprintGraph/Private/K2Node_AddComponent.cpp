@@ -2,21 +2,44 @@
 
 
 #include "K2Node_AddComponent.h"
+
 #include "Components/ActorComponent.h"
-#include "Serialization/ObjectWriter.h"
-#include "Serialization/ObjectReader.h"
-#include "Components/SceneComponent.h"
-#include "GameFramework/Actor.h"
 #include "Components/ChildActorComponent.h"
-#include "Engine/BlueprintGeneratedClass.h"
-#include "EdGraphSchema_K2.h"
-#include "Kismet2/BlueprintEditorUtils.h"
-#include "Kismet2/KismetEditorUtilities.h"
-#include "UObject/ReleaseObjectVersion.h"
-#include "KismetCompilerMisc.h"
-#include "KismetCompiler.h"
+#include "Components/SceneComponent.h"
+#include "Containers/EnumAsByte.h"
+#include "Containers/Map.h"
 #include "DiffResults.h"
+#include "EdGraph/EdGraphPin.h"
+#include "EdGraph/EdGraphSchema.h"
+#include "EdGraphSchema_K2.h"
+#include "Engine/Blueprint.h"
+#include "Engine/BlueprintGeneratedClass.h"
+#include "Engine/Engine.h"
+#include "Engine/EngineTypes.h"
+#include "Engine/MemberReference.h"
+#include "GameFramework/Actor.h"
+#include "HAL/PlatformCrt.h"
+#include "Internationalization/Internationalization.h"
+#include "Kismet2/BlueprintEditorUtils.h"
+#include "Kismet2/CompilerResultsLog.h"
+#include "Kismet2/KismetEditorUtilities.h"
+#include "KismetCompiler.h"
+#include "KismetCompilerMisc.h"
+#include "Math/Transform.h"
+#include "Serialization/Archive.h"
+#include "Templates/Casts.h"
+#include "Templates/SubclassOf.h"
 #include "UObject/BlueprintsObjectVersion.h" // for ComponentTemplateClassSupport
+#include "UObject/Class.h"
+#include "UObject/Object.h"
+#include "UObject/PropertyPortFlags.h"
+#include "UObject/ReleaseObjectVersion.h"
+#include "UObject/UnrealNames.h"
+#include "UObject/UnrealType.h"
+#include "UObject/WeakObjectPtr.h"
+#include "UObject/WeakObjectPtrTemplates.h"
+
+class UEdGraph;
 
 #define LOCTEXT_NAMESPACE "K2Node_AddComponent"
 
@@ -426,7 +449,7 @@ void UK2Node_AddComponent::FindDiffs(class UEdGraphNode* OtherNode, struct FDiff
 			Diff.Node1 = this;
 			Diff.Node2 = OtherNode;
 			Diff.ToolTip = LOCTEXT("DIF_ComponentTemplatePropertyToolTip", "A property of the component template has changed");
-			Diff.DisplayColor = FLinearColor(0.25f, 0.71f, 0.85f);
+			Diff.Category = EDiffType::MODIFICATION;
 
 			DiffProperties(MyComponent->GetClass(), OtherComponent->GetClass(), MyComponent, OtherComponent, Results, Diff);
 		}
@@ -567,9 +590,7 @@ void UK2Node_AddComponent::MakeNewComponentTemplate()
 			// Copy the old template data over to the new template if it's compatible
 			if ((SourceTemplate != nullptr) && (SourceTemplate->GetClass()->IsChildOf(ComponentClass)))
 			{
-				TArray<uint8> SavedProperties;
-				FObjectWriter Writer(SourceTemplate, SavedProperties);
-				FObjectReader(NewTemplate, SavedProperties);
+				UEngine::CopyPropertiesForUnrelatedObjects(SourceTemplate, NewTemplate);
 			}
 			else if (TemplateBlueprint.Len() > 0)
 			{
@@ -580,9 +601,7 @@ void UK2Node_AddComponent::MakeNewComponentTemplate()
 					SourceTemplate = SourceBlueprint->FindTemplateByName(TemplateName);
 					if ((SourceTemplate != nullptr) && (SourceTemplate->GetClass()->IsChildOf(ComponentClass)))
 					{
-						TArray<uint8> SavedProperties;
-						FObjectWriter Writer(SourceTemplate, SavedProperties);
-						FObjectReader(NewTemplate, SavedProperties);
+						UEngine::CopyPropertiesForUnrelatedObjects(SourceTemplate, NewTemplate);
 					}
 				}
 

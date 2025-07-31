@@ -3,7 +3,21 @@
 #pragma once
 
 #include "GlobalShader.h"
+#include "Math/IntVector.h"
+#include "Math/UnrealMathSSE.h"
+#include "Misc/AssertionMacros.h"
+#include "RHICommandList.h"
+#include "RHIDefinitions.h"
+#include "Serialization/MemoryLayout.h"
+#include "Shader.h"
+#include "ShaderCompilerCore.h"
+#include "ShaderCore.h"
 #include "ShaderParameterUtils.h"
+#include "ShaderParameters.h"
+#include "DataDrivenShaderPlatformInfo.h"
+
+class FPointerTableBase;
+class FRHIComputeShader;
 
 enum class ECopyTextureResourceType
 {
@@ -52,6 +66,16 @@ protected:
 	}
 
 public:
+	static inline void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment)
+	{
+		FGlobalShader::ModifyCompilationEnvironment(Parameters, OutEnvironment);
+
+		if (FDataDrivenShaderPlatformInfo::GetRequiresBindfulUtilityShaders(Parameters.Platform))
+		{
+			OutEnvironment.CompilerFlags.Add(CFLAG_ForceBindful);
+		}
+	}
+
 	inline const FShaderResourceParameter& GetSrcResourceParam() { return SrcResourceParam; }
 	inline const FShaderResourceParameter& GetDstResourceParam() { return DstResourceParam; }
 
@@ -66,10 +90,13 @@ public:
 		check(SrcOffset.GetMin() >= 0 && DstOffset.GetMin() >= 0 && Dimensions.GetMin() >= 0);
 		check(Context.DstType != ECopyTextureResourceType::Texture2D || Dimensions.Z <= 1);
 
-		FRHIComputeShader* ShaderRHI = RHICmdList.GetBoundComputeShader();
-		SetShaderValue(RHICmdList, ShaderRHI, SrcOffsetParam, SrcOffset);
-		SetShaderValue(RHICmdList, ShaderRHI, DstOffsetParam, DstOffset);
-		SetShaderValue(RHICmdList, ShaderRHI, DimensionsParam, Dimensions);
+		FRHIBatchedShaderParameters& BatchedParameters = RHICmdList.GetScratchShaderParameters();
+
+		SetShaderValue(BatchedParameters, SrcOffsetParam, SrcOffset);
+		SetShaderValue(BatchedParameters, DstOffsetParam, DstOffset);
+		SetShaderValue(BatchedParameters, DimensionsParam, Dimensions);
+
+		RHICmdList.SetBatchedShaderParameters(RHICmdList.GetBoundComputeShader(), BatchedParameters);
 
 		RHICmdList.DispatchComputeShader(
 			FMath::DivideAndRoundUp(uint32(Dimensions.X), Context.ThreadGroupSizeX),
@@ -124,7 +151,7 @@ public:
 
 	static inline void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment)
 	{
-		FGlobalShader::ModifyCompilationEnvironment(Parameters, OutEnvironment);
+		FCopyTextureCS::ModifyCompilationEnvironment(Parameters, OutEnvironment);
 
 		OutEnvironment.SetDefine(TEXT("THREADGROUPSIZE_X"), ThreadGroupSizeX);
 		OutEnvironment.SetDefine(TEXT("THREADGROUPSIZE_Y"), ThreadGroupSizeY);

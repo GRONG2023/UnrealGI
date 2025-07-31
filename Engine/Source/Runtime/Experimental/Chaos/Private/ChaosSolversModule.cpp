@@ -180,8 +180,8 @@ void FChaosSolversModule::SyncTask(bool bForceBlockingSync /*= false*/)
 #endif
 }
 
-Chaos::FPBDRigidsSolver* FChaosSolversModule::CreateSolver(UObject* InOwner, Chaos::EThreadingMode InThreadingMode
-#if CHAOS_CHECKED
+Chaos::FPBDRigidsSolver* FChaosSolversModule::CreateSolver(UObject* InOwner, Chaos::FReal InAsyncDt, Chaos::EThreadingMode InThreadingMode
+#if CHAOS_DEBUG_NAME
 	, const FName& DebugName
 #endif
 )
@@ -192,28 +192,27 @@ Chaos::FPBDRigidsSolver* FChaosSolversModule::CreateSolver(UObject* InOwner, Cha
 	FChaosScopeSolverLock SolverScopeLock;
 	
 	EMultiBufferMode SolverBufferMode = InThreadingMode == EThreadingMode::SingleThread ? EMultiBufferMode::Single : EMultiBufferMode::Double;
-	
-	auto* NewSolver = new FPBDRigidsSolver(SolverBufferMode,InOwner);
+	auto* NewSolver = new FPBDRigidsSolver(SolverBufferMode,InOwner, InAsyncDt);
 	AllSolvers.Add(NewSolver);
 
 	// Add The solver to the owner list
 	TArray<FPhysicsSolverBase*>& OwnerSolverList = SolverMap.FindOrAdd(InOwner);
 	OwnerSolverList.Add(NewSolver);
 
-#if CHAOS_CHECKED
+#if CHAOS_DEBUG_NAME
     // Add solver number to solver name
 	const FName NewDebugName = *FString::Printf(TEXT("%s (%d)"), DebugName == NAME_None ? TEXT("Solver") : *DebugName.ToString(), AllSolvers.Num() - 1);
 	NewSolver->SetDebugName(NewDebugName);
 #endif
 
-	// Set up the material lists on the new solver, copying from the current master list
+	// Set up the material lists on the new solver, copying from the current primary list
 	{
 		FPhysicalMaterialManager& Manager =	Chaos::FPhysicalMaterialManager::Get();
 		FPhysicsSceneGuardScopedWrite ScopedWrite(NewSolver->GetExternalDataLock_External());
-		NewSolver->QueryMaterials_External = Manager.GetMasterMaterials_External();
-		NewSolver->QueryMaterialMasks_External = Manager.GetMasterMaterialMasks_External();
-		NewSolver->SimMaterials = Manager.GetMasterMaterials_External();
-		NewSolver->SimMaterialMasks = Manager.GetMasterMaterialMasks_External();
+		NewSolver->QueryMaterials_External = Manager.GetPrimaryMaterials_External();
+		NewSolver->QueryMaterialMasks_External = Manager.GetPrimaryMaterialMasks_External();
+		NewSolver->SimMaterials = Manager.GetPrimaryMaterials_External();
+		NewSolver->SimMaterialMasks = Manager.GetPrimaryMaterialMasks_External();
 	}
 
 	return NewSolver;
