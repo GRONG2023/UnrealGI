@@ -90,14 +90,14 @@ if [ -z "$1" ]; then
   Run BuildTarget BlankProgram
   Run BuildTarget UnrealPak
   Run BuildTarget SlateViewer 
-  Run BuildTarget UE4Client
-  Run BuildTarget UE4Game
-  Run BuildTarget UE4Server 
+  Run BuildTarget UnrealClient
+  Run BuildTarget UnrealGame
+  Run BuildTarget UnrealServer 
 
   # build editor targets, roughly ascending by build time
   Run BuildTarget ShaderCompileWorker
   Run BuildTarget UnrealFrontend
-  Run BuildTarget UE4Editor
+  Run BuildTarget UnrealEditor
   popd >> /dev/null
 
 else

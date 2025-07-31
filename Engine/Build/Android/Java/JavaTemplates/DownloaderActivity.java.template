@@ -59,7 +59,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.ArrayList;
 
-import com.epicgames.ue4.GameActivity;
+import com.epicgames.unreal.GameActivity;
 
 /**
  * This is sample code for a project built against the downloader library. It
@@ -601,7 +601,7 @@ public class DownloaderActivity extends Activity implements IDownloaderClient {
 					PendingIntent pendingIntent = PendingIntent.getActivity(
 							DownloaderActivity.this,
 							0, intentToLaunchThisActivityFromNotification,
-							PendingIntent.FLAG_UPDATE_CURRENT);
+							PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
 					// Request to start the download
 					int startResult = DownloaderClientMarshaller.startDownloadServiceIfRequired(this,
 							pendingIntent, OBBDownloaderService.class);

@@ -21,7 +21,6 @@ and an up-to-date list should be maintained (and installed) by Setup.sh -
 feel free to suggest modifications. Automated install generally works for Ubuntu only.
 
 Most important dependencies:
-- mono 3.x (2.x may work, but is not recommended), including xbuild and C# compiler (*mcs), and libraries for NET 4.0 framework.
 - clang 3.9.0 (clang 3.5 through 3.8 should also be able to compile the engine).
 
 You will also need at least 20 GB of free disk space and a relatively powerful
@@ -47,8 +46,11 @@ How to set up the sources for building, step by step:
 
 1. Clone EpicGames/UnrealEngine repository
 
-    ``git clone https://github.com/EpicGames/UnrealEngine -b release``
-    
+	``git clone https://github.com/EpicGames/UnrealEngine -b <branch>``
+	i.g. ``git clone https://github.com/EpicGames/UnrealEngine -b ue5-main``
+	You can see the more explanation about how we use branch version in root directory UnrealEngine/README.md.
+	Early access 1 and 2 can be downloadable from Releases.
+
 2. Run Setup.sh once.
 
     ``cd UnrealEngine``
@@ -68,8 +70,7 @@ How to set up the sources for building, step by step:
 
 Updating the sources later can be done with git pull. The tool to download binary files will be
 registered as a post-merge hook by Setup.sh, so third party libraries will be updated automatically
-(if needed). If you ever need to run it directly, it can be found in Engine/Binaries/DotNET/ directory
-(GitDependencies.exe, which needs to be invoked through mono).
+(if needed). If you ever need to run it directly, it can be found in Engine/Binaries/DotNET/ directory.
 
 
 
@@ -80,7 +81,7 @@ GenerateProjectFiles.sh produces a number of "project" files, including Makefile
 project in your favorite IDE and qmake project file. Both QtCreator and KDevelop 4.6+ are known to handle the project well 
 (although the latter takes about 3-4 GB of resident RAM to load the project).
 
-The targets match the name of the resulting binary, e.g. UE4Editor-Linux-Debug or UE4Game. You can build them
+The targets match the name of the resulting binary, e.g. UnrealEditor-Linux-Debug or UnrealGame. You can build them
 by just typing make <target> in the engine's root folder.
 
 4.8 and later versions have simplified building the editor by providing makefile targets "StandardSet" and "DebugSet", the former
@@ -90,35 +91,35 @@ being the default. You can now just type
 
 to build the editor. Alternatively, build the following targets:
 
-    make CrashReportClient ShaderCompileWorker UnrealLightmass UnrealPak UE4Editor
+    make CrashReportClient ShaderCompileWorker UnrealLightmass InterchangeWorker UnrealPak UnrealEditor
 
 If you intend to develop the editor, you can build a debug configuration of it:
 
-    make UE4Editor-Linux-Debug
+    make UnrealEditor-Linux-Debug
 
 (note that it will still use development ShaderCompileWorker / UnrealLightmass). This
 configuration runs much slower.
 
 If you want to rebuild the editor from scatch, you can use
 
-    make UE4Editor ARGS="-clean" && make UE4Editor
+    make UnrealEditor ARGS="-clean" && make UnrealEditor
 
 In order to run it:
 
     cd Engine/Binaries/Linux/
-    ./UE4Editor
+    ./UnrealEditor
 
 Or, if you want to start it with a specific project:
 
     cd Engine/Binaries/Linux/
-    ./UE4Editor "~/Documents/Unreal Projects/MyProject/MyProject.uproject"
+    ./UnrealEditor "~/Documents/Unreal Projects/MyProject/MyProject.uproject"
     
 You can also append -game if you want to run the project as a game (you can also do that from the running editor).
 
 Notes
 -----
 
-Depending on mono version and some other not yet clarified circumstances (this may be relevant: 
+Depending on dotnet version and some other not yet clarified circumstances (this may be relevant: 
 http://stackoverflow.com/questions/13859467/ravendb-client-onlinux-connecting-to-windows-server-using-mono-http),
 binary downloader tool invoked by Setup.sh may fail. In that case, Setup.sh will keep re-running it
 until it succeeds (or at least stops crashing). You may want to keep an eye on this as there is

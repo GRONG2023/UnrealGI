@@ -6,11 +6,18 @@ SCRIPT_DIR=$(cd "$(dirname "$BASH_SOURCE")" ; pwd)
 SCRIPT_NAME=$(basename "$BASH_SOURCE")
 
 # https://stackoverflow.com/questions/23513045/how-to-check-if-a-process-is-running-inside-docker-container
-if ! $(grep -q "/docker/" /proc/1/cgroup); then
+# https://unix.stackexchange.com/questions/607695/how-to-check-if-its-docker-or-host-machine-inside-bash-script
+# cgroups 2 busted the first way, attempting a new way here but may break again in the future
+if ! [ -f "/.dockerenv" ]; then
 
   ##############################################################################
   # host commands
   ##############################################################################
+
+  ZLIB_PATH=../../../../../Engine/Source/ThirdParty/zlib/v1.2.8/
+
+  # Need to static link zlib for being able to compress debug files
+  cp -rpvf $ZLIB_PATH ./
 
   ImageName=build_linux_toolchain
 

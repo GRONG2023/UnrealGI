@@ -5,25 +5,18 @@ set -e
 
 SCRIPT_PATH=$0
 if [ -L "$SCRIPT_PATH" ]; then
-	SCRIPT_PATH=$(dirname "$SCRIPT_PATH")/$(readlink "$SCRIPT_PATH")
+	SCRIPT_PATH="$(dirname "$SCRIPT_PATH")/$(readlink "$SCRIPT_PATH")"
 fi
 
 cd "$(dirname "$SCRIPT_PATH")" && SCRIPT_PATH="`pwd`/$(basename "$SCRIPT_PATH")"
 
-if [ ! -f ../../../Binaries/DotNET/GitDependencies.exe ]; then
-	echo "Cannot find GitDependencies.exe. This script should be placed in Engine/Build/BatchFiles/Mac."
-	exit 1
-fi 
-
-source SetupEnvironment.sh -mono "`pwd`"
-
 cd ../../../..
 
-if [ ! -f Engine/Binaries/ThirdParty/Mono/Mac/lib/libmsvcrt.dylib ] && [ -f /usr/lib/libc.dylib ]; then
-	ln -s /usr/lib/libc.dylib Engine/Binaries/ThirdParty/Mono/Mac/lib/libmsvcrt.dylib
-fi
+# Select the preferred architecture for the current system
+ARCH=x64
+[ $(uname -m) == "arm64" ] && ARCH=arm64 
 
-mono Engine/Binaries/DotNET/GitDependencies.exe "$@"
+./Engine/Binaries/DotNET/GitDependencies/osx-$ARCH/GitDependencies "$@"
 
 pushd "$(dirname "$SCRIPT_PATH")" > /dev/null
 sh FixDependencyFiles.sh
